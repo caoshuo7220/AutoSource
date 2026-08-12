@@ -1,1 +1,10 @@
 .superpowers/
+__pycache__/
+tests/__pycache__/
+.claude/skills/__pycache__/
+# autosource output files
+算力服务器.json
+算力服务器.csv
+算力服务器_clean.json
+# local overrides (not committed)
+.claude/settings.local.json

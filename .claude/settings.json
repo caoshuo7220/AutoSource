@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebSearch(*",
+      "Write(**",
+      "Read(**",
+      "Edit(**",
+      "Bash(python .claude/skills/autosource/*)",
+      "Bash(pip install *)",
+      "Skill(autosource)",
+      "Skill(autosource:*)"
+    ],
+    "additionalDirectories": [
+      ".claude/skills"
+    ]
+  }
+}
