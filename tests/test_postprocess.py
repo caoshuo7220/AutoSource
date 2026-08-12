@@ -74,6 +74,21 @@ class TestCheckUrl:
 
         assert check_url("https://dead.com") is False
 
+    def test_first_attempt_fails_retry_succeeds(self, mocker):
+        """HEAD+GET both fail on first iteration, HEAD succeeds on retry."""
+        import requests as req_mod
+        mock_head = mocker.patch("requests.head")
+        # First call: HEAD fails; second call (retry): HEAD succeeds
+        mock_head.side_effect = [req_mod.ConnectionError(), MagicMock(status_code=200)]
+        mock_get = mocker.patch("requests.get")
+        # GET is only called when HEAD fails (first iteration)
+        mock_get.side_effect = req_mod.ConnectionError()
+
+        assert check_url("https://flaky.com") is True
+        # HEAD called twice (fail + retry), GET called once (only on first fail)
+        assert mock_head.call_count == 2
+        assert mock_get.call_count == 1
+
 
 class TestProcess:
     def test_full_pipeline(self, mocker):
