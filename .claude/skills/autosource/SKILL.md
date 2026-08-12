@@ -36,8 +36,9 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 
 ### 2. 数据源搜索
 
-对每个叶子节点进行 web_search。策略：
+对每个叶子节点逐一进行 web_search，不得合并或跳过任何节点。策略：
 
+- 每个节点必须至少执行一次搜索，不可因内容相近而合并
 - 每个节点构造合适的搜索关键词（覆盖中英文）
 - 若首次搜索无结果，更换关键词至少 2 次重新搜索
 - 若更换后仍无结果，该节点标记为"无数据源"
@@ -68,9 +69,10 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 
 ### 4. 后处理
 
-执行去重和 URL 校验脚本（首次运行需安装依赖：`pip install requests`）：
+执行去重和 URL 校验脚本。若 `requests` 未安装，先执行 `pip install requests` 再运行脚本：
 
 ```bash
+python -c "import requests" 2>/dev/null || pip install requests -q
 python .claude/skills/autosource/postprocess.py outputs/{领域词}_{时间戳}/raw.json outputs/{领域词}_{时间戳}/clean.json
 ```
 
