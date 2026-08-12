@@ -89,7 +89,7 @@ python .claude/skills/autosource/postprocess.py outputs/{领域词}_{时间戳}/
 
 读取 `outputs/{领域词}_{时间戳}/clean.json`，生成 CSV 文件 `outputs/{领域词}_{时间戳}/数据源清单.csv`。
 
-- 编码：UTF-8 BOM（兼容 Excel 直接打开）
+- 编码：写入时在文件开头插入 UTF-8 BOM 字符（`﻿`），确保 Excel 直接打开不乱码
 - 表头：数据源名称, 分类路径, 数据源类型, 访问地址, 简要说明
 
 生成 CSV 后，删除中间 JSON 文件（`raw.json` 和 `clean.json`），只保留 CSV。
