@@ -63,7 +63,7 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 
 ### 4. 后处理
 
-执行去重和 URL 校验脚本：
+执行去重和 URL 校验脚本（首次运行需安装依赖：`pip install requests`）：
 
 ```bash
 python .claude/skills/autosource/postprocess.py {领域}.json {领域}_clean.json
