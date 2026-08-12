@@ -6,11 +6,15 @@
       "Write(**",
       "Read(**",
       "Edit(**",
-      "Bash(python .claude/skills/autosource/*)",
+      "Bash(python .claude/skills/autosource/postprocess.py *)",
+      "Bash(python -c *)",
+      "Bash(mkdir *)",
+      "Bash(rm *)",
       "Bash(pip install *)",
       "Skill(autosource)",
       "Skill(autosource:*)",
-      "Skill(autosource-search)"    ],
+      "Skill(autosource-search)"
+    ],
     "additionalDirectories": [
       ".claude/skills"
     ]
