@@ -5,7 +5,7 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 
 # AutoSource — 数据源自动发现
 
-当用户输入 `/autosource <领域描述>` 时，执行以下流程。
+当用户输入 `/autosource <领域描述>` 时，执行以下流程。所有中间文件和最终产出统一放在 `outputs/` 目录下。
 
 ## 参数
 
@@ -41,7 +41,7 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 
 ### 3. 结果整理
 
-将搜索到的数据源整理为结构化 JSON，每条包含以下字段：
+将搜索到的数据源整理为结构化 JSON（内部中间文件），每条包含以下字段：
 
 ```json
 {
@@ -59,14 +59,14 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 - 分类路径术语统一，同一概念不出现多种表述
 - 仅收录公开可访问的数据源，不含需账号、付费、非公开的
 
-将 JSON 写入文件 `{领域}.json`（领域名中的空格替换为 `_`）。
+将 JSON 写入 `outputs/{领域}_raw.json`（领域名空格替换为 `_`）。
 
 ### 4. 后处理
 
 执行去重和 URL 校验脚本（首次运行需安装依赖：`pip install requests`）：
 
 ```bash
-python .claude/skills/autosource/postprocess.py {领域}.json {领域}_clean.json
+python .claude/skills/autosource/postprocess.py outputs/{领域}_raw.json outputs/{领域}_clean.json
 ```
 
 脚本完成：
@@ -78,13 +78,12 @@ python .claude/skills/autosource/postprocess.py {领域}.json {领域}_clean.jso
 
 ### 5. 导出 CSV
 
-读取清洗后的 JSON 文件 `{领域}_clean.json`，按以下表头生成 CSV：
+读取 `outputs/{领域}_clean.json`，生成 CSV 文件 `outputs/{领域}.csv`。
 
-```
-数据源名称, 分类路径, 数据源类型, 访问地址, 简要说明
-```
+- 编码：UTF-8 BOM（兼容 Excel 直接打开）
+- 表头：数据源名称, 分类路径, 数据源类型, 访问地址, 简要说明
 
-编码 UTF-8 BOM（兼容 Excel 直接打开）。写入 `{领域}.csv`。
+生成 CSV 后，删除中间 JSON 文件（`outputs/{领域}_raw.json` 和 `outputs/{领域}_clean.json`），只保留 CSV。
 
 ### 6. 汇总报告
 
@@ -97,14 +96,12 @@ python .claude/skills/autosource/postprocess.py {领域}.json {领域}_clean.jso
 有效 URL: Y 条 (Z%)
 无效/移除: N 条
 无结果节点: {列表或"无"}
-输出文件:
-  JSON: {path}
-  CSV:  {path}
+输出: outputs/{领域}.csv
 ```
 
 ## 效果数据
 
-每次执行完成后，在输出 JSON 同级目录写入 `{领域}_stats.json`，记录：
+每次执行完成后，写入 `outputs/{领域}_stats.json`，记录：
 
 ```json
 {
