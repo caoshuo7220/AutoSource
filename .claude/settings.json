@@ -9,8 +9,8 @@
       "Bash(python .claude/skills/autosource/*)",
       "Bash(pip install *)",
       "Skill(autosource)",
-      "Skill(autosource:*)"
-    ],
+      "Skill(autosource:*)",
+      "Skill(autosource-search)"    ],
     "additionalDirectories": [
       ".claude/skills"
     ]
