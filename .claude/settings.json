@@ -8,6 +8,7 @@
       "Edit(**",
       "Bash(python .claude/skills/autosource/postprocess.py *)",
       "Bash(python -c *)",
+      "Bash(cd *)",
       "Bash(mkdir *)",
       "Bash(rm *)",
       "Bash(pip install *)",
