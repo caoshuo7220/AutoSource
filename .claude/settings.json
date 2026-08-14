@@ -3,6 +3,8 @@
     "allow": [
       "WebSearch",
       "WebSearch(*",
+      "WebFetch",
+      "WebFetch(*",
       "Write(**",
       "Read(**",
       "Edit(**",
