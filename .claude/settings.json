@@ -21,5 +21,18 @@
     "additionalDirectories": [
       ".claude/skills"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "WebSearch|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/skills/autosource/log_tool.py outputs/search_log.jsonl"
+          }
+        ]
+      }
+    ]
   }
 }

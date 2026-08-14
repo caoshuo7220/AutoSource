@@ -1,16 +1,19 @@
-"""AutoSource 后处理流水线：去重 → 导出 CSV → 效果统计 → 清理中间文件。
+"""AutoSource 后处理流水线：证据校验 → 去重 → 导出 CSV → 效果统计 → 清理中间文件。
 
 分工原则：LLM（编排层）只负责语义环节，唯一产出的中间产物是 raw.json；
 本脚本保证其余所有确定性环节：
 
+- 证据校验（grounded check）：候选 URL 必须能逐字出现在证据留痕中（留痕由
+  PostToolUse hook 在每次 WebSearch/WebFetch 时由系统自动记录，模型不可篡改），
+  否则拒绝该条并计数——从结构上杜绝模型编造 URL
 - 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）
 - 域名 + 名称联合去重
 - 用 csv 标准库导出数据源清单（UTF-8 BOM，转义交给标准库）
 - 计算各节点候选数与体裁分布，写 stats CSV（含空节点检测）
-- 删除中间产物 raw.json
+- 删除中间产物 raw.json 与证据留痕
 
 用法:
-    python postprocess.py <raw.json> [--out-dir DIR] [--keep-raw]
+    python postprocess.py <raw.json> [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
 
 raw.json 结构:
     {
@@ -22,7 +25,7 @@ raw.json 结构:
           "name": "数据源名称",
           "category_path": "层级1-层级2-叶子节点",
           "source_type": "内容体裁",
-          "url": "主入口 URL",
+          "url": "主入口 URL（必须逐字来自搜索结果）",
           "description": "简要说明"
         }
       ]
@@ -42,7 +45,10 @@ from urllib.parse import urlparse
 
 SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "访问地址", "简要说明"]
 STATS_CSV_HEADER = ["领域", "时间戳", "分类节点", "候选数", "体裁分布", "无结果节点",
-                    "总候选数", "去重移除", "最终收录", "模型", "脚本处理耗时(秒)"]
+                    "总候选数", "去重移除", "证据校验移除", "最终收录", "模型",
+                    "脚本处理耗时(秒)"]
+
+DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
 
 
 def _domain(url: str) -> str:
@@ -71,6 +77,18 @@ def leaf_node(category_path: str, nodes: list[str]) -> Optional[str]:
     """取 category_path 对应的叶子节点：节点名的最长后缀匹配（节点名本身可含 -）。"""
     matches = [n for n in nodes if category_path == n or category_path.endswith("-" + n)]
     return max(matches, key=len) if matches else None
+
+
+def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], int]:
+    """证据校验：URL 必须逐字出现在证据留痕中，否则拒绝该条（返回通过数）。"""
+    kept: list[dict] = []
+    ungrounded = 0
+    for s in sources:
+        if s.get("url", "") in evidence:
+            kept.append(s)
+        else:
+            ungrounded += 1
+    return kept, ungrounded
 
 
 def write_source_csv(path: Path, sources: list[dict]) -> None:
@@ -108,6 +126,7 @@ def write_stats_csv(path: Path, summary: dict) -> None:
                 empty_nodes,
                 summary["total_found"],
                 summary["removed_duplicates"],
+                summary["ungrounded"],
                 summary["kept"],
                 summary["model"],
                 summary["elapsed_seconds"],
@@ -131,6 +150,7 @@ def compute_stats(kept: list[dict], nodes: list[str]) -> dict:
 
 
 def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
+        evidence_log: Optional[str] = None,
         now: Optional[datetime] = None) -> dict:
     """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。"""
     start = time.perf_counter()
@@ -157,8 +177,17 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
             continue
         valid.append(s)
 
-    kept = deduplicate(valid)
-    removed = len(valid) - len(kept)
+    # 证据校验：候选 URL 必须逐字出现在证据留痕中（PostToolUse hook 系统记录）
+    log_path = Path(evidence_log) if evidence_log else Path(DEFAULT_EVIDENCE_LOG)
+    if valid and not log_path.exists():
+        raise FileNotFoundError(
+            f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
+            "没有证据链就不放行候选，这是设计使然）")
+    evidence = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    grounded, ungrounded = check_grounded(valid, evidence)
+
+    kept = deduplicate(grounded)
+    removed = len(grounded) - len(kept)
     node_stats = compute_stats(kept, nodes)
 
     now = now or datetime.now()
@@ -181,6 +210,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "timestamp_display": now.strftime("%Y-%m-%d %H:%M:%S"),
         "total_found": len(valid),
         "removed_duplicates": removed,
+        "ungrounded": ungrounded,
         "kept": len(kept),
         "invalid": invalid,
         "unmatched": node_stats["unmatched"],
@@ -194,6 +224,8 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
 
     if not keep_raw:
         raw.unlink(missing_ok=True)
+        if log_path.exists():
+            log_path.unlink(missing_ok=True)
 
     return summary
 
@@ -202,7 +234,7 @@ def _print_summary(summary: dict) -> None:
     print(f"领域: {summary['domain']}")
     print(f"输出目录: {summary['outdir']}")
     print(f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
-          f"  最终收录: {summary['kept']}")
+          f"  证据校验移除: {summary['ungrounded']}  最终收录: {summary['kept']}")
     if summary["invalid"]:
         print(f"无效记录(缺名称/URL): {summary['invalid']}")
     if summary["unmatched"]:
@@ -223,12 +255,15 @@ def _print_summary(summary: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="AutoSource 后处理流水线")
     parser.add_argument("raw_json", help="编排层产出的 raw.json 路径")
+    parser.add_argument("--evidence-log", default=DEFAULT_EVIDENCE_LOG,
+                        help="证据留痕文件（PostToolUse hook 自动记录，默认 outputs/search_log.jsonl）")
     parser.add_argument("--out-dir", default="outputs", help="输出根目录（默认 outputs）")
-    parser.add_argument("--keep-raw", action="store_true", help="保留 raw.json 不删除")
+    parser.add_argument("--keep-raw", action="store_true", help="保留 raw.json 与证据留痕不删除")
     args = parser.parse_args()
 
     try:
-        summary = run(args.raw_json, out_dir=args.out_dir, keep_raw=args.keep_raw)
+        summary = run(args.raw_json, out_dir=args.out_dir, keep_raw=args.keep_raw,
+                      evidence_log=args.evidence_log)
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)

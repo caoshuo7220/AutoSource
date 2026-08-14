@@ -1,7 +1,8 @@
-"""postprocess.py 的单元测试。"""
+"""postprocess.py 与 log_tool.py 的单元测试。"""
 import csv
 import io
 import json
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource"
 sys.path.insert(0, str(SKILL_DIR))
 
-from postprocess import deduplicate, leaf_node, run, sanitize_domain
+from postprocess import check_grounded, deduplicate, leaf_node, run, sanitize_domain
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -24,6 +25,22 @@ def read_csv_rows(path: Path) -> list[list[str]]:
 def write_raw(tmp_path: Path, data: dict) -> Path:
     p = tmp_path / "raw.json"
     p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def write_evidence(tmp_path: Path, sources: list[dict]) -> Path:
+    """构造证据留痕：把候选 URL 放进模拟的 WebSearch 原始结果里（同 hook 记录格式）。"""
+    p = tmp_path / "search_log.jsonl"
+    with p.open("w", encoding="utf-8") as f:
+        for s in sources:
+            if not isinstance(s, dict) or not s.get("url"):
+                continue
+            payload = {
+                "tool_name": "WebSearch",
+                "tool_input": {"query": "test"},
+                "tool_response": {"results": [{"url": s["url"], "title": s.get("name", "")}]},
+            }
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return p
 
 
@@ -100,6 +117,28 @@ class TestSanitizeDomain:
         assert sanitize_domain("  ") == "未命名领域"
 
 
+class TestCheckGrounded:
+    def test_url_in_evidence_kept(self):
+        sources = [{"url": "https://a.com/doc"}]
+        kept, ungrounded = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
+        assert len(kept) == 1
+        assert ungrounded == 0
+
+    def test_url_not_in_evidence_rejected(self):
+        sources = [{"url": "https://a.com/doc"}, {"url": "https://fake.com/x"}]
+        kept, ungrounded = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
+        assert len(kept) == 1
+        assert ungrounded == 1
+
+    def test_fabricated_url_rejected(self):
+        # 证据里完全不存在的 URL（编造域名）必然被拒
+        sources = [{"url": "https://fabricated.example/x"}]
+        kept, ungrounded = check_grounded(
+            sources, '{"results":[{"url":"https://x.com/support/faq/2817"}]}')
+        assert kept == []
+        assert ungrounded == 1
+
+
 class TestRun:
     def test_full_pipeline(self, tmp_path):
         data = base_data()
@@ -108,19 +147,23 @@ class TestRun:
         data["sources"].append({"name": "X", "category_path": "算力服务器-服务器CPU"})
         data["sources"].append({"url": "https://y.com", "category_path": "算力服务器-服务器CPU"})
         raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
 
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
 
         outdir = tmp_path / "out" / "算力服务器_2026-08-13-183045"
         assert summary["outdir"] == str(outdir)
         assert summary["total_found"] == 3
         assert summary["removed_duplicates"] == 1
+        assert summary["ungrounded"] == 0
         assert summary["kept"] == 2
         assert summary["invalid"] == 2
         assert summary["empty_nodes"] == ["服务器CPU"]
 
-        # raw.json 默认删除
+        # raw.json 与证据留痕默认删除
         assert not raw.exists()
+        assert not ev.exists()
 
         # 数据源清单 CSV：BOM + 表头 + 2 行
         source_csv = outdir / "算力服务器_2026-08-13-183045_数据源清单.csv"
@@ -145,19 +188,26 @@ class TestRun:
         assert by_node["服务器CPU"][5] == "服务器CPU"  # 无结果节点列
         assert by_node["AI训练GPU"][0] == "算力服务器"
         assert by_node["AI训练GPU"][1] == "2026-08-13 18:30:45"
-        assert by_node["AI训练GPU"][9] == "test-model"
-        assert float(by_node["AI训练GPU"][10]) >= 0  # 脚本处理耗时
+        assert by_node["AI训练GPU"][8] == "0"  # 证据校验移除
+        assert by_node["AI训练GPU"][10] == "test-model"
+        assert float(by_node["AI训练GPU"][11]) >= 0  # 脚本处理耗时
 
     def test_keep_raw(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
-        run(str(raw), out_dir=str(tmp_path / "out"), keep_raw=True, now=FIXED_NOW)
+        ev = write_evidence(tmp_path, base_data()["sources"])
+        run(str(raw), out_dir=str(tmp_path / "out"), keep_raw=True, now=FIXED_NOW,
+            evidence_log=str(ev))
         assert raw.exists()
+        assert ev.exists()
 
     def test_outdir_collision_gets_suffix(self, tmp_path):
         raw1 = write_raw(tmp_path, base_data())
-        run(str(raw1), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+        ev1 = write_evidence(tmp_path, base_data()["sources"])
+        run(str(raw1), out_dir=str(tmp_path / "out"), now=FIXED_NOW, evidence_log=str(ev1))
         raw2 = write_raw(tmp_path, base_data())
-        summary = run(str(raw2), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+        ev2 = write_evidence(tmp_path, base_data()["sources"])
+        summary = run(str(raw2), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev2))
         assert summary["outdir"].endswith("算力服务器_2026-08-13-183045_1")
 
     def test_csv_escaping(self, tmp_path):
@@ -165,7 +215,9 @@ class TestRun:
         data["sources"][0]["name"] = '名称,含"逗号"和引号'
         data["sources"][0]["description"] = "多行\n描述"
         raw = write_raw(tmp_path, data)
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
         source_csv = next(outdir.glob("*数据源清单.csv"))
@@ -189,7 +241,9 @@ class TestRun:
                                 "source_type": "技术博客", "url": "https://u.com",
                                 "description": "d"})
         raw = write_raw(tmp_path, data)
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
 
         assert summary["unmatched"] == 1
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -200,10 +254,65 @@ class TestRun:
         data = base_data()
         data["sources"] = []
         raw = write_raw(tmp_path, data)
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+        # 无候选时不要求证据留痕
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(tmp_path / "不存在.jsonl"))
 
         assert summary["kept"] == 0
         assert set(summary["empty_nodes"]) == set(data["nodes"])
         stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
         rows = read_csv_rows(stats_csv)
         assert len(rows) == 4  # header + 3 个空节点行
+
+    def test_ungrounded_url_rejected_and_counted(self, tmp_path):
+        data = base_data()
+        real_sources = [dict(s) for s in data["sources"]]
+        data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "官方文档", "url": "https://fabricated.example/x",
+                                "description": "编造的 URL"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, real_sources)  # 证据只含真实 URL，不含编造的
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["total_found"] == 3
+        assert summary["ungrounded"] == 1
+        assert summary["kept"] == 2
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert len(rows) == 3  # header + 2 条（编造的已被拒绝）
+        assert all("fabricated" not in r[3] for r in rows)
+
+    def test_missing_evidence_log_raises(self, tmp_path):
+        raw = write_raw(tmp_path, base_data())
+        try:
+            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                evidence_log=str(tmp_path / "不存在.jsonl"))
+            assert False, "should have raised FileNotFoundError"
+        except FileNotFoundError as e:
+            assert "证据留痕" in str(e)
+
+
+class TestLogTool:
+    def test_appends_hook_payload(self, tmp_path):
+        log = tmp_path / "log.jsonl"
+        payload = json.dumps(
+            {"tool_name": "WebSearch", "tool_input": {"query": "测试"},
+             "tool_response": {"results": [{"url": "https://a.com", "title": "结果"}]}},
+            ensure_ascii=False)
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "log_tool.py"), str(log)],
+            input=payload, capture_output=True, encoding="utf-8", timeout=30)
+        assert result.returncode == 0
+        lines = log.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["tool_name"] == "WebSearch"
+        assert json.loads(lines[0])["tool_response"]["results"][0]["url"] == "https://a.com"
+
+    def test_malformed_input_silently_passes(self, tmp_path):
+        log = tmp_path / "log.jsonl"
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "log_tool.py"), str(log)],
+            input="not json", capture_output=True, encoding="utf-8", timeout=30)
+        assert result.returncode == 0
+        assert not log.exists()
