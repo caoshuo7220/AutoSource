@@ -44,6 +44,20 @@ def write_evidence(tmp_path: Path, sources: list[dict]) -> Path:
     return p
 
 
+def write_evidence_queries(tmp_path: Path, queries: list[str]) -> Path:
+    """构造证据留痕：按实际查询词生成模拟 WebSearch 原始结果（供 journal 校验用）。"""
+    p = tmp_path / "search_log.jsonl"
+    with p.open("w", encoding="utf-8") as f:
+        for q in queries:
+            payload = {
+                "tool_name": "WebSearch",
+                "tool_input": {"query": q},
+                "tool_response": {"results": [{"url": f"https://example.com/{abs(hash(q))}"}]},
+            }
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return p
+
+
 def base_data() -> dict:
     return {
         "domain": "算力服务器",
@@ -189,8 +203,9 @@ class TestRun:
         assert by_node["AI训练GPU"][0] == "算力服务器"
         assert by_node["AI训练GPU"][1] == "2026-08-13 18:30:45"
         assert by_node["AI训练GPU"][8] == "0"  # 证据校验移除
-        assert by_node["AI训练GPU"][10] == "test-model"
-        assert float(by_node["AI训练GPU"][11]) >= 0  # 脚本处理耗时
+        assert by_node["AI训练GPU"][9] == "0/0"  # 清单验证（无 knowledge）
+        assert by_node["AI训练GPU"][11] == "test-model"
+        assert float(by_node["AI训练GPU"][12]) >= 0  # 脚本处理耗时
 
     def test_keep_raw(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
@@ -291,6 +306,243 @@ class TestRun:
             assert False, "should have raised FileNotFoundError"
         except FileNotFoundError as e:
             assert "证据留痕" in str(e)
+
+
+class TestKnowledge:
+    def _knowledge_item(self, verified=True, **overrides):
+        item = {
+            "name": "IEEE 802.3 工作组",
+            "node": "以太网标准(IEEE 802.3)",
+            "verified": verified,
+            "category_path": "交换机-核心技术-以太网标准(IEEE 802.3)",
+            "source_type": "行业标准",
+            "url": "https://www.ieee802.org/3/",
+            "description": "IEEE 以太网标准工作组官网",
+            "reason": "清单验证通过，官方入口",
+        }
+        item.update(overrides)
+        return item
+
+    def test_verified_items_merged_into_sources(self, tmp_path):
+        data = base_data()
+        kn = self._knowledge_item()
+        data["knowledge"] = [kn, {"name": "难搜机构", "node": "服务器CPU", "verified": False,
+                                  "note": "已尽力"}]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [kn])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["list_verified"] == "1/2"
+        assert summary["kept"] == 3  # 2 增量 + 1 清单并入
+        assert summary["unverified"] == [("难搜机构", "已尽力")]
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        urls = [r[3] for r in rows[1:]]
+        assert "https://www.ieee802.org/3/" in urls
+        # D1 否定断言：未验证项绝不进 CSV
+        assert all(r[0] != "难搜机构" for r in rows)
+        # stats CSV 的清单验证单元格
+        stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
+        stats_rows = read_csv_rows(stats_csv)
+        assert all(r[9] == "1/2" for r in stats_rows[1:])
+
+    def test_verified_missing_category_path_falls_back_to_node(self, tmp_path):
+        data = base_data()
+        kn = self._knowledge_item()
+        del kn["category_path"]
+        data["knowledge"] = [kn]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [kn])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert any(r[0] == "IEEE 802.3 工作组" and r[1] == "以太网标准(IEEE 802.3)"
+                   for r in rows)
+
+    def test_verified_missing_url_not_merged(self, tmp_path):
+        data = base_data()
+        data["knowledge"] = [self._knowledge_item(url="")]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["list_verified"] == "0/1"
+        assert summary["incomplete"] == 1
+        assert summary["kept"] == 2
+
+    def test_verified_missing_name_counts_incomplete_only(self, tmp_path):
+        data = base_data()
+        data["knowledge"] = [self._knowledge_item(name="")]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["incomplete"] == 1
+        assert summary["unverified"] == []  # 缺 name 的 verified 项不进未验证交接单
+
+    def test_knowledge_missing_tolerated(self, tmp_path):
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["knowledge_missing"] is True
+        assert summary["list_verified"] == "0/0"
+        assert summary["kept"] == 2
+
+    def test_knowledge_wrong_type_tolerated(self, tmp_path):
+        data = base_data()
+        data["knowledge"] = {"name": "不是列表"}
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["list_verified"] == "0/0"
+        assert summary["kept"] == 2
+
+    def test_knowledge_empty_list_tolerated(self, tmp_path):
+        data = base_data()
+        data["knowledge"] = []
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["knowledge_missing"] is True
+        assert summary["list_verified"] == "0/0"
+
+    def test_knowledge_non_dict_entries_not_in_denominator(self, tmp_path):
+        data = base_data()
+        data["knowledge"] = [self._knowledge_item(), "垃圾条目"]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [data["knowledge"][0]])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["list_verified"] == "1/1"  # 非 dict 不计入分母
+
+    def test_merged_url_must_be_grounded(self, tmp_path):
+        data = base_data()
+        kn = self._knowledge_item(url="https://fabricated.example/portal")
+        data["knowledge"] = [kn]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])  # 证据里没有清单项 URL
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["ungrounded"] == 1
+        assert summary["kept"] == 2  # 清单项被证据校验拒绝
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert all("fabricated" not in r[3] for r in rows)
+
+
+class TestJournal:
+    def _journal(self, queries):
+        return [{"phase": "验证搜索", "node": "以太网标准(IEEE 802.3)", "query": q,
+                 "results": 10, "extracted": 3} for q in queries]
+
+    def test_journal_csv_generated(self, tmp_path):
+        data = base_data()
+        queries = ["IEEE 802.3 official", "交换机 标准 列表"]
+        data["journal"] = self._journal(queries)
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, queries + ["test"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["journal_count"] == 2
+        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        assert journal_csv.read_bytes()[:3] == BOM
+        rows = read_csv_rows(journal_csv)
+        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
+        assert len(rows) == 3
+        assert rows[1][2] == "IEEE 802.3 official"
+        assert rows[1][5] == ""  # 证据缺失为空
+
+    def test_journal_query_missing_flagged(self, tmp_path):
+        data = base_data()
+        data["journal"] = self._journal(["不存在的查询词"])
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["另一个查询"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        rows = read_csv_rows(journal_csv)
+        assert rows[1][5] == "是"
+
+    def test_no_journal_no_csv(self, tmp_path):
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["journal_count"] == 0
+        assert not list((Path(summary["outdir"])).glob("*搜索日志.csv"))
+
+    def test_journal_non_dict_entries_skipped_and_counted(self, tmp_path):
+        data = base_data()
+        data["journal"] = self._journal(["IEEE 802.3 official"]) + ["垃圾条目"]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official", "test"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["journal_count"] == 1
+        assert summary["journal_skipped"] == 1
+        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        assert len(read_csv_rows(journal_csv)) == 2  # header + 1 行
+
+    def test_journal_only_missing_evidence_raises(self, tmp_path):
+        data = base_data()
+        data["sources"] = []
+        data["journal"] = self._journal(["某查询"])
+        raw = write_raw(tmp_path, data)
+        try:
+            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                evidence_log=str(tmp_path / "不存在.jsonl"))
+            assert False, "should have raised FileNotFoundError"
+        except FileNotFoundError as e:
+            assert "证据留痕" in str(e)
+
+    def test_journal_with_zero_candidates_aborts(self, tmp_path):
+        # H1 失败路径：搜索过（journal 非空）却 0 候选 → 中止，raw.json 保留
+        data = base_data()
+        data["sources"] = []
+        data["journal"] = self._journal(["IEEE 802.3 official"])
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"])
+        try:
+            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                evidence_log=str(ev))
+            assert False, "should have raised ValueError"
+        except ValueError as e:
+            assert "0" in str(e)
+        assert raw.exists()  # 中止时 raw.json 保留
+        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+
+
+class TestRunResilience:
+    def test_sources_wrong_type_tolerated(self, tmp_path):
+        data = base_data()
+        data["sources"] = {"不是": "列表"}
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, base_data()["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["sources_broken"] is True
+        assert summary["kept"] == 0
+        assert summary["empty_nodes"] == data["nodes"]
 
 
 class TestLogTool:
