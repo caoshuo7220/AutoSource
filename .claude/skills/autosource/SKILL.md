@@ -112,7 +112,7 @@ python .claude/skills/autosource/postprocess.py outputs/raw.json
 - 域名 + 名称联合去重（镜像站保留）；缺 name/url 的坏记录跳过并计数
 - 导出 `{领域词}_{时间戳}_数据源清单.csv`（UTF-8 BOM、csv 标准库转义、固定表头：数据源名称, 分类路径, 数据源类型, 访问地址, 简要说明）
 - 计算各节点候选数与体裁分布，写 `{领域词}_{时间戳}_stats.csv`（含空节点检测、"清单验证"列）
-- 删除 `outputs/raw.json` 与证据留痕
+- 删除 `outputs/raw.json` 与证据留痕（**证据校验有拒绝时自动保留**，stdout 会打印被拒明细，修正 URL 后重跑本命令即可补入）
 - 打印统计汇总到 stdout（含清单核对与未验证清单）
 
 ### 6. 汇总报告

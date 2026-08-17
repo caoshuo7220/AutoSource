@@ -134,23 +134,23 @@ class TestSanitizeDomain:
 class TestCheckGrounded:
     def test_url_in_evidence_kept(self):
         sources = [{"url": "https://a.com/doc"}]
-        kept, ungrounded = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
+        kept, rejected = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
         assert len(kept) == 1
-        assert ungrounded == 0
+        assert len(rejected) == 0
 
     def test_url_not_in_evidence_rejected(self):
         sources = [{"url": "https://a.com/doc"}, {"url": "https://fake.com/x"}]
-        kept, ungrounded = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
+        kept, rejected = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
         assert len(kept) == 1
-        assert ungrounded == 1
+        assert len(rejected) == 1
 
     def test_fabricated_url_rejected(self):
         # 证据里完全不存在的 URL（编造域名）必然被拒
         sources = [{"url": "https://fabricated.example/x"}]
-        kept, ungrounded = check_grounded(
+        kept, rejected = check_grounded(
             sources, '{"results":[{"url":"https://x.com/support/faq/2817"}]}')
         assert kept == []
-        assert ungrounded == 1
+        assert len(rejected) == 1
 
 
 class TestRun:
@@ -293,6 +293,9 @@ class TestRun:
         assert summary["total_found"] == 3
         assert summary["ungrounded"] == 1
         assert summary["kept"] == 2
+        # 有被拒条目：raw.json 与留痕自动保留供修正重跑
+        assert raw.exists()
+        assert ev.exists()
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         assert len(rows) == 3  # header + 2 条（编造的已被拒绝）

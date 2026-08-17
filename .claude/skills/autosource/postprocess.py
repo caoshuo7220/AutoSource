@@ -89,16 +89,16 @@ def leaf_node(category_path: str, nodes: list[str]) -> Optional[str]:
     return max(matches, key=len) if matches else None
 
 
-def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], int]:
-    """证据校验：URL 必须逐字出现在证据留痕中，否则拒绝该条（返回通过数）。"""
+def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list[dict]]:
+    """证据校验：URL 必须逐字出现在证据留痕中。返回 (通过, 被拒)。"""
     kept: list[dict] = []
-    ungrounded = 0
+    rejected: list[dict] = []
     for s in sources:
         if s.get("url", "") in evidence:
             kept.append(s)
         else:
-            ungrounded += 1
-    return kept, ungrounded
+            rejected.append(s)
+    return kept, rejected
 
 
 def merge_knowledge(knowledge: list[dict]) -> tuple[list[dict], int, int]:
@@ -245,7 +245,8 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     evidence = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
 
     all_candidates = valid + merged
-    grounded, ungrounded = check_grounded(all_candidates, evidence)
+    grounded, rejected = check_grounded(all_candidates, evidence)
+    ungrounded = len(rejected)
 
     kept = deduplicate(grounded)
     removed = len(grounded) - len(kept)
@@ -316,13 +317,15 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "knowledge_missing": not knowledge,
         "incomplete": incomplete,
         "unverified": unverified,
+        "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
     }
     write_stats_csv(outdir / f"{domain}_{timestamp}_stats.csv", summary)
 
-    if not keep_raw:
+    # 有被拒条目时保留中间产物，便于修正 URL 后重跑（否则按 --keep-raw 处理）
+    if not keep_raw and ungrounded == 0:
         raw.unlink(missing_ok=True)
         if log_path.exists():
             log_path.unlink(missing_ok=True)
@@ -339,6 +342,11 @@ def _print_summary(summary: dict) -> None:
         print(f"无效记录(缺名称/URL): {summary['invalid']}")
     if summary["unmatched"]:
         print(f"警告: {summary['unmatched']} 条记录的分类路径未匹配到任何节点")
+    if summary["rejected"]:
+        print("证据校验移除明细:")
+        for name, url in summary["rejected"]:
+            print(f"  - {name}: {url}")
+        print("（raw.json 与证据留痕已保留——核对修正 URL 后重跑本命令即可补入）")
     print(f"清单核对: 验证通过 {summary['list_verified']} 项")
     if summary["knowledge_missing"]:
         print("警告: raw.json 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
@@ -370,6 +378,13 @@ def _print_summary(summary: dict) -> None:
 
 
 def main() -> None:
+    # Windows 控制台默认 GBK，stdout 中文会乱码——统一转 UTF-8（失败则保持默认）
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(description="AutoSource 后处理流水线")
     parser.add_argument("raw_json", help="编排层产出的 raw.json 路径")
     parser.add_argument("--evidence-log", default=DEFAULT_EVIDENCE_LOG,
