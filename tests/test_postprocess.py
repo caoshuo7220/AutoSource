@@ -11,7 +11,8 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource"
 sys.path.insert(0, str(SKILL_DIR))
 
-from postprocess import check_grounded, deduplicate, leaf_node, run, sanitize_domain
+from postprocess import (check_grounded, check_granularity, deduplicate,
+                         is_document_url, leaf_node, run, sanitize_domain)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -153,6 +154,100 @@ class TestCheckGrounded:
         assert len(rejected) == 1
 
 
+class TestIsDocumentUrl:
+    def test_pdf_extension(self):
+        assert is_document_url("https://x.com/path/manual.pdf")
+
+    def test_md_extension(self):
+        assert is_document_url("https://raw.githubusercontent.com/a/b/master/README.md")
+
+    def test_news_deep_link(self):
+        assert is_document_url("https://e.huawei.com/my/news/2024/industries/white-paper")
+
+    def test_news_index_not_flagged(self):
+        # /news 本身（无后续路径段）可能是新闻索引页，不误杀
+        assert not is_document_url("https://e.huawei.com/news")
+
+    def test_news_detail_page(self):
+        assert is_document_url("https://3onedata.com.cn/news-detail.aspx?cid=34&id=463")
+
+    def test_kb_detail(self):
+        assert is_document_url("https://kb.netgear.com/app/answers/detail/a_id/21811")
+
+    def test_contact_page(self):
+        assert is_document_url("https://www.centec.com/contact_us")
+
+    def test_github_issues_subpage(self):
+        assert is_document_url("https://github.com/opencomputeproject/opennetworklinux/issues")
+
+    def test_review_deep_link(self):
+        assert is_document_url("https://www.storagereview.com/zh-TW/review/ubiquiti-x")
+
+    def test_ranking_article_not_flagged(self):
+        # 榜单以单篇形态呈现（wired.com/story/...）是合法合集级页面，不得误杀
+        assert not is_document_url("https://www.wired.com/story/best-ethernet-switches/")
+
+    def test_reviews_category_page_not_flagged(self):
+        # 评测分类页（/reviews?dimension=）是合集入口，不是单篇深链
+        assert not is_document_url("https://www.trustradius.com/products/x/reviews?dimension=y")
+
+    def test_docs_portal_not_flagged(self):
+        assert not is_document_url("https://docs.example.com/product/")
+
+    def test_standard_detail_page_not_flagged(self):
+        # 标准详情页（?hcno= 参数）形态上不是文档，不误杀
+        assert not is_document_url(
+            "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=5A46B8602A848DB11EDC25245EB7643A")
+
+
+class TestCheckGranularity:
+    def test_collection_with_document_url_rejected(self):
+        sources = [{"name": "X 文档中心", "granularity": "合集级",
+                    "url": "https://x.com/manual.pdf"}]
+        kept, rejected, single, missing = check_granularity(sources)
+        assert kept == []
+        assert len(rejected) == 1
+        assert single == 0
+        assert missing == 0
+
+    def test_site_level_with_news_url_rejected(self):
+        sources = [{"name": "Y 门户", "granularity": "站点级",
+                    "url": "https://y.com/news/2026/article"}]
+        kept, rejected, *_ = check_granularity(sources)
+        assert kept == []
+        assert len(rejected) == 1
+
+    def test_single_level_document_url_kept_and_counted(self):
+        sources = [{"name": "标准文件", "granularity": "单篇级",
+                    "url": "https://x.com/std/TTAF-290.pdf"}]
+        kept, rejected, single, missing = check_granularity(sources)
+        assert len(kept) == 1
+        assert rejected == []
+        assert single == 1
+        assert missing == 0
+
+    def test_missing_granularity_defaults_to_collection(self):
+        # 缺声明按 P-002 默认合集级处理 → 文档形态 URL 构成矛盾被拒
+        sources = [{"name": "X 文档中心", "url": "https://x.com/manual.pdf"}]
+        kept, rejected, single, missing = check_granularity(sources)
+        assert kept == []
+        assert len(rejected) == 1
+        assert missing == 1
+
+    def test_collection_portal_url_kept(self):
+        sources = [{"name": "X 文档中心", "granularity": "合集级",
+                    "url": "https://x.com/documentation"}]
+        kept, rejected, single, missing = check_granularity(sources)
+        assert len(kept) == 1
+        assert rejected == []
+
+    def test_missing_granularity_normalized_in_place(self):
+        sources = [{"name": "X", "url": "https://x.com/docs"}]
+        kept, *_ = check_granularity(sources)
+        assert len(kept) == 1
+        assert sources[0]["granularity"] == "合集级"
+
+
 class TestRun:
     def test_full_pipeline(self, tmp_path):
         data = base_data()
@@ -185,7 +280,7 @@ class TestRun:
         content = source_csv.read_bytes()
         assert content[:3] == BOM
         rows = read_csv_rows(source_csv)
-        assert rows[0] == ["数据源名称", "分类路径", "数据源类型", "访问地址", "简要说明"]
+        assert rows[0] == ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明"]
         assert len(rows) == 3
 
         # stats CSV：BOM + 表头 + 每节点一行，空节点列填了无结果节点
@@ -203,9 +298,11 @@ class TestRun:
         assert by_node["AI训练GPU"][0] == "算力服务器"
         assert by_node["AI训练GPU"][1] == "2026-08-13 18:30:45"
         assert by_node["AI训练GPU"][8] == "0"  # 证据校验移除
-        assert by_node["AI训练GPU"][9] == "0/0"  # 清单验证（无 knowledge）
-        assert by_node["AI训练GPU"][11] == "test-model"
-        assert float(by_node["AI训练GPU"][12]) >= 0  # 脚本处理耗时
+        assert by_node["AI训练GPU"][9] == "0"  # 粒度矛盾移除
+        assert by_node["AI训练GPU"][10] == "0/0"  # 清单验证（无 knowledge）
+        assert by_node["AI训练GPU"][12] == "0"  # 单篇级收录
+        assert by_node["AI训练GPU"][13] == "test-model"
+        assert float(by_node["AI训练GPU"][14]) >= 0  # 脚本处理耗时
 
     def test_keep_raw(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
@@ -238,7 +335,7 @@ class TestRun:
         source_csv = next(outdir.glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         assert rows[1][0] == '名称,含"逗号"和引号'
-        assert rows[1][4] == "多行\n描述"
+        assert rows[1][5] == "多行\n描述"
 
     def test_missing_nodes_field_raises(self, tmp_path):
         data = base_data()
@@ -299,7 +396,82 @@ class TestRun:
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         assert len(rows) == 3  # header + 2 条（编造的已被拒绝）
-        assert all("fabricated" not in r[3] for r in rows)
+        assert all("fabricated" not in r[4] for r in rows)
+
+    def test_granularity_conflict_rejected_and_keeps_raw(self, tmp_path):
+        data = base_data()
+        data["sources"].append({"name": "M 手册体系", "granularity": "合集级",
+                                "category_path": "算力服务器-服务器CPU",
+                                "source_type": "技术手册", "url": "https://m.com/manual.pdf",
+                                "description": "单份 PDF", "reason": "x"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["granularity_rejected_count"] == 1
+        assert summary["kept"] == 2
+        # 有被拒条目 → raw.json 与留痕保留供修正重跑
+        assert raw.exists()
+        assert ev.exists()
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert all("manual.pdf" not in r[4] for r in rows)
+
+    def test_single_level_kept_counted_and_in_csv(self, tmp_path):
+        data = base_data()
+        data["sources"].append({"name": "团体标准", "granularity": "单篇级",
+                                "category_path": "算力服务器-服务器CPU",
+                                "source_type": "行业标准", "url": "https://s.com/std.pdf",
+                                "description": "团体标准文件",
+                                "reason": "团体标准文件，无合集可替代"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["granularity_rejected_count"] == 0
+        assert summary["kept"] == 3
+        assert summary["single_count"] == 1
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert any(r[0] == "团体标准" and r[3] == "单篇级" for r in rows)
+        stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
+        stats_rows = read_csv_rows(stats_csv)
+        assert all(r[12] == "1" for r in stats_rows[1:])  # 单篇级收录列
+
+    def test_knowledge_item_with_document_url_rejected(self, tmp_path):
+        # 清单项默认体系级（合集级）→ 验证到单份 PDF 的 URL 构成矛盾被拒
+        data = base_data()
+        kn = {"name": "M 文档中心", "node": "服务器CPU", "verified": True,
+              "category_path": "算力服务器-服务器CPU",
+              "source_type": "官方文档", "url": "https://m.com/manual.pdf",
+              "description": "单份 PDF", "reason": "清单验证通过"}
+        data["knowledge"] = [kn]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [kn])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["granularity_rejected_count"] == 1
+        assert summary["kept"] == 2
+
+    def test_knowledge_item_explicit_single_level_kept(self, tmp_path):
+        data = base_data()
+        kn = {"name": "国标文件", "node": "服务器CPU", "verified": True,
+              "granularity": "单篇级",
+              "category_path": "算力服务器-服务器CPU",
+              "source_type": "行业标准", "url": "https://m.com/gb.pdf",
+              "description": "标准全文", "reason": "标准文件，无合集可替代"}
+        data["knowledge"] = [kn]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [kn])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["granularity_rejected_count"] == 0
+        assert summary["kept"] == 3
+        assert summary["single_count"] == 1
 
     def test_missing_evidence_log_raises(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
@@ -341,14 +513,14 @@ class TestKnowledge:
         assert summary["unverified"] == [("难搜机构", "已尽力")]
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
-        urls = [r[3] for r in rows[1:]]
+        urls = [r[4] for r in rows[1:]]
         assert "https://www.ieee802.org/3/" in urls
         # D1 否定断言：未验证项绝不进 CSV
         assert all(r[0] != "难搜机构" for r in rows)
         # stats CSV 的清单验证单元格
         stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
         stats_rows = read_csv_rows(stats_csv)
-        assert all(r[9] == "1/2" for r in stats_rows[1:])
+        assert all(r[10] == "1/2" for r in stats_rows[1:])
 
     def test_verified_missing_category_path_falls_back_to_node(self, tmp_path):
         data = base_data()
@@ -444,7 +616,7 @@ class TestKnowledge:
         assert summary["kept"] == 2  # 清单项被证据校验拒绝
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
-        assert all("fabricated" not in r[3] for r in rows)
+        assert all("fabricated" not in r[4] for r in rows)
 
 
 class TestJournal:

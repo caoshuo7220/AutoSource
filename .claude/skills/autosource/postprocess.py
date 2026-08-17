@@ -6,6 +6,9 @@
 - 证据校验（grounded check）：候选 URL 必须能逐字出现在证据留痕中（留痕由
   PostToolUse hook 在每次 WebSearch/WebFetch 时由系统自动记录，模型不可篡改），
   否则拒绝该条并计数——从结构上杜绝模型编造 URL
+- 粒度矛盾检测：候选声明 granularity 为合集级/站点级但 URL 呈文档形态（PDF、
+  新闻/问答/评测深链等确定性信号）→ 拒绝并报明细——结构性防"名实不符"
+  （如条目名"XX 文档中心"却指向一份 PDF）；单篇级条目放行但计数进 stats
 - 知识清单：verified=true 且字段齐全的清单项自动并入 sources（LLM 不手工复制）；
   计算清单验证率（自洽性指标），未验证清单进 stdout 报告
 - 搜索日志：journal 的每个查询词必须逐字出现在证据留痕中（不在则标注"证据缺失"），
@@ -52,10 +55,10 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "访问地址", "简要说明"]
+SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明"]
 STATS_CSV_HEADER = ["领域", "时间戳", "分类节点", "候选数", "体裁分布", "无结果节点",
-                    "总候选数", "去重移除", "证据校验移除", "清单验证", "最终收录",
-                    "模型", "脚本处理耗时(秒)"]
+                    "总候选数", "去重移除", "证据校验移除", "粒度矛盾移除", "清单验证",
+                    "最终收录", "单篇级收录", "模型", "脚本处理耗时(秒)"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
 
 DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
@@ -101,6 +104,63 @@ def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list
     return kept, rejected
 
 
+# 文档形态 URL 的确定性信号（保守口径：宁可漏检，不可误杀榜单/门户等合法合集页面）
+DOC_EXTENSIONS = (".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".md", ".txt")
+SINGLE_CONTENT_PATTERNS = [
+    r"/news/.+",             # 新闻深链（e.huawei.com/news/2024/...）
+    r"news-detail",          # 新闻详情页（3onedata news-detail.aspx）
+    r"pressrelease",         # 新闻稿页（socionextus.com/pressreleases/...）
+    r"press-releases",
+    r"/articles?/",          # 单篇文章路径
+    r"/article\?id=",        # 文章详情（cww.net.cn/article?id=...）
+    r"/questions/.+",        # 单条问答（zhiliao.h3c.com/questions/dispcont/...）
+    r"answers/detail",       # 单条 KB（kb.netgear.com/app/answers/detail/a_id/...）
+    r"/contact(_us)?(/|$)",  # 联系页（官网/门户条目指向联系页必错）
+    r"/(issues|pulls)(/|$)",  # GitHub 仓库子页
+    r"/(blob|tree)/",        # GitHub 单文件/子目录视图
+    r"/doc/.+",              # 单文档页（support.huawei.com/zh/doc/EDOC...）
+    r"/document/.+",         # 单报告页（lightcounting.com/document/...）
+    r"/reviews?/.+",         # 单篇评测深链（storagereview.com/review/...）
+    r"review/\d",            # 评测文章分页（servethehome.com/...-review/3/）
+]
+GRANULARITY_LEVELS = ("合集级", "站点级", "单篇级")
+
+
+def is_document_url(url: str) -> bool:
+    """确定性检测：URL 是否指向单份文档/单条内容页（与"体系级入口"矛盾）。"""
+    path = urlparse(url).path.lower()
+    if path.endswith(DOC_EXTENSIONS):
+        return True
+    return any(re.search(p, path) for p in SINGLE_CONTENT_PATTERNS)
+
+
+def check_granularity(sources: list[dict]) -> tuple[list[dict], list[dict], int, int]:
+    """粒度矛盾检测：声明合集级/站点级但 URL 呈文档形态 → 拒绝。
+
+    返回 (通过, 被拒, 单篇级数, 缺声明数)：
+    - granularity 缺失或非法视为合集级（P-002 默认），计数告警
+    - 单篇级条目放行但计数——例外条款的使用量进 stats，滥用可见
+    """
+    kept: list[dict] = []
+    rejected: list[dict] = []
+    single_count = 0
+    missing_count = 0
+    for s in sources:
+        g = str(s.get("granularity") or "")
+        if g not in GRANULARITY_LEVELS:
+            missing_count += 1
+            g = "合集级"
+        s["granularity"] = g
+        if g == "单篇级":
+            single_count += 1
+            kept.append(s)
+        elif is_document_url(str(s.get("url") or "")):
+            rejected.append(s)
+        else:
+            kept.append(s)
+    return kept, rejected, single_count, missing_count
+
+
 def merge_knowledge(knowledge: list[dict]) -> tuple[list[dict], int, int]:
     """把 verified=true 且字段齐全的清单项转为 sources 条目。
 
@@ -122,6 +182,7 @@ def merge_knowledge(knowledge: list[dict]) -> tuple[list[dict], int, int]:
             "name": item["name"],
             "category_path": item.get("category_path") or item.get("node", ""),
             "source_type": item.get("source_type", ""),
+            "granularity": item.get("granularity") or "合集级",
             "url": item["url"],
             "description": item.get("description", ""),
             "reason": item.get("reason", ""),
@@ -139,6 +200,7 @@ def write_source_csv(path: Path, sources: list[dict]) -> None:
                 s.get("name", ""),
                 s.get("category_path", ""),
                 s.get("source_type", ""),
+                s.get("granularity", ""),
                 s.get("url", ""),
                 s.get("description", ""),
             ])
@@ -165,8 +227,10 @@ def write_stats_csv(path: Path, summary: dict) -> None:
                 summary["total_found"],
                 summary["removed_duplicates"],
                 summary["ungrounded"],
+                summary["granularity_rejected_count"],
                 summary["list_verified"],
                 summary["kept"],
+                summary["single_count"],
                 summary["model"],
                 summary["elapsed_seconds"],
             ])
@@ -248,8 +312,12 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     grounded, rejected = check_grounded(all_candidates, evidence)
     ungrounded = len(rejected)
 
-    kept = deduplicate(grounded)
-    removed = len(grounded) - len(kept)
+    # 粒度矛盾检测：声明合集级/站点级但 URL 呈文档形态 → 拒绝（结构性防"名实不符"）
+    granularity_ok, granularity_rejected, single_count, granularity_missing = \
+        check_granularity(grounded)
+
+    kept = deduplicate(granularity_ok)
+    removed = len(granularity_ok) - len(kept)
     node_stats = compute_stats(kept, nodes)
 
     journal_rows: list[list] = []
@@ -318,14 +386,21 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "incomplete": incomplete,
         "unverified": unverified,
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
+        "granularity_rejected_count": len(granularity_rejected),
+        "granularity_rejected": [
+            (str(s.get("name") or "未命名"), str(s.get("granularity") or "合集级"),
+             str(s.get("url") or "")) for s in granularity_rejected],
+        "single_count": single_count,
+        "granularity_missing": granularity_missing,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
     }
     write_stats_csv(outdir / f"{domain}_{timestamp}_stats.csv", summary)
 
-    # 有被拒条目时保留中间产物，便于修正 URL 后重跑（否则按 --keep-raw 处理）
-    if not keep_raw and ungrounded == 0:
+    # 有被拒条目（证据校验或粒度矛盾）时保留中间产物，便于修正 URL 后重跑
+    # （否则按 --keep-raw 处理）
+    if not keep_raw and ungrounded == 0 and not granularity_rejected:
         raw.unlink(missing_ok=True)
         if log_path.exists():
             log_path.unlink(missing_ok=True)
@@ -337,7 +412,8 @@ def _print_summary(summary: dict) -> None:
     print(f"领域: {summary['domain']}")
     print(f"输出目录: {summary['outdir']}")
     print(f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
-          f"  证据校验移除: {summary['ungrounded']}  最终收录: {summary['kept']}")
+          f"  证据校验移除: {summary['ungrounded']}  粒度矛盾移除: {summary['granularity_rejected_count']}"
+          f"  最终收录: {summary['kept']}")
     if summary["invalid"]:
         print(f"无效记录(缺名称/URL): {summary['invalid']}")
     if summary["unmatched"]:
@@ -347,6 +423,15 @@ def _print_summary(summary: dict) -> None:
         for name, url in summary["rejected"]:
             print(f"  - {name}: {url}")
         print("（raw.json 与证据留痕已保留——核对修正 URL 后重跑本命令即可补入）")
+    if summary["granularity_rejected"]:
+        print("粒度矛盾移除明细（声明合集级/站点级但 URL 是单份文档）:")
+        for name, g, url in summary["granularity_rejected"]:
+            print(f"  - {name}（{g}）: {url}")
+        print("（raw.json 与证据留痕已保留——修正为体系入口 URL 或改声明单篇级后重跑即可补入）")
+    if summary["granularity_missing"]:
+        print(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
+    if summary["single_count"]:
+        print(f"单篇级收录: {summary['single_count']} 条（P-002 例外条款使用情况，见 stats.csv）")
     print(f"清单核对: 验证通过 {summary['list_verified']} 项")
     if summary["knowledge_missing"]:
         print("警告: raw.json 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")

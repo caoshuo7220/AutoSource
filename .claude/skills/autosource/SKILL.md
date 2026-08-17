@@ -47,6 +47,7 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 - 结构：`{名称, 所属叶子节点, 预期体裁}`，**URL 留空待验证**（知识可能记错 URL）
 - 规模：每叶节点 2-5 条（不含领域级条目）；领域级权威源（IETF、Tolly 等）归到最相关节点名下；总量 ≤50
 - 清单条目粒度均为"体系级"
+- **准入判据**：条目的 URL 必须定位到该领域的内容（有主题边界）。知网、专利库、百科、标准平台等跨领域通用平台首页不得列为清单项；平台的领域专属入口（该领域的分类检索页等）可列
 - **清单自检**：列完后按机构类型维度自问一轮——标准组织 / 行业协会 / 厂商文档体系 / 学术文献库 / 评测机构 / 开源生态 / 百科知识库 / 公共数据平台，以及中文生态的对应物，各类都列了吗？有遗漏再补
 - 预期体裁仅用于构造验证搜索词；最终 `source_type` 以验证时的实际形态为准，允许修正
 
@@ -77,7 +78,7 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
   "knowledge": [
     {"name": "IEEE 802.3 以太网工作组", "node": "以太网标准(IEEE 802.3)", "verified": true,
      "category_path": "交换机-核心技术-以太网标准(IEEE 802.3)",
-     "source_type": "行业标准", "url": "https://www.ieee802.org/3/",
+     "source_type": "行业标准", "granularity": "合集级", "url": "https://www.ieee802.org/3/",
      "description": "IEEE 以太网标准工作组官网", "reason": "清单验证通过，官方入口"},
     {"name": "某某机构", "node": "某节点", "verified": false, "note": "疑似无效机构"}
   ],
@@ -90,10 +91,10 @@ description: 输入领域描述，自动发现该领域的公开数据源并导�
 
 字段约束：
 
-- **knowledge**：node 必须在 nodes 中；verified=true 的项必须带齐 `category_path/source_type/url/description/reason`（category_path 用 `-` 连接完整层级路径，末段与 node 一致）；verified=false 的项带 `note`（"疑似无效机构"或"已尽力"）。脚本自动把 verified 项并入 sources，**LLM 不要在 sources 里重复写清单条目**
-- **sources**：仅增量发现条目，每条含 `name/category_path/source_type/url/description/reason`
+- **knowledge**：node 必须在 nodes 中；verified=true 的项必须带齐 `category_path/source_type/url/description/reason`（category_path 用 `-` 连接完整层级路径，末段与 node 一致），`granularity` 可带（默认合集级）；verified=false 的项带 `note`（"疑似无效机构"或"已尽力"）。脚本自动把 verified 项并入 sources，**LLM 不要在 sources 里重复写清单条目**
+- **sources**：仅增量发现条目，每条含 `name/category_path/source_type/granularity/url/description/reason`；granularity ∈ 合集级/站点级/单篇级（单篇级需在 reason 写明例外依据；缺省按合集级处理）
 - **journal**：记录本次的每一次搜索——`phase`（验证搜索/增量发现/扩量轮）、`node`、`query`（照抄实际查询词）、`results`（返回链接数）、`extracted`（提取候选数）
-- 通用约束：name 和 url 不可为空；仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；确保体裁多样性（数据集只是其中一类，不应占主导）
+- 通用约束：name 和 url 不可为空；仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；确保体裁多样性（数据集只是其中一类，不应占主导）；通用平台（知网/专利库/百科/标准平台等）不作为独立条目出现，其信息通过领域条目的简要说明传递
 
 ### 5. 后处理（调用脚本，全部确定性环节）
 
@@ -107,12 +108,13 @@ python .claude/skills/autosource/postprocess.py outputs/raw.json
 
 - 生成 `outputs/{领域词}_{时间戳}/` 目录（时间戳取自脚本系统时钟；同秒冲突自动加 `_1` 后缀）
 - 证据校验：候选 URL 逐字比对证据留痕，不在即拒绝并计数
+- **粒度矛盾检测**：声明合集级/站点级但 URL 呈文档形态（PDF/新闻/问答/评测深链/联系页等）→ 拒绝并报明细；单篇级条目放行但计数进 stats
 - **清单验证率计算**（自洽性指标）+ **verified 清单项自动并入 sources**
 - **搜索日志**：journal 的查询词逐字比对证据留痕（不在标注"证据缺失"），生成 `{领域词}_{时间戳}_搜索日志.csv`
 - 域名 + 名称联合去重（镜像站保留）；缺 name/url 的坏记录跳过并计数
-- 导出 `{领域词}_{时间戳}_数据源清单.csv`（UTF-8 BOM、csv 标准库转义、固定表头：数据源名称, 分类路径, 数据源类型, 访问地址, 简要说明）
-- 计算各节点候选数与体裁分布，写 `{领域词}_{时间戳}_stats.csv`（含空节点检测、"清单验证"列）
-- 删除 `outputs/raw.json` 与证据留痕（**证据校验有拒绝时自动保留**，stdout 会打印被拒明细，修正 URL 后重跑本命令即可补入）
+- 导出 `{领域词}_{时间戳}_数据源清单.csv`（UTF-8 BOM、csv 标准库转义、固定表头：数据源名称, 分类路径, 数据源类型, 粒度, 访问地址, 简要说明）
+- 计算各节点候选数与体裁分布，写 `{领域词}_{时间戳}_stats.csv`（含空节点检测、"清单验证"、"粒度矛盾移除"、"单篇级收录"列）
+- 删除 `outputs/raw.json` 与证据留痕（**证据校验或粒度矛盾有拒绝时自动保留**，stdout 会打印被拒明细，修正后重跑本命令即可补入）
 - 打印统计汇总到 stdout（含清单核对与未验证清单）
 
 ### 6. 汇总报告
@@ -143,8 +145,10 @@ python .claude/skills/autosource/postprocess.py outputs/raw.json
 | 总候选数 | 有效候选总数（去重前） |
 | 去重移除 | 去重移除数 |
 | 证据校验移除 | 证据校验拒绝数（URL 不在证据留痕中） |
+| 粒度矛盾移除 | 粒度矛盾拒绝数（声明合集级/站点级但 URL 是单份文档） |
 | 清单验证 | 领域级自洽性指标：知识清单验证通过 X/Y（**不衡量对真实世界的完整性**） |
 | 最终收录 | 去重后收录数 |
+| 单篇级收录 | 单篇级条目数（P-002 例外条款使用情况，供审计"例外是否变成常态"） |
 | 模型 | raw.json 中填写的模型名 |
 | 脚本处理耗时(秒) | postprocess.py 自身处理耗时（不含搜索阶段） |
 
