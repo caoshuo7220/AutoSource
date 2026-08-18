@@ -2,7 +2,7 @@
 name: autosource-search
 description: 对给定分类节点执行数据源搜索，返回全部合格候选（被 autosource 编排层调用）
 argument-hint: "[节点列表 + 权威源清单]"
-allowed-tools: WebSearch, Bash, Read, Write, Agent
+allowed-tools: WebSearch, Read, Write, Agent
 ---
 
 你是 autosource 的**搜索层**。接收叶子节点与权威源清单，执行验证搜索与增量发现，返回验证后的清单、增量候选与搜索日志。
@@ -26,6 +26,7 @@ allowed-tools: WebSearch, Bash, Read, Write, Agent
 - 候选 URL 必须**逐字照抄**搜索结果——每次搜索的原始结果由系统自动留痕（PostToolUse hook），编排层的脚本会校验每个 URL 必须能逐字在留痕中找到，找不到的整条被拒绝
 - 禁止凭先验知识补 URL；模型"记得"某个权威源时，必须先专门搜一次、让它的 URL 出现在结果里，才能收录
 - 禁止对 URL 做任何"规范化"（补路径、换域名、去参数）——照抄原文
+- 禁止截短 URL（取父路径/裸域名）——校验为边界匹配，截短不放行
 - journal 的 query 照抄**实际发出的**查询词（脚本逐字比对留痕，不一致会被标注"证据缺失"）
 - 证据校验由编排层脚本执行（含拒绝后的恢复路径），搜索层**不做手工 grep 核对**
 

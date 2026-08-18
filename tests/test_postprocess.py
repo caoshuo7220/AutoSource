@@ -12,7 +12,8 @@ SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource"
 sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity, deduplicate,
-                         is_document_url, leaf_node, run, sanitize_domain)
+                         is_document_url, leaf_node, query_in_evidence, run,
+                         sanitize_domain)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -152,6 +153,42 @@ class TestCheckGrounded:
             sources, '{"results":[{"url":"https://x.com/support/faq/2817"}]}')
         assert kept == []
         assert len(rejected) == 1
+
+
+class TestCheckGroundedBoundaries:
+    """边界匹配:候选 URL 必须是留痕中的完整 URL,截短为父路径/裸域名不放行。"""
+
+    def test_exact_url_in_json_evidence_kept(self):
+        evidence = '{"results":[{"url":"https://a.com/doc"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
+        assert len(kept) == 1
+        assert rejected == []
+
+    def test_path_prefix_truncation_rejected(self):
+        # 留痕是深链,候选截短为父路径 → 拒绝(旧子串匹配会放行)
+        evidence = '{"results":[{"url":"https://a.com/doc/123"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
+        assert kept == []
+        assert len(rejected) == 1
+
+    def test_bare_domain_truncation_rejected(self):
+        evidence = '{"results":[{"url":"https://a.com/news/123"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com"}], evidence)
+        assert kept == []
+        assert len(rejected) == 1
+
+    def test_extension_prefix_truncation_rejected(self):
+        # 截短到扩展名前(doc vs doc.html)同样拒绝
+        evidence = '{"results":[{"url":"https://a.com/manual.pdf"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com/manual"}], evidence)
+        assert kept == []
+        assert len(rejected) == 1
+
+    def test_full_url_in_free_text_kept(self):
+        evidence = "see https://a.com/doc for details"
+        kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
+        assert len(kept) == 1
+        assert rejected == []
 
 
 class TestIsDocumentUrl:
@@ -619,6 +656,25 @@ class TestKnowledge:
         assert all("fabricated" not in r[4] for r in rows)
 
 
+class TestQueryEvidence:
+    """journal 查询词精确比对:截短/改写一律视为证据缺失(旧子串匹配会放行)。"""
+
+    def test_exact_query_in_payload_passes(self):
+        evidence = '{"tool_name":"WebSearch","tool_input":{"query":"IEEE 802.3 official"}}'
+        assert query_in_evidence("IEEE 802.3 official", evidence) is True
+
+    def test_truncated_query_not_in_evidence(self):
+        evidence = '{"tool_name":"WebSearch","tool_input":{"query":"IEEE 802.3 official"}}'
+        assert query_in_evidence("IEEE", evidence) is False
+
+    def test_rewritten_query_not_in_evidence(self):
+        evidence = '{"tool_name":"WebSearch","tool_input":{"query":"交换机 标准 列表"}}'
+        assert query_in_evidence("交换机 标准", evidence) is False
+
+    def test_malformed_lines_skipped(self):
+        assert query_in_evidence("IEEE", "not json\n") is False
+
+
 class TestJournal:
     def _journal(self, queries):
         return [{"phase": "验证搜索", "node": "以太网标准(IEEE 802.3)", "query": q,
@@ -704,6 +760,19 @@ class TestJournal:
             assert "0" in str(e)
         assert raw.exists()  # 中止时 raw.json 保留
         assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+
+    def test_journal_truncated_query_flagged(self, tmp_path):
+        # 实际只搜过完整查询词，journal 里截短的查询词必须标"证据缺失"
+        data = base_data()
+        data["journal"] = self._journal(["IEEE"])
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        rows = read_csv_rows(journal_csv)
+        assert rows[1][5] == "是"
 
 
 class TestRunResilience:

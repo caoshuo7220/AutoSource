@@ -3,16 +3,18 @@
 分工原则：LLM（编排层）只负责语义环节，唯一产出的中间产物是 raw.json；
 本脚本保证其余所有确定性环节：
 
-- 证据校验（grounded check）：候选 URL 必须能逐字出现在证据留痕中（留痕由
-  PostToolUse hook 在每次 WebSearch/WebFetch 时由系统自动记录，模型不可篡改），
-  否则拒绝该条并计数——从结构上杜绝模型编造 URL
+- 证据校验（grounded check）：候选 URL 必须作为完整 URL 出现在证据留痕中（留痕由
+  PostToolUse hook 在每次 WebSearch/WebFetch 时由系统自动记录，记录过程在
+  harness 侧、模型不参与），否则拒绝该条并计数——从结构上杜绝模型**意外**编造
+  URL（转写错误、凭记忆补写；边界匹配，截短为父路径/裸域名不放行）。
+  留痕文件本身无写保护，该机制不防对抗性篡改
 - 粒度矛盾检测：候选声明 granularity 为合集级/站点级但 URL 呈文档形态（PDF、
   新闻/问答/评测深链等确定性信号）→ 拒绝并报明细——结构性防"名实不符"
   （如条目名"XX 文档中心"却指向一份 PDF）；单篇级条目放行但计数进 stats
 - 知识清单：verified=true 且字段齐全的清单项自动并入 sources（LLM 不手工复制）；
   计算清单验证率（自洽性指标），未验证清单进 stdout 报告
-- 搜索日志：journal 的每个查询词必须逐字出现在证据留痕中（不在则标注"证据缺失"），
-  生成 搜索日志.csv 供人工复盘
+- 搜索日志：journal 的每个查询词必须作为完整 JSON 字符串值精确出现在证据留痕中
+  （截短/改写即标注"证据缺失"），生成 搜索日志.csv 供人工复盘
 - 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）
 - 域名 + 名称联合去重
 - 用 csv 标准库导出数据源清单（UTF-8 BOM，转义交给标准库）
@@ -92,16 +94,72 @@ def leaf_node(category_path: str, nodes: list[str]) -> Optional[str]:
     return max(matches, key=len) if matches else None
 
 
+# 证据边界匹配的字符集：RFC 3986 的 unreserved + reserved + "%"。
+# 候选 URL 必须作为完整 URL 出现在留痕中——匹配的前后相邻字符若属于该集合，
+# 说明该匹配只是更长 URL 的前缀（截短为父路径/裸域名），拒绝。
+URL_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%"
+)
+
+
+def _contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
+    """needle 在 haystack 中的出现必须前后不与 boundary_chars 相邻（完整边界匹配）。"""
+    if not needle:
+        return False
+    start = haystack.find(needle)
+    while start != -1:
+        end = start + len(needle)
+        before = haystack[start - 1] if start > 0 else ""
+        after = haystack[end] if end < len(haystack) else ""
+        if before not in boundary_chars and after not in boundary_chars:
+            return True
+        start = haystack.find(needle, end)
+    return False
+
+
 def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list[dict]]:
-    """证据校验：URL 必须逐字出现在证据留痕中。返回 (通过, 被拒)。"""
+    """证据校验：URL 必须作为完整 URL 出现在证据留痕中。返回 (通过, 被拒)。
+
+    旧实现为子串匹配，URL 截短为任意父路径/裸域名可通过；现按 RFC 3986 字符集
+    做边界匹配，截短即拒绝。防的是意外编造（转写错误/凭记忆补 URL）；
+    留痕文件本身无写保护，不防对抗性篡改。
+    """
     kept: list[dict] = []
     rejected: list[dict] = []
     for s in sources:
-        if s.get("url", "") in evidence:
+        if _contains_bounded(str(s.get("url") or ""), evidence, URL_CHARS):
             kept.append(s)
         else:
             rejected.append(s)
     return kept, rejected
+
+
+def _collect_strings(node, out: set) -> None:
+    """递归收集 JSON 载荷里的全部字符串值。"""
+    if isinstance(node, str):
+        out.add(node)
+    elif isinstance(node, dict):
+        for value in node.values():
+            _collect_strings(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_strings(value, out)
+
+
+def extract_strings(evidence: str) -> set:
+    """解析证据留痕 JSONL，收集全部字符串值（供查询词精确比对）。"""
+    strings: set = set()
+    for line in evidence.splitlines():
+        try:
+            _collect_strings(json.loads(line), strings)
+        except ValueError:
+            continue  # 留痕应逐行有效 JSON，容错跳过损坏行
+    return strings
+
+
+def query_in_evidence(query: str, evidence: str) -> bool:
+    """查询词必须作为完整 JSON 字符串值出现在留痕中（精确相等，截短/改写不算）。"""
+    return bool(query) and query in extract_strings(evidence)
 
 
 # 文档形态 URL 的确定性信号（保守口径：宁可漏检，不可误杀榜单/门户等合法合集页面）
@@ -307,6 +365,8 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
             f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
             "没有证据链就不放行候选，这是设计使然）")
     evidence = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    # 查询词精确比对用：解析留痕收集全部 JSON 字符串值（一次解析，逐行复用）
+    evidence_strings = extract_strings(evidence) if journal else set()
 
     all_candidates = valid + merged
     grounded, rejected = check_grounded(all_candidates, evidence)
@@ -327,7 +387,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
             journal_skipped += 1
             continue
         query = str(j.get("query") or "")
-        missing = "是" if (query and query not in evidence) else ""
+        missing = "是" if (query and query not in evidence_strings) else ""
         journal_rows.append([
             j.get("phase", ""),
             j.get("node", ""),
