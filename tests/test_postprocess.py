@@ -46,8 +46,13 @@ def write_evidence(tmp_path: Path, sources: list[dict]) -> Path:
     return p
 
 
-def write_evidence_queries(tmp_path: Path, queries: list[str]) -> Path:
-    """构造证据留痕：按实际查询词生成模拟 WebSearch 原始结果（供 journal 校验用）。"""
+def write_evidence_queries(tmp_path: Path, queries: list[str],
+                           sources: list[dict] | None = None) -> Path:
+    """构造证据留痕：按实际查询词生成模拟 WebSearch 原始结果（供 journal 校验用）。
+
+    sources 可选：把候选 URL 一并写入留痕，保证本轮是干净运行
+    （否则候选会被证据校验拒绝，方案 C 下将不生成输出目录）。
+    """
     p = tmp_path / "search_log.jsonl"
     with p.open("w", encoding="utf-8") as f:
         for q in queries:
@@ -55,6 +60,15 @@ def write_evidence_queries(tmp_path: Path, queries: list[str]) -> Path:
                 "tool_name": "WebSearch",
                 "tool_input": {"query": q},
                 "tool_response": {"results": [{"url": f"https://example.com/{abs(hash(q))}"}]},
+            }
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        for s in sources or []:
+            if not isinstance(s, dict) or not s.get("url"):
+                continue
+            payload = {
+                "tool_name": "WebSearch",
+                "tool_input": {"query": "test"},
+                "tool_response": {"results": [{"url": s["url"], "title": s.get("name", "")}]},
             }
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return p
@@ -427,13 +441,12 @@ class TestRun:
         assert summary["total_found"] == 3
         assert summary["ungrounded"] == 1
         assert summary["kept"] == 2
-        # 有被拒条目：raw.json 与留痕自动保留供修正重跑
+        # 方案 C：有被拒条目时不生成输出目录（不落任何 CSV），
+        # raw.json 与留痕自动保留供修正重跑
+        assert summary["outdir"] == ""
+        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
         assert raw.exists()
         assert ev.exists()
-        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
-        rows = read_csv_rows(source_csv)
-        assert len(rows) == 3  # header + 2 条（编造的已被拒绝）
-        assert all("fabricated" not in r[4] for r in rows)
 
     def test_granularity_conflict_rejected_and_keeps_raw(self, tmp_path):
         data = base_data()
@@ -448,12 +461,11 @@ class TestRun:
 
         assert summary["granularity_rejected_count"] == 1
         assert summary["kept"] == 2
-        # 有被拒条目 → raw.json 与留痕保留供修正重跑
+        # 方案 C：有被拒条目 → 不生成输出目录，raw.json 与留痕保留供修正重跑
+        assert summary["outdir"] == ""
+        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
         assert raw.exists()
         assert ev.exists()
-        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
-        rows = read_csv_rows(source_csv)
-        assert all("manual.pdf" not in r[4] for r in rows)
 
     def test_single_level_kept_counted_and_in_csv(self, tmp_path):
         data = base_data()
@@ -651,9 +663,9 @@ class TestKnowledge:
 
         assert summary["ungrounded"] == 1
         assert summary["kept"] == 2  # 清单项被证据校验拒绝
-        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
-        rows = read_csv_rows(source_csv)
-        assert all("fabricated" not in r[4] for r in rows)
+        # 方案 C：被拒不落目录，raw.json 保留供修正重跑
+        assert summary["outdir"] == ""
+        assert raw.exists()
 
 
 class TestQueryEvidence:
@@ -685,7 +697,7 @@ class TestJournal:
         queries = ["IEEE 802.3 official", "交换机 标准 列表"]
         data["journal"] = self._journal(queries)
         raw = write_raw(tmp_path, data)
-        ev = write_evidence_queries(tmp_path, queries + ["test"])
+        ev = write_evidence_queries(tmp_path, queries + ["test"], data["sources"])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
@@ -702,7 +714,7 @@ class TestJournal:
         data = base_data()
         data["journal"] = self._journal(["不存在的查询词"])
         raw = write_raw(tmp_path, data)
-        ev = write_evidence_queries(tmp_path, ["另一个查询"])
+        ev = write_evidence_queries(tmp_path, ["另一个查询"], data["sources"])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
@@ -724,7 +736,8 @@ class TestJournal:
         data = base_data()
         data["journal"] = self._journal(["IEEE 802.3 official"]) + ["垃圾条目"]
         raw = write_raw(tmp_path, data)
-        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official", "test"])
+        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official", "test"],
+                                    data["sources"])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
@@ -766,13 +779,54 @@ class TestJournal:
         data = base_data()
         data["journal"] = self._journal(["IEEE"])
         raw = write_raw(tmp_path, data)
-        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"])
+        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"], data["sources"])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
         assert rows[1][5] == "是"
+
+
+class TestArchives:
+    """中间产物归档：raw.json 与证据留痕拷入运行目录（调试/复盘用）。"""
+
+    ARCHIVED_RAW = "算力服务器_2026-08-13-183045_raw.json"
+    ARCHIVED_EVIDENCE = "算力服务器_2026-08-13-183045_证据留痕.jsonl"
+
+    def test_success_run_archives_copies(self, tmp_path):
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        raw_text = raw.read_text(encoding="utf-8")
+        ev = write_evidence(tmp_path, data["sources"])
+        ev_text = ev.read_text(encoding="utf-8")
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        outdir = Path(summary["outdir"])
+        assert (outdir / self.ARCHIVED_RAW).read_text(encoding="utf-8") == raw_text
+        assert (outdir / self.ARCHIVED_EVIDENCE).read_text(encoding="utf-8") == ev_text
+        # 会话临时文件仍按现状删除
+        assert not raw.exists()
+        assert not ev.exists()
+
+    def test_rejection_run_creates_no_dir_and_no_archives(self, tmp_path):
+        data = base_data()
+        real_sources = [dict(s) for s in data["sources"]]
+        data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "官方文档", "url": "https://fabricated.example/x",
+                                "description": "编造的 URL"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, real_sources)
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        # 方案 C：被拒时不生成输出目录，也不归档（无目录可归档）；
+        # raw.json 与留痕原件保留供修正重跑
+        assert summary["outdir"] == ""
+        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+        assert raw.exists()
+        assert ev.exists()
 
 
 class TestRunResilience:
@@ -787,6 +841,28 @@ class TestRunResilience:
         assert summary["sources_broken"] is True
         assert summary["kept"] == 0
         assert summary["empty_nodes"] == data["nodes"]
+
+
+class TestCliRejectedRun:
+    """CLI 端到端：被拒运行时 stdout 明示"未生成输出目录"，且不落任何文件。"""
+
+    def test_rejected_run_prints_no_dir_and_creates_nothing(self, tmp_path):
+        data = base_data()
+        real_sources = [dict(s) for s in data["sources"]]
+        data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "官方文档", "url": "https://fabricated.example/x",
+                                "description": "编造的 URL"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, real_sources)
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "postprocess.py"), str(raw),
+             "--evidence-log", str(ev), "--out-dir", str(tmp_path / "out")],
+            capture_output=True, encoding="utf-8", timeout=60)
+
+        assert result.returncode == 0
+        assert "输出目录: 未生成" in result.stdout
+        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+        assert raw.exists()  # raw.json 保留供修正重跑
 
 
 class TestLogTool:

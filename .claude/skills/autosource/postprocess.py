@@ -15,11 +15,14 @@
   计算清单验证率（自洽性指标），未验证清单进 stdout 报告
 - 搜索日志：journal 的每个查询词必须作为完整 JSON 字符串值精确出现在证据留痕中
   （截短/改写即标注"证据缺失"），生成 搜索日志.csv 供人工复盘
-- 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）
+- 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）；
+  **有被拒条目（证据校验或粒度矛盾）时不生成输出目录**，raw.json 与证据留痕
+  原样保留、stdout 打印被拒明细，修正后重跑本命令即可补入
 - 域名 + 名称联合去重
 - 用 csv 标准库导出数据源清单（UTF-8 BOM，转义交给标准库）
 - 计算各节点候选数与体裁分布，写 stats CSV（含空节点检测、清单验证列）
-- 删除中间产物 raw.json 与证据留痕
+- 全部通过时归档中间产物（raw.json 与证据留痕拷入运行目录，调试/复盘用），
+  随后删除会话临时文件 raw.json 与证据留痕
 
 用法:
     python postprocess.py <raw.json> [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
@@ -50,6 +53,7 @@ import argparse
 import csv
 import json
 import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -413,19 +417,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     now = now or datetime.now()
     timestamp = now.strftime("%Y-%m-%d-%H%M%S")
 
-    base = Path(out_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    outdir = base / f"{domain}_{timestamp}"
-    counter = 1
-    while outdir.exists():
-        outdir = base / f"{domain}_{timestamp}_{counter}"
-        counter += 1
-    outdir.mkdir(parents=True)
-
-    write_source_csv(outdir / f"{domain}_{timestamp}_数据源清单.csv", kept)
-    if journal_rows:
-        write_journal_csv(outdir / f"{domain}_{timestamp}_搜索日志.csv", journal_rows)
-
     summary = {
         "domain": domain,
         "timestamp": timestamp,
@@ -438,7 +429,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "unmatched": node_stats["unmatched"],
         "empty_nodes": node_stats["empty_nodes"],
         "per_node": node_stats["per_node"],
-        "outdir": str(outdir),
+        "outdir": "",
         "model": model,
         "elapsed_seconds": round(time.perf_counter() - start, 1),
         "list_verified": list_verified,
@@ -456,11 +447,36 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
     }
+
+    # 方案 C：有被拒条目（证据校验或粒度矛盾）时不生成输出目录——
+    # 不落任何 CSV、不归档；raw.json 与证据留痕原样保留，修正后重跑本命令即可补入。
+    # 只有全部通过才生成运行目录（一次调用至多一个目录，且必然是完整版）。
+    if ungrounded or granularity_rejected:
+        return summary
+
+    base = Path(out_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    outdir = base / f"{domain}_{timestamp}"
+    counter = 1
+    while outdir.exists():
+        outdir = base / f"{domain}_{timestamp}_{counter}"
+        counter += 1
+    outdir.mkdir(parents=True)
+
+    write_source_csv(outdir / f"{domain}_{timestamp}_数据源清单.csv", kept)
+    if journal_rows:
+        write_journal_csv(outdir / f"{domain}_{timestamp}_搜索日志.csv", journal_rows)
+    summary["outdir"] = str(outdir)
     write_stats_csv(outdir / f"{domain}_{timestamp}_stats.csv", summary)
 
-    # 有被拒条目（证据校验或粒度矛盾）时保留中间产物，便于修正 URL 后重跑
-    # （否则按 --keep-raw 处理）
-    if not keep_raw and ungrounded == 0 and not granularity_rejected:
+    # 归档中间产物（调试/复盘用，run bundle 补完：输入+日志+产出+指标同目录保留）：
+    # raw.json 为过滤前全量；证据留痕为会话级文件（含本会话全部搜索记录），如实归档不切片。
+    shutil.copy(raw, outdir / f"{domain}_{timestamp}_raw.json")
+    if log_path.exists():
+        shutil.copy(log_path, outdir / f"{domain}_{timestamp}_证据留痕.jsonl")
+
+    # 全部通过：删除会话临时文件（--keep-raw 时保留）
+    if not keep_raw:
         raw.unlink(missing_ok=True)
         if log_path.exists():
             log_path.unlink(missing_ok=True)
@@ -470,7 +486,10 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
 
 def _print_summary(summary: dict) -> None:
     print(f"领域: {summary['domain']}")
-    print(f"输出目录: {summary['outdir']}")
+    if summary["outdir"]:
+        print(f"输出目录: {summary['outdir']}")
+    else:
+        print("输出目录: 未生成（存在被拒条目，修正后重跑本命令即可补入）")
     print(f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
           f"  证据校验移除: {summary['ungrounded']}  粒度矛盾移除: {summary['granularity_rejected_count']}"
           f"  最终收录: {summary['kept']}")
