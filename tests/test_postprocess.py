@@ -2,6 +2,7 @@
 import csv
 import io
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -13,7 +14,8 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity, deduplicate,
                          is_document_url, leaf_node, query_in_evidence, run,
-                         sanitize_domain)
+                         sanitize_domain, sha256_file, slice_evidence,
+                         strip_citation_anchors)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -205,6 +207,23 @@ class TestCheckGroundedBoundaries:
         assert rejected == []
 
 
+class TestStripCitationAnchors:
+    def test_double_digit_anchors_stripped(self):
+        assert strip_citation_anchors("https://a.com/doc.pdf#3#1") == "https://a.com/doc.pdf"
+
+    def test_single_anchor_stripped(self):
+        assert strip_citation_anchors("https://a.com/list#1") == "https://a.com/list"
+
+    def test_word_anchor_kept(self):
+        assert strip_citation_anchors("https://a.com/page#content") == "https://a.com/page#content"
+
+    def test_no_fragment_unchanged(self):
+        assert strip_citation_anchors("https://a.com/doc") == "https://a.com/doc"
+
+    def test_query_then_anchor(self):
+        assert strip_citation_anchors("https://a.com/s?x=1#2") == "https://a.com/s?x=1"
+
+
 class TestIsDocumentUrl:
     def test_pdf_extension(self):
         assert is_document_url("https://x.com/path/manual.pdf")
@@ -325,13 +344,18 @@ class TestRun:
         assert not raw.exists()
         assert not ev.exists()
 
+        # 零被拒：无被拒记录文件
+        assert summary["quarantined"] is False
+        assert not list(Path(summary["outdir"]).glob("*被拒记录.csv"))
+
         # 数据源清单 CSV：BOM + 表头 + 2 行
         source_csv = outdir / "算力服务器_2026-08-13-183045_数据源清单.csv"
         assert source_csv.exists()
         content = source_csv.read_bytes()
         assert content[:3] == BOM
         rows = read_csv_rows(source_csv)
-        assert rows[0] == ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明"]
+        assert rows[0] == ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址",
+                           "简要说明", "来源搜索"]
         assert len(rows) == 3
 
         # stats CSV：BOM + 表头 + 每节点一行，空节点列填了无结果节点
@@ -441,10 +465,19 @@ class TestRun:
         assert summary["total_found"] == 3
         assert summary["ungrounded"] == 1
         assert summary["kept"] == 2
-        # 方案 C：有被拒条目时不生成输出目录（不落任何 CSV），
-        # raw.json 与留痕自动保留供修正重跑
-        assert summary["outdir"] == ""
-        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+        # 隔离模式：被拒条目进隔离桶，其余照常产出完整 bundle；raw/留痕保留
+        assert summary["quarantined"] is True
+        assert summary["quarantine_count"] == 1
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert len(rows) == 3  # header + 2 条（编造的被隔离）
+        assert all("fabricated" not in r[4] for r in rows)
+        quarantine_csv = next((Path(summary["outdir"])).glob("*被拒记录.csv"))
+        qrows = read_csv_rows(quarantine_csv)
+        assert qrows[0] == ["数据源名称", "分类路径", "数据源类型", "声明粒度",
+                            "访问地址", "拒绝原因"]
+        assert qrows[1][0] == "Fake"
+        assert qrows[1][5] == "证据校验：URL 不在证据留痕中"
         assert raw.exists()
         assert ev.exists()
 
@@ -461,9 +494,15 @@ class TestRun:
 
         assert summary["granularity_rejected_count"] == 1
         assert summary["kept"] == 2
-        # 方案 C：有被拒条目 → 不生成输出目录，raw.json 与留痕保留供修正重跑
-        assert summary["outdir"] == ""
-        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+        # 隔离模式：粒度矛盾条目进隔离桶，其余照常产出
+        assert summary["quarantined"] is True
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert all("manual.pdf" not in r[4] for r in rows)
+        quarantine_csv = next((Path(summary["outdir"])).glob("*被拒记录.csv"))
+        qrows = read_csv_rows(quarantine_csv)
+        assert qrows[1][0] == "M 手册体系"
+        assert qrows[1][5] == "粒度矛盾：声明合集级/站点级但 URL 是单份文档"
         assert raw.exists()
         assert ev.exists()
 
@@ -521,6 +560,25 @@ class TestRun:
         assert summary["granularity_rejected_count"] == 0
         assert summary["kept"] == 3
         assert summary["single_count"] == 1
+
+    def test_citation_anchor_stripped_in_csv(self, tmp_path):
+        # 证据链仍严格逐字：带引用锚点的 URL 照抄通过校验；
+        # 输出 CSV 时尾部 #数字 锚点被脚本确定性剥离
+        data = base_data()
+        data["sources"].append({"name": "C", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "知识库", "granularity": "合集级",
+                                "url": "https://c.com/list#1",
+                                "description": "d", "reason": "r"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["ungrounded"] == 0
+        assert summary["kept"] == 3
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert any(r[0] == "C" and r[4] == "https://c.com/list" for r in rows)
 
     def test_missing_evidence_log_raises(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
@@ -662,9 +720,14 @@ class TestKnowledge:
                       evidence_log=str(ev))
 
         assert summary["ungrounded"] == 1
-        assert summary["kept"] == 2  # 清单项被证据校验拒绝
-        # 方案 C：被拒不落目录，raw.json 保留供修正重跑
-        assert summary["outdir"] == ""
+        assert summary["kept"] == 2  # 清单项被证据校验拒绝 → 隔离桶
+        assert summary["quarantined"] is True
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert all("fabricated" not in r[4] for r in rows)
+        quarantine_csv = next((Path(summary["outdir"])).glob("*被拒记录.csv"))
+        qrows = read_csv_rows(quarantine_csv)
+        assert any("fabricated" in r[4] for r in qrows)
         assert raw.exists()
 
 
@@ -708,7 +771,7 @@ class TestJournal:
         assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
         assert len(rows) == 3
         assert rows[1][2] == "IEEE 802.3 official"
-        assert rows[1][5] == ""  # 证据缺失为空
+        assert rows[1][5] == "否"  # 证据缺失列：未缺失显式填否
 
     def test_journal_query_missing_flagged(self, tmp_path):
         data = base_data()
@@ -788,29 +851,114 @@ class TestJournal:
         assert rows[1][5] == "是"
 
 
+class TestSliceEvidence:
+    """证据留痕切片：只保留本运行查询词命中的行（会话级 → 运行级）。"""
+
+    def _line(self, query: str, tool_input_query: bool = True):
+        payload = {"tool_name": "WebSearch", "tool_response": {"query": query, "results": []}}
+        if tool_input_query:
+            payload["tool_input"] = {"query": query}
+        return json.dumps(payload, ensure_ascii=False)
+
+    def test_keeps_matching_query_lines(self):
+        evidence = "\n".join([self._line("q1"), self._line("q2")]) + "\n"
+        sliced, kept, skipped = slice_evidence(evidence, {"q1"})
+        assert kept == 1
+        assert skipped == 0
+        assert '"q1"' in sliced and '"q2"' not in sliced
+
+    def test_drops_unrelated_lines(self):
+        evidence = self._line("其他运行查询") + "\n"
+        sliced, kept, skipped = slice_evidence(evidence, {"q1"})
+        assert kept == 0
+        assert sliced == ""
+
+    def test_malformed_lines_skipped_counted(self):
+        evidence = "not json\n" + self._line("q1") + "\n"
+        sliced, kept, skipped = slice_evidence(evidence, {"q1"})
+        assert kept == 1
+        assert skipped == 1
+
+    def test_tool_response_query_fallback(self):
+        evidence = self._line("q1", tool_input_query=False) + "\n"
+        sliced, kept, skipped = slice_evidence(evidence, {"q1"})
+        assert kept == 1
+
+
 class TestArchives:
-    """中间产物归档：raw.json 与证据留痕拷入运行目录（调试/复盘用）。"""
+    """run bundle 归档：交付物在根、intermediate/ 子目录、manifest 校验和。"""
 
-    ARCHIVED_RAW = "算力服务器_2026-08-13-183045_raw.json"
-    ARCHIVED_EVIDENCE = "算力服务器_2026-08-13-183045_证据留痕.jsonl"
+    def _evidence_mixed(self, tmp_path, run_queries, sources):
+        """本运行查询行 + 无关查询行 + 损坏行 + 候选 URL 行（test 查询）。"""
+        lines = []
+        for q in run_queries:
+            lines.append(json.dumps(
+                {"tool_name": "WebSearch", "tool_input": {"query": q},
+                 "tool_response": {"query": q, "results": []}}, ensure_ascii=False))
+        lines.append(json.dumps(
+            {"tool_name": "WebSearch", "tool_input": {"query": "无关查询"},
+             "tool_response": {"results": []}}, ensure_ascii=False))
+        lines.append("not json")
+        for s in sources:
+            lines.append(json.dumps(
+                {"tool_name": "WebSearch", "tool_input": {"query": "test"},
+                 "tool_response": {"results": [{"url": s["url"], "title": s.get("name", "")}]}},
+                ensure_ascii=False))
+        p = tmp_path / "search_log.jsonl"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return p
 
-    def test_success_run_archives_copies(self, tmp_path):
+    def test_success_run_archives_structured_bundle(self, tmp_path):
         data = base_data()
+        queries = ["IEEE 802.3 official", "交换机 标准 列表"]
+        data["journal"] = [
+            {"phase": "验证搜索", "node": "服务器CPU", "query": q, "results": 5, "extracted": 1}
+            for q in queries]
         raw = write_raw(tmp_path, data)
         raw_text = raw.read_text(encoding="utf-8")
-        ev = write_evidence(tmp_path, data["sources"])
-        ev_text = ev.read_text(encoding="utf-8")
+        ev = self._evidence_mixed(tmp_path, queries, data["sources"])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
-        assert (outdir / self.ARCHIVED_RAW).read_text(encoding="utf-8") == raw_text
-        assert (outdir / self.ARCHIVED_EVIDENCE).read_text(encoding="utf-8") == ev_text
+        intermediate = outdir / "intermediate"
+        # 输入快照内容等于 raw.json（会话临时文件已被清理，先存原文再比对）
+        assert (intermediate / "raw_input.json").read_text(encoding="utf-8") == raw_text
+        # 切片：只保留本运行查询行（无关行/损坏行/候选行全部排除）
+        sliced = (intermediate / "evidence_log.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(sliced) == 2
+        assert all(not l.startswith("not json") and "无关查询" not in l for l in sliced)
+        assert summary["evidence_slice_kept"] == 2
+        assert summary["evidence_slice_skipped"] == 1
+        # manifest：路径齐全且 sha256 可验证
+        manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["run"]["domain"] == "算力服务器"
+        paths = {f["path"] for f in manifest["files"]}
+        assert "intermediate/raw_input.json" in paths
+        assert "intermediate/evidence_log.jsonl" in paths
+        assert any("数据源清单" in p for p in paths)
+        assert any("stats" in p for p in paths)
+        assert any("搜索日志" in p for p in paths)
+        for f in manifest["files"]:
+            assert sha256_file(outdir / f["path"]) == f["sha256"]
         # 会话临时文件仍按现状删除
         assert not raw.exists()
         assert not ev.exists()
 
-    def test_rejection_run_creates_no_dir_and_no_archives(self, tmp_path):
+    def test_no_journal_no_evidence_archive(self, tmp_path):
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        outdir = Path(summary["outdir"])
+        manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
+        paths = {f["path"] for f in manifest["files"]}
+        assert not any("evidence_log" in p for p in paths)
+        assert not (outdir / "intermediate" / "evidence_log.jsonl").exists()
+
+    def test_quarantine_run_produces_complete_bundle(self, tmp_path):
         data = base_data()
         real_sources = [dict(s) for s in data["sources"]]
         data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
@@ -821,12 +969,267 @@ class TestArchives:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        # 方案 C：被拒时不生成输出目录，也不归档（无目录可归档）；
+        # 隔离模式：被拒仍产出完整 bundle（含隔离桶与 manifest），
         # raw.json 与留痕原件保留供修正重跑
-        assert summary["outdir"] == ""
-        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+        assert summary["quarantined"] is True
+        outdir = Path(summary["outdir"])
+        manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
+        paths = {f["path"] for f in manifest["files"]}
+        assert any("被拒记录" in p for p in paths)
+        assert (outdir / "intermediate" / "raw_input.json").exists()
         assert raw.exists()
         assert ev.exists()
+
+
+class TestLineage:
+    """数据血缘：搜索结果与收录的对应（正查/反查）+ 清单"来源搜索"列。"""
+
+    def _evidence_results(self, tmp_path, queries_results: dict[str, list[str]]):
+        p = tmp_path / "search_log.jsonl"
+        with p.open("w", encoding="utf-8") as f:
+            for q, urls in queries_results.items():
+                payload = {
+                    "tool_name": "WebSearch",
+                    "tool_input": {"query": q},
+                    "tool_response": {"query": q, "results": [
+                        {"content": [{"title": f"t{i}", "url": u}]}
+                        for i, u in enumerate(urls)]},
+                }
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return p
+
+    def _journal(self, queries, phase="增量发现", node="服务器CPU", results=10):
+        return [{"phase": phase, "node": node, "query": q,
+                 "results": results, "extracted": 1} for q in queries]
+
+    def test_lineage_rows_match_collection(self, tmp_path):
+        data = base_data()
+        # 三个结果里前两个被收录（base_data 的 A/B），第三个未收录
+        data["journal"] = self._journal(["q1"])
+        raw = write_raw(tmp_path, data)
+        ev = self._evidence_results(tmp_path, {"q1": [
+            "https://a.com/doc", "https://b.com/data", "https://c.com/other"]})
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["lineage_rows"] == 3
+        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        rows = read_csv_rows(lineage_csv)
+        assert rows[0] == ["阶段", "分类节点", "查询词", "返回结果数", "结果URL",
+                           "是否收录", "收录条目名称", "收录理由", "备注"]
+        by_url = {r[4]: r for r in rows[1:]}
+        assert by_url["https://a.com/doc"][5] == "是"
+        assert by_url["https://a.com/doc"][6] == "A"
+        assert by_url["https://a.com/doc"][0] == "增量发现"
+        assert by_url["https://a.com/doc"][3] == "10"
+        assert by_url["https://c.com/other"][5] == "否"  # 未收录显式填否
+        # 血缘表进 manifest
+        manifest = json.loads((Path(summary["outdir"]) / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        assert any("溯源" in f["path"] for f in manifest["files"])
+
+    def test_lineage_fallback_for_summary_text_url(self, tmp_path):
+        # 收录 URL 只出现在摘要文本（非结构化结果数组）→ 回退行备注
+        data = base_data()
+        data["sources"].append({"name": "X", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "知识库", "granularity": "合集级",
+                                "url": "https://x.com/deep", "description": "d",
+                                "reason": "r"})
+        data["journal"] = self._journal(["q1"])
+        raw = write_raw(tmp_path, data)
+        p = tmp_path / "search_log.jsonl"
+        with p.open("w", encoding="utf-8") as f:
+            # A/B 的 URL 放进非 journal 查询行（保证 grounded 通过，切片时被排除）
+            for s in data["sources"][:2]:
+                f.write(json.dumps(
+                    {"tool_name": "WebSearch", "tool_input": {"query": "test"},
+                     "tool_response": {"results": [{"url": s["url"]}]}},
+                    ensure_ascii=False) + "\n")
+            f.write(json.dumps(
+                {"tool_name": "WebSearch", "tool_input": {"query": "q1"},
+                 "tool_response": {"query": "q1",
+                                   "summary": "see https://x.com/deep for more"}},
+                ensure_ascii=False) + "\n")
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(p))
+
+        assert summary["lineage_rows"] == 1
+        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        rows = read_csv_rows(lineage_csv)
+        assert rows[1][5] == "是"
+        assert rows[1][6] == "X"
+        assert rows[1][8] == "摘要文本提取"
+
+    def test_source_csv_first_query_column(self, tmp_path):
+        # "来源搜索"列 = 该 URL 在留痕中首次出现的查询词
+        data = base_data()
+        data["journal"] = self._journal(["q1", "q2"])
+        raw = write_raw(tmp_path, data)
+        ev = self._evidence_results(tmp_path, {
+            "q1": ["https://a.com/doc"], "q2": ["https://a.com/doc", "https://b.com/data"]})
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        by_name = {r[0]: r for r in rows[1:]}
+        assert by_name["A"][6] == "q1"  # 首次出现在 q1（虽 q2 也返回了它）
+        assert by_name["B"][6] == "q2"
+
+    def test_no_structured_results_no_lineage_file(self, tmp_path):
+        data = base_data()
+        data["journal"] = self._journal(["q1"])
+        raw = write_raw(tmp_path, data)
+        p = tmp_path / "search_log.jsonl"
+        with p.open("w", encoding="utf-8") as f:
+            # A/B 的 URL 放进非 journal 查询行（保证 grounded 通过，切片时被排除）
+            for s in data["sources"]:
+                f.write(json.dumps(
+                    {"tool_name": "WebSearch", "tool_input": {"query": "test"},
+                     "tool_response": {"results": [{"url": s["url"]}]}},
+                    ensure_ascii=False) + "\n")
+            # 结果数组为空：无从构建血缘行
+            f.write(json.dumps(
+                {"tool_name": "WebSearch", "tool_input": {"query": "q1"},
+                 "tool_response": {"query": "q1", "results": []}},
+                ensure_ascii=False) + "\n")
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(p))
+
+        assert summary["lineage_rows"] == 0
+        assert not list((Path(summary["outdir"])).glob("*溯源.csv"))
+
+
+class TestRecoveryGate:
+    """修正轮次闸门：被拒写标记、2 轮用尽中止、新领域重置、成功清除。"""
+
+    def _rejected_data(self):
+        data = base_data()
+        real_sources = [dict(s) for s in data["sources"]]
+        data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "官方文档", "url": "https://fabricated.example/x",
+                                "description": "编造的 URL"})
+        return data, real_sources
+
+    def _run_rejected(self, tmp_path, data, real_sources, out_name="out"):
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, real_sources)
+        summary = run(str(raw), out_dir=str(tmp_path / out_name), now=FIXED_NOW,
+                      evidence_log=str(ev))
+        return summary, tmp_path / out_name
+
+    def test_first_rejection_writes_marker_round_one(self, tmp_path):
+        data, real = self._rejected_data()
+        summary, out_root = self._run_rejected(tmp_path, data, real)
+
+        assert summary["recovery_round"] == 1
+        marker = json.loads((out_root / ".recovery_rounds.json").read_text(encoding="utf-8"))
+        assert marker == {"domain": "算力服务器", "rounds": 1}
+
+    def test_second_rejection_rounds_two(self, tmp_path):
+        data, real = self._rejected_data()
+        self._run_rejected(tmp_path, data, real)
+        summary, _ = self._run_rejected(tmp_path, data, real)
+
+        assert summary["recovery_round"] == 2
+
+    def test_third_rejection_exhausted_but_still_produces(self, tmp_path):
+        data, real = self._rejected_data()
+        self._run_rejected(tmp_path, data, real)
+        self._run_rejected(tmp_path, data, real)
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, real)
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        # 轮次用尽：仍照常产出完整 bundle（隔离模式），标记保持 2 不递增
+        assert summary["rounds_exhausted"] is True
+        assert summary["quarantined"] is True
+        assert summary["outdir"]
+        marker = json.loads(
+            (tmp_path / "out" / ".recovery_rounds.json").read_text(encoding="utf-8"))
+        assert marker == {"domain": "算力服务器", "rounds": 2}
+
+    def test_new_domain_resets_rounds(self, tmp_path):
+        data, real = self._rejected_data()
+        self._run_rejected(tmp_path, data, real)
+        data["domain"] = "另一个领域"
+        summary, _ = self._run_rejected(tmp_path, data, real)
+
+        assert summary["recovery_round"] == 1  # 新领域重置
+
+    def test_success_clears_marker(self, tmp_path):
+        data, real = self._rejected_data()
+        _, out_root = self._run_rejected(tmp_path, data, real)
+        assert (out_root / ".recovery_rounds.json").exists()
+
+        data2 = base_data()
+        raw = write_raw(tmp_path, data2)
+        ev = write_evidence(tmp_path, data2["sources"])
+        run(str(raw), out_dir=str(out_root), now=FIXED_NOW, evidence_log=str(ev))
+
+        assert not (out_root / ".recovery_rounds.json").exists()
+
+    def test_corrupted_marker_treated_as_first(self, tmp_path):
+        data, real = self._rejected_data()
+        out_root = tmp_path / "out"
+        out_root.mkdir()
+        (out_root / ".recovery_rounds.json").write_text("not json", encoding="utf-8")
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, real)
+        summary = run(str(raw), out_dir=str(out_root), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["recovery_round"] == 1
+
+
+class TestUrlHygiene:
+    """不变量：所有交付 CSV 的 URL 列无纯数字引用锚点（#数字 尾巴）。
+
+    这是约定类不变量——任何新输出面若遗漏锚点剥离，此断言即红。
+    """
+
+    def test_source_csv_urls_have_no_digit_anchors(self, tmp_path):
+        data = base_data()
+        data["sources"].append({"name": "C", "category_path": "算力服务器-服务器CPU",
+                                "source_type": "知识库", "granularity": "合集级",
+                                "url": "https://c.com/list#1", "description": "d",
+                                "reason": "r"})
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert all(not re.search(r"#\d+$", r[4]) for r in rows[1:])
+
+    def test_lineage_csv_urls_have_no_digit_anchors(self, tmp_path):
+        data = base_data()
+        data["journal"] = [{"phase": "增量发现", "node": "服务器CPU", "query": "q1",
+                            "results": 10, "extracted": 1}]
+        raw = write_raw(tmp_path, data)
+        p = tmp_path / "search_log.jsonl"
+        with p.open("w", encoding="utf-8") as f:
+            # 结构化结果数组里的 URL 带引用锚点（真实留痕形态）
+            f.write(json.dumps(
+                {"tool_name": "WebSearch", "tool_input": {"query": "q1"},
+                 "tool_response": {"query": "q1", "results": [
+                     {"content": [{"title": "t", "url": "https://a.com/doc#1"}]},
+                     {"content": [{"title": "t2", "url": "https://b.com/other#2"}]}]}},
+                ensure_ascii=False) + "\n")
+            for s in data["sources"]:
+                f.write(json.dumps(
+                    {"tool_name": "WebSearch", "tool_input": {"query": "test"},
+                     "tool_response": {"results": [{"url": s["url"]}]}},
+                    ensure_ascii=False) + "\n")
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(p))
+
+        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        rows = read_csv_rows(lineage_csv)
+        assert len(rows) >= 3  # header + 2 条结果行
+        assert all(not re.search(r"#\d+$", r[4]) for r in rows[1:])
 
 
 class TestRunResilience:
@@ -859,9 +1262,12 @@ class TestCliRejectedRun:
              "--evidence-log", str(ev), "--out-dir", str(tmp_path / "out")],
             capture_output=True, encoding="utf-8", timeout=60)
 
-        assert result.returncode == 0
-        assert "输出目录: 未生成" in result.stdout
-        assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+        assert result.returncode == 0  # 隔离模式：产出即 0
+        assert "被拒记录" in result.stdout
+        assert "照常产出" in result.stdout
+        assert "剩余修正轮次 1/2" in result.stdout
+        outdir = next((tmp_path / "out").glob("算力服务器_*"))  # CLI 用真实时钟命名
+        assert list(outdir.glob("*被拒记录.csv"))
         assert raw.exists()  # raw.json 保留供修正重跑
 
 

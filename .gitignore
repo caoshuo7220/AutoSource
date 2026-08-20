@@ -2,6 +2,9 @@
 __pycache__/
 tests/__pycache__/
 .claude/skills/__pycache__/
+# 其他 AI 工具的本地配置（Codex 等，不入库）
+.agents/
+.codex/
 # autosource outputs
 outputs/
 # 日报（个人记录，不入库）
