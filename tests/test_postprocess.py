@@ -13,7 +13,7 @@ SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource"
 sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity, deduplicate,
-                         is_document_url, leaf_node, query_in_evidence, run,
+                         leaf_node, query_in_evidence, run,
                          sanitize_domain, sha256_file, slice_evidence,
                          strip_citation_anchors)
 
@@ -223,98 +223,37 @@ class TestStripCitationAnchors:
     def test_query_then_anchor(self):
         assert strip_citation_anchors("https://a.com/s?x=1#2") == "https://a.com/s?x=1"
 
-
-class TestIsDocumentUrl:
-    def test_pdf_extension(self):
-        assert is_document_url("https://x.com/path/manual.pdf")
-
-    def test_md_extension(self):
-        assert is_document_url("https://raw.githubusercontent.com/a/b/master/README.md")
-
-    def test_news_deep_link(self):
-        assert is_document_url("https://e.huawei.com/my/news/2024/industries/white-paper")
-
-    def test_news_index_not_flagged(self):
-        # /news 本身（无后续路径段）可能是新闻索引页，不误杀
-        assert not is_document_url("https://e.huawei.com/news")
-
-    def test_news_detail_page(self):
-        assert is_document_url("https://3onedata.com.cn/news-detail.aspx?cid=34&id=463")
-
-    def test_kb_detail(self):
-        assert is_document_url("https://kb.netgear.com/app/answers/detail/a_id/21811")
-
-    def test_contact_page(self):
-        assert is_document_url("https://www.centec.com/contact_us")
-
-    def test_github_issues_subpage(self):
-        assert is_document_url("https://github.com/opencomputeproject/opennetworklinux/issues")
-
-    def test_review_deep_link(self):
-        assert is_document_url("https://www.storagereview.com/zh-TW/review/ubiquiti-x")
-
-    def test_ranking_article_not_flagged(self):
-        # 榜单以单篇形态呈现（wired.com/story/...）是合法合集级页面，不得误杀
-        assert not is_document_url("https://www.wired.com/story/best-ethernet-switches/")
-
-    def test_reviews_category_page_not_flagged(self):
-        # 评测分类页（/reviews?dimension=）是合集入口，不是单篇深链
-        assert not is_document_url("https://www.trustradius.com/products/x/reviews?dimension=y")
-
-    def test_docs_portal_not_flagged(self):
-        assert not is_document_url("https://docs.example.com/product/")
-
-    def test_standard_detail_page_not_flagged(self):
-        # 标准详情页（?hcno= 参数）形态上不是文档，不误杀
-        assert not is_document_url(
-            "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=5A46B8602A848DB11EDC25245EB7643A")
-
-
 class TestCheckGranularity:
-    def test_collection_with_document_url_rejected(self):
-        sources = [{"name": "X 文档中心", "granularity": "合集级",
-                    "url": "https://x.com/manual.pdf"}]
-        kept, rejected, single, missing = check_granularity(sources)
-        assert kept == []
-        assert len(rejected) == 1
-        assert single == 0
-        assert missing == 0
+    """粒度声明归一化与计数（不拒绝——规则二已按用户决策移除）。"""
 
-    def test_site_level_with_news_url_rejected(self):
-        sources = [{"name": "Y 门户", "granularity": "站点级",
-                    "url": "https://y.com/news/2026/article"}]
-        kept, rejected, *_ = check_granularity(sources)
-        assert kept == []
-        assert len(rejected) == 1
-
-    def test_single_level_document_url_kept_and_counted(self):
+    def test_single_level_counted(self):
         sources = [{"name": "标准文件", "granularity": "单篇级",
                     "url": "https://x.com/std/TTAF-290.pdf"}]
-        kept, rejected, single, missing = check_granularity(sources)
-        assert len(kept) == 1
-        assert rejected == []
+        single, missing = check_granularity(sources)
         assert single == 1
         assert missing == 0
 
+    def test_document_url_no_longer_rejected(self):
+        # 规则二已移除：文档形态 URL 不再被拒绝
+        sources = [{"name": "X 文档中心", "granularity": "合集级",
+                    "url": "https://x.com/manual.pdf"}]
+        single, missing = check_granularity(sources)
+        assert single == 0
+        assert missing == 0
+
     def test_missing_granularity_defaults_to_collection(self):
-        # 缺声明按 P-002 默认合集级处理 → 文档形态 URL 构成矛盾被拒
         sources = [{"name": "X 文档中心", "url": "https://x.com/manual.pdf"}]
-        kept, rejected, single, missing = check_granularity(sources)
-        assert kept == []
-        assert len(rejected) == 1
+        single, missing = check_granularity(sources)
+        assert single == 0
         assert missing == 1
+        assert sources[0]["granularity"] == "合集级"
 
     def test_collection_portal_url_kept(self):
         sources = [{"name": "X 文档中心", "granularity": "合集级",
                     "url": "https://x.com/documentation"}]
-        kept, rejected, single, missing = check_granularity(sources)
-        assert len(kept) == 1
-        assert rejected == []
-
-    def test_missing_granularity_normalized_in_place(self):
-        sources = [{"name": "X", "url": "https://x.com/docs"}]
-        kept, *_ = check_granularity(sources)
-        assert len(kept) == 1
+        single, missing = check_granularity(sources)
+        assert single == 0
+        assert missing == 0
         assert sources[0]["granularity"] == "合集级"
 
 
@@ -344,10 +283,6 @@ class TestRun:
         assert not raw.exists()
         assert not ev.exists()
 
-        # 零被拒：无被拒记录文件
-        assert summary["quarantined"] is False
-        assert not list(Path(summary["outdir"]).glob("*被拒记录.csv"))
-
         # 数据源清单 CSV：BOM + 表头 + 2 行
         source_csv = outdir / "算力服务器_2026-08-13-183045_数据源清单.csv"
         assert source_csv.exists()
@@ -373,11 +308,10 @@ class TestRun:
         assert by_node["AI训练GPU"][0] == "算力服务器"
         assert by_node["AI训练GPU"][1] == "2026-08-13 18:30:45"
         assert by_node["AI训练GPU"][8] == "0"  # 证据校验移除
-        assert by_node["AI训练GPU"][9] == "0"  # 粒度矛盾移除
-        assert by_node["AI训练GPU"][10] == "0/0"  # 清单验证（无 knowledge）
-        assert by_node["AI训练GPU"][12] == "0"  # 单篇级收录
-        assert by_node["AI训练GPU"][13] == "test-model"
-        assert float(by_node["AI训练GPU"][14]) >= 0  # 脚本处理耗时
+        assert by_node["AI训练GPU"][9] == "0/0"  # 清单验证（无 knowledge）
+        assert by_node["AI训练GPU"][11] == "0"  # 单篇级收录
+        assert by_node["AI训练GPU"][12] == "test-model"
+        assert float(by_node["AI训练GPU"][13]) >= 0  # 脚本处理耗时
 
     def test_keep_raw(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
@@ -465,23 +399,18 @@ class TestRun:
         assert summary["total_found"] == 3
         assert summary["ungrounded"] == 1
         assert summary["kept"] == 2
-        # 隔离模式：被拒条目进隔离桶，其余照常产出完整 bundle；raw/留痕保留
-        assert summary["quarantined"] is True
-        assert summary["quarantine_count"] == 1
+        # 被拒条目不进清单、不单独成文件；明细在 stdout、计数在 stats；
+        # 运行到此结束，raw/留痕正常清理
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
-        assert len(rows) == 3  # header + 2 条（编造的被隔离）
+        assert len(rows) == 3  # header + 2 条（编造的被拒）
         assert all("fabricated" not in r[4] for r in rows)
-        quarantine_csv = next((Path(summary["outdir"])).glob("*被拒记录.csv"))
-        qrows = read_csv_rows(quarantine_csv)
-        assert qrows[0] == ["数据源名称", "分类路径", "数据源类型", "声明粒度",
-                            "访问地址", "拒绝原因"]
-        assert qrows[1][0] == "Fake"
-        assert qrows[1][5] == "证据校验：URL 不在证据留痕中"
-        assert raw.exists()
-        assert ev.exists()
+        assert not list(Path(summary["outdir"]).glob("*被拒记录*"))
+        assert not raw.exists()
+        assert not ev.exists()
 
-    def test_granularity_conflict_rejected_and_keeps_raw(self, tmp_path):
+    def test_document_url_no_longer_rejected_in_run(self, tmp_path):
+        # 规则二已移除：PDF 形态 URL 照常收录
         data = base_data()
         data["sources"].append({"name": "M 手册体系", "granularity": "合集级",
                                 "category_path": "算力服务器-服务器CPU",
@@ -492,19 +421,10 @@ class TestRun:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        assert summary["granularity_rejected_count"] == 1
-        assert summary["kept"] == 2
-        # 隔离模式：粒度矛盾条目进隔离桶，其余照常产出
-        assert summary["quarantined"] is True
+        assert summary["kept"] == 3
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
-        assert all("manual.pdf" not in r[4] for r in rows)
-        quarantine_csv = next((Path(summary["outdir"])).glob("*被拒记录.csv"))
-        qrows = read_csv_rows(quarantine_csv)
-        assert qrows[1][0] == "M 手册体系"
-        assert qrows[1][5] == "粒度矛盾：声明合集级/站点级但 URL 是单份文档"
-        assert raw.exists()
-        assert ev.exists()
+        assert any("manual.pdf" in r[4] for r in rows)
 
     def test_single_level_kept_counted_and_in_csv(self, tmp_path):
         data = base_data()
@@ -518,7 +438,6 @@ class TestRun:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        assert summary["granularity_rejected_count"] == 0
         assert summary["kept"] == 3
         assert summary["single_count"] == 1
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -526,10 +445,10 @@ class TestRun:
         assert any(r[0] == "团体标准" and r[3] == "单篇级" for r in rows)
         stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
         stats_rows = read_csv_rows(stats_csv)
-        assert all(r[12] == "1" for r in stats_rows[1:])  # 单篇级收录列
+        assert all(r[11] == "1" for r in stats_rows[1:])  # 单篇级收录列
 
-    def test_knowledge_item_with_document_url_rejected(self, tmp_path):
-        # 清单项默认体系级（合集级）→ 验证到单份 PDF 的 URL 构成矛盾被拒
+    def test_knowledge_item_with_document_url_kept(self, tmp_path):
+        # 规则二已移除：清单项验证到单份 PDF 也照常收录
         data = base_data()
         kn = {"name": "M 文档中心", "node": "服务器CPU", "verified": True,
               "category_path": "算力服务器-服务器CPU",
@@ -541,8 +460,7 @@ class TestRun:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        assert summary["granularity_rejected_count"] == 1
-        assert summary["kept"] == 2
+        assert summary["kept"] == 3
 
     def test_knowledge_item_explicit_single_level_kept(self, tmp_path):
         data = base_data()
@@ -557,7 +475,6 @@ class TestRun:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        assert summary["granularity_rejected_count"] == 0
         assert summary["kept"] == 3
         assert summary["single_count"] == 1
 
@@ -627,7 +544,7 @@ class TestKnowledge:
         # stats CSV 的清单验证单元格
         stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
         stats_rows = read_csv_rows(stats_csv)
-        assert all(r[10] == "1/2" for r in stats_rows[1:])
+        assert all(r[9] == "1/2" for r in stats_rows[1:])
 
     def test_verified_missing_category_path_falls_back_to_node(self, tmp_path):
         data = base_data()
@@ -720,15 +637,12 @@ class TestKnowledge:
                       evidence_log=str(ev))
 
         assert summary["ungrounded"] == 1
-        assert summary["kept"] == 2  # 清单项被证据校验拒绝 → 隔离桶
-        assert summary["quarantined"] is True
+        assert summary["kept"] == 2  # 清单项被证据校验拒绝，不进清单
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         assert all("fabricated" not in r[4] for r in rows)
-        quarantine_csv = next((Path(summary["outdir"])).glob("*被拒记录.csv"))
-        qrows = read_csv_rows(quarantine_csv)
-        assert any("fabricated" in r[4] for r in qrows)
-        assert raw.exists()
+        assert not list(Path(summary["outdir"]).glob("*被拒记录*"))
+        assert not raw.exists()  # 无修正重跑环节，临时文件正常清理
 
 
 class TestQueryEvidence:
@@ -958,7 +872,7 @@ class TestArchives:
         assert not any("evidence_log" in p for p in paths)
         assert not (outdir / "intermediate" / "evidence_log.jsonl").exists()
 
-    def test_quarantine_run_produces_complete_bundle(self, tmp_path):
+    def test_rejected_entries_not_in_bundle(self, tmp_path):
         data = base_data()
         real_sources = [dict(s) for s in data["sources"]]
         data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
@@ -969,16 +883,15 @@ class TestArchives:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        # 隔离模式：被拒仍产出完整 bundle（含隔离桶与 manifest），
-        # raw.json 与留痕原件保留供修正重跑
-        assert summary["quarantined"] is True
+        # 被拒仍产出完整 bundle（不落被拒文件）；raw/留痕正常清理
+        assert summary["ungrounded"] == 1
         outdir = Path(summary["outdir"])
         manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
         paths = {f["path"] for f in manifest["files"]}
-        assert any("被拒记录" in p for p in paths)
+        assert not any("被拒记录" in p for p in paths)
         assert (outdir / "intermediate" / "raw_input.json").exists()
-        assert raw.exists()
-        assert ev.exists()
+        assert not raw.exists()
+        assert not ev.exists()
 
 
 class TestLineage:
@@ -1100,89 +1013,6 @@ class TestLineage:
         assert not list((Path(summary["outdir"])).glob("*溯源.csv"))
 
 
-class TestRecoveryGate:
-    """修正轮次闸门：被拒写标记、2 轮用尽中止、新领域重置、成功清除。"""
-
-    def _rejected_data(self):
-        data = base_data()
-        real_sources = [dict(s) for s in data["sources"]]
-        data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
-                                "source_type": "官方文档", "url": "https://fabricated.example/x",
-                                "description": "编造的 URL"})
-        return data, real_sources
-
-    def _run_rejected(self, tmp_path, data, real_sources, out_name="out"):
-        raw = write_raw(tmp_path, data)
-        ev = write_evidence(tmp_path, real_sources)
-        summary = run(str(raw), out_dir=str(tmp_path / out_name), now=FIXED_NOW,
-                      evidence_log=str(ev))
-        return summary, tmp_path / out_name
-
-    def test_first_rejection_writes_marker_round_one(self, tmp_path):
-        data, real = self._rejected_data()
-        summary, out_root = self._run_rejected(tmp_path, data, real)
-
-        assert summary["recovery_round"] == 1
-        marker = json.loads((out_root / ".recovery_rounds.json").read_text(encoding="utf-8"))
-        assert marker == {"domain": "算力服务器", "rounds": 1}
-
-    def test_second_rejection_rounds_two(self, tmp_path):
-        data, real = self._rejected_data()
-        self._run_rejected(tmp_path, data, real)
-        summary, _ = self._run_rejected(tmp_path, data, real)
-
-        assert summary["recovery_round"] == 2
-
-    def test_third_rejection_exhausted_but_still_produces(self, tmp_path):
-        data, real = self._rejected_data()
-        self._run_rejected(tmp_path, data, real)
-        self._run_rejected(tmp_path, data, real)
-        raw = write_raw(tmp_path, data)
-        ev = write_evidence(tmp_path, real)
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
-                      evidence_log=str(ev))
-
-        # 轮次用尽：仍照常产出完整 bundle（隔离模式），标记保持 2 不递增
-        assert summary["rounds_exhausted"] is True
-        assert summary["quarantined"] is True
-        assert summary["outdir"]
-        marker = json.loads(
-            (tmp_path / "out" / ".recovery_rounds.json").read_text(encoding="utf-8"))
-        assert marker == {"domain": "算力服务器", "rounds": 2}
-
-    def test_new_domain_resets_rounds(self, tmp_path):
-        data, real = self._rejected_data()
-        self._run_rejected(tmp_path, data, real)
-        data["domain"] = "另一个领域"
-        summary, _ = self._run_rejected(tmp_path, data, real)
-
-        assert summary["recovery_round"] == 1  # 新领域重置
-
-    def test_success_clears_marker(self, tmp_path):
-        data, real = self._rejected_data()
-        _, out_root = self._run_rejected(tmp_path, data, real)
-        assert (out_root / ".recovery_rounds.json").exists()
-
-        data2 = base_data()
-        raw = write_raw(tmp_path, data2)
-        ev = write_evidence(tmp_path, data2["sources"])
-        run(str(raw), out_dir=str(out_root), now=FIXED_NOW, evidence_log=str(ev))
-
-        assert not (out_root / ".recovery_rounds.json").exists()
-
-    def test_corrupted_marker_treated_as_first(self, tmp_path):
-        data, real = self._rejected_data()
-        out_root = tmp_path / "out"
-        out_root.mkdir()
-        (out_root / ".recovery_rounds.json").write_text("not json", encoding="utf-8")
-        raw = write_raw(tmp_path, data)
-        ev = write_evidence(tmp_path, real)
-        summary = run(str(raw), out_dir=str(out_root), now=FIXED_NOW,
-                      evidence_log=str(ev))
-
-        assert summary["recovery_round"] == 1
-
-
 class TestUrlHygiene:
     """不变量：所有交付 CSV 的 URL 列无纯数字引用锚点（#数字 尾巴）。
 
@@ -1247,9 +1077,9 @@ class TestRunResilience:
 
 
 class TestCliRejectedRun:
-    """CLI 端到端：被拒运行时 stdout 明示"未生成输出目录"，且不落任何文件。"""
+    """CLI 端到端：被拒条目不进清单、明细在 stdout，运行正常结束（无修正重跑环节）。"""
 
-    def test_rejected_run_prints_no_dir_and_creates_nothing(self, tmp_path):
+    def test_rejected_run_produces_bundle_without_rejected_entries(self, tmp_path):
         data = base_data()
         real_sources = [dict(s) for s in data["sources"]]
         data["sources"].append({"name": "Fake", "category_path": "算力服务器-服务器CPU",
@@ -1262,13 +1092,12 @@ class TestCliRejectedRun:
              "--evidence-log", str(ev), "--out-dir", str(tmp_path / "out")],
             capture_output=True, encoding="utf-8", timeout=60)
 
-        assert result.returncode == 0  # 隔离模式：产出即 0
-        assert "被拒记录" in result.stdout
-        assert "照常产出" in result.stdout
-        assert "剩余修正轮次 1/2" in result.stdout
+        assert result.returncode == 0
+        assert "证据校验移除明细" in result.stdout
+        assert "证据校验移除: 1" in result.stdout
         outdir = next((tmp_path / "out").glob("算力服务器_*"))  # CLI 用真实时钟命名
-        assert list(outdir.glob("*被拒记录.csv"))
-        assert raw.exists()  # raw.json 保留供修正重跑
+        assert not list(outdir.glob("*被拒记录*"))
+        assert not raw.exists()  # 无修正重跑环节，临时文件正常清理
 
 
 class TestLogTool:

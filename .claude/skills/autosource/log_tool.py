@@ -1,6 +1,6 @@
 """PostToolUse hook 脚本：证据留痕。
 
-由 Claude Code 的 PostToolUse hook 在每次 WebSearch/WebFetch 调用完成后自动执行
+由 Claude Code 的 PostToolUse hook 在每次 WebSearch 调用完成后自动执行
 （settings.json 中配置），把工具的完整输入与原始返回结果追加到证据留痕文件。
 
 设计要点：

@@ -4,20 +4,19 @@
 本脚本保证其余所有确定性环节：
 
 - 证据校验（grounded check）：候选 URL 必须作为完整 URL 出现在证据留痕中（留痕由
-  PostToolUse hook 在每次 WebSearch/WebFetch 时由系统自动记录，记录过程在
+  PostToolUse hook 在每次 WebSearch 时由系统自动记录，记录过程在
   harness 侧、模型不参与），否则拒绝该条并计数——从结构上杜绝模型**意外**编造
   URL（转写错误、凭记忆补写；边界匹配，截短为父路径/裸域名不放行）。
-  留痕文件本身无写保护，该机制不防对抗性篡改
-- 粒度矛盾检测：候选声明 granularity 为合集级/站点级但 URL 呈文档形态（PDF、
-  新闻/问答/评测深链等确定性信号）→ 拒绝并报明细——结构性防"名实不符"
-  （如条目名"XX 文档中心"却指向一份 PDF）；单篇级条目放行但计数进 stats
+  留痕文件本身无写保护，该机制不防对抗性篡改。
+  被拒条目不进入清单（明细打印在 stdout、计数见 stats 证据校验移除列），
+  不影响其余产出，运行到此结束（无修正重跑环节）
+- 粒度声明归一化与计数（不拒绝）：granularity 缺失或非法视为合集级，
+  单篇级计数进 stats——产量优先，粒度/子站问题由后续子站合并功能处理
 - 知识清单：verified=true 且字段齐全的清单项自动并入 sources（LLM 不手工复制）；
   计算清单验证率（自洽性指标），未验证清单进 stdout 报告
 - 搜索日志：journal 的每个查询词必须作为完整 JSON 字符串值精确出现在证据留痕中
   （截短/改写即标注"证据缺失"），生成 搜索日志.csv 供人工复盘
-- 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）；
-  **有被拒条目（证据校验或粒度矛盾）时不生成输出目录**，raw.json 与证据留痕
-  原样保留、stdout 打印被拒明细，修正后重跑本命令即可补入
+- 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）
 - 域名 + 名称联合去重
 - 用 csv 标准库导出数据源清单（UTF-8 BOM，转义交给标准库）；写入时剥离 URL
   尾部的引用序号锚点（#数字，markdown 引用记号；单词锚点保留）
@@ -25,14 +24,9 @@
 - 数据血缘：从切片留痕与最终收录 join 生成 溯源.csv（每行一条搜索结果，
   正查"返回了什么、收录了哪几条"、反查"出自哪个搜索词"），数据源清单加
   "来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
-- 按 run bundle 结构归档：交付物在运行目录根（数据源清单/stats/搜索日志/溯源，
-  被拒时加 被拒记录.csv 隔离桶），`intermediate/` 子目录放输入快照与**本运行
-  切片**后的证据留痕，`manifest.json` 记录每个文件的用途/生成方/sha256
-  （不可变性与可审计性）；随后删除会话临时文件
-- 隔离而非中止（DLQ 模式）：被拒条目进 被拒记录.csv（含拒绝原因）、其余照常
-  产出完整 bundle，运行永不因被拒而中止；修正+重跑是可选优化，`.recovery_rounds.json`
-  记录轮次（按 domain 区分，最多 2 轮），用尽后仍产出、仅提示升级——"升级给
-  人类"由删除标记文件表达；零被拒的运行自动清除标记
+- 按 run bundle 结构归档：交付物在运行目录根（数据源清单/stats/搜索日志/溯源），
+  `intermediate/` 子目录放输入快照与**本运行切片**后的证据留痕，`manifest.json`
+  记录每个文件的用途/生成方/sha256（不可变性与可审计性）；随后删除会话临时文件
 
 用法:
     python postprocess.py <raw.json> [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
@@ -73,17 +67,14 @@ from typing import Optional
 from urllib.parse import urlparse
 
 SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明", "来源搜索"]
-QUARANTINE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "声明粒度", "访问地址", "拒绝原因"]
 LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
                       "收录条目名称", "收录理由", "备注"]
 STATS_CSV_HEADER = ["领域", "时间戳", "分类节点", "候选数", "体裁分布", "无结果节点",
-                    "总候选数", "去重移除", "证据校验移除", "粒度矛盾移除", "清单验证",
+                    "总候选数", "去重移除", "证据校验移除", "清单验证",
                     "最终收录", "单篇级收录", "模型", "脚本处理耗时(秒)"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
 
 DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
-RECOVERY_MARKER = ".recovery_rounds.json"
-MAX_RECOVERY_ROUNDS = 2
 
 
 def _domain(url: str) -> str:
@@ -242,37 +233,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _read_marker(marker_path: Path) -> dict:
-    """读修正轮次标记文件；缺失/损坏视为空（首次修正）。"""
-    if not marker_path.exists():
-        return {}
-    try:
-        data = json.loads(marker_path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (ValueError, OSError):
-        return {}
-
-
-def _mark_recovery_round(out_dir: Path, domain: str) -> tuple[int, bool]:
-    """记录一次修正轮次，返回 (本轮轮次, 是否已用尽)。
-
-    轮次按 domain 区分：新领域自动重置。用尽后不再写标记（保持 2），
-    照常产出——"升级给人类"由删除标记文件表达（用户确认后删除
-    {out_dir}/{RECOVERY_MARKER} 即可继续修正）。
-    """
-    marker_path = out_dir / RECOVERY_MARKER
-    marker = _read_marker(marker_path)
-    rounds = (marker.get("rounds", 0) + 1) if marker.get("domain") == domain else 1
-    exhausted = rounds > MAX_RECOVERY_ROUNDS
-    if not exhausted:
-        marker_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_path.write_text(
-            json.dumps({"domain": domain, "rounds": rounds}, ensure_ascii=False),
-            encoding="utf-8")
-        return rounds, False
-    return rounds, True
-
-
 def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, str]:
     """每个收录源 URL（剥引用锚点后）→ 在切片留痕中首次出现行的查询词。
 
@@ -346,24 +306,6 @@ def build_lineage(kept: list[dict], sliced_evidence: str,
     return rows
 
 
-def write_quarantine_csv(path: Path, rejected: list[dict],
-                         granularity_rejected: list[dict]) -> None:
-    """写被拒记录 CSV（隔离桶）：被证据链/粒度校验拒绝的条目，不进交付物。"""
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(QUARANTINE_CSV_HEADER)
-        for s in rejected:
-            writer.writerow([
-                s.get("name", ""), s.get("category_path", ""), s.get("source_type", ""),
-                s.get("granularity", ""), s.get("url", ""),
-                "证据校验：URL 不在证据留痕中"])
-        for s in granularity_rejected:
-            writer.writerow([
-                s.get("name", ""), s.get("category_path", ""), s.get("source_type", ""),
-                s.get("granularity", ""), s.get("url", ""),
-                "粒度矛盾：声明合集级/站点级但 URL 是单份文档"])
-
-
 def write_lineage_csv(path: Path, rows: list[list]) -> None:
     """写数据血缘 CSV：搜索结果与收录的对应关系（正查/反查）。"""
     with path.open("w", newline="", encoding="utf-8-sig") as f:
@@ -388,25 +330,8 @@ def write_manifest(path: Path, run_meta: dict, entries: list[tuple[str, str, str
         encoding="utf-8")
 
 
-# 文档形态 URL 的确定性信号（保守口径：宁可漏检，不可误杀榜单/门户等合法合集页面）
-DOC_EXTENSIONS = (".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".md", ".txt")
-SINGLE_CONTENT_PATTERNS = [
-    r"/news/.+",             # 新闻深链（e.huawei.com/news/2024/...）
-    r"news-detail",          # 新闻详情页（3onedata news-detail.aspx）
-    r"pressrelease",         # 新闻稿页（socionextus.com/pressreleases/...）
-    r"press-releases",
-    r"/articles?/",          # 单篇文章路径
-    r"/article\?id=",        # 文章详情（cww.net.cn/article?id=...）
-    r"/questions/.+",        # 单条问答（zhiliao.h3c.com/questions/dispcont/...）
-    r"answers/detail",       # 单条 KB（kb.netgear.com/app/answers/detail/a_id/...）
-    r"/contact(_us)?(/|$)",  # 联系页（官网/门户条目指向联系页必错）
-    r"/(issues|pulls)(/|$)",  # GitHub 仓库子页
-    r"/(blob|tree)/",        # GitHub 单文件/子目录视图
-    r"/doc/.+",              # 单文档页（support.huawei.com/zh/doc/EDOC...）
-    r"/document/.+",         # 单报告页（lightcounting.com/document/...）
-    r"/reviews?/.+",         # 单篇评测深链（storagereview.com/review/...）
-    r"review/\d",            # 评测文章分页（servethehome.com/...-review/3/）
-]
+# 文档形态 URL 的确定性信号已按用户决策移除（2026-08-20：规则二删除，产量优先，
+# 粒度/子站问题由后续"站点与子站合并"功能处理）。granularity 仅归一化与计数。
 GRANULARITY_LEVELS = ("合集级", "站点级", "单篇级")
 
 
@@ -421,23 +346,11 @@ def strip_citation_anchors(url: str) -> str:
     return CITATION_ANCHOR_RE.sub("", url)
 
 
-def is_document_url(url: str) -> bool:
-    """确定性检测：URL 是否指向单份文档/单条内容页（与"体系级入口"矛盾）。"""
-    path = urlparse(url).path.lower()
-    if path.endswith(DOC_EXTENSIONS):
-        return True
-    return any(re.search(p, path) for p in SINGLE_CONTENT_PATTERNS)
+def check_granularity(sources: list[dict]) -> tuple[int, int]:
+    """粒度声明归一化与计数（不拒绝——产量优先，粒度问题由后续子站合并功能处理）。
 
-
-def check_granularity(sources: list[dict]) -> tuple[list[dict], list[dict], int, int]:
-    """粒度矛盾检测：声明合集级/站点级但 URL 呈文档形态 → 拒绝。
-
-    返回 (通过, 被拒, 单篇级数, 缺声明数)：
-    - granularity 缺失或非法视为合集级（P-002 默认），计数告警
-    - 单篇级条目放行但计数——例外条款的使用量进 stats，滥用可见
+    返回 (单篇级数, 缺声明数)：granularity 缺失或非法视为合集级（P-002 默认）。
     """
-    kept: list[dict] = []
-    rejected: list[dict] = []
     single_count = 0
     missing_count = 0
     for s in sources:
@@ -448,12 +361,7 @@ def check_granularity(sources: list[dict]) -> tuple[list[dict], list[dict], int,
         s["granularity"] = g
         if g == "单篇级":
             single_count += 1
-            kept.append(s)
-        elif is_document_url(str(s.get("url") or "")):
-            rejected.append(s)
-        else:
-            kept.append(s)
-    return kept, rejected, single_count, missing_count
+    return single_count, missing_count
 
 
 def merge_knowledge(knowledge: list[dict]) -> tuple[list[dict], int, int]:
@@ -531,7 +439,6 @@ def write_stats_csv(path: Path, summary: dict) -> None:
                 summary["total_found"],
                 summary["removed_duplicates"],
                 summary["ungrounded"],
-                summary["granularity_rejected_count"],
                 summary["list_verified"],
                 summary["kept"],
                 summary["single_count"],
@@ -618,12 +525,11 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     grounded, rejected = check_grounded(all_candidates, evidence)
     ungrounded = len(rejected)
 
-    # 粒度矛盾检测：声明合集级/站点级但 URL 呈文档形态 → 拒绝（结构性防"名实不符"）
-    granularity_ok, granularity_rejected, single_count, granularity_missing = \
-        check_granularity(grounded)
+    # 粒度声明归一化与计数（不拒绝）
+    single_count, granularity_missing = check_granularity(grounded)
 
-    kept = deduplicate(granularity_ok)
-    removed = len(granularity_ok) - len(kept)
+    kept = deduplicate(grounded)
+    removed = len(grounded) - len(kept)
     node_stats = compute_stats(kept, nodes)
 
     journal_rows: list[list] = []
@@ -688,28 +594,12 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "incomplete": incomplete,
         "unverified": unverified,
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
-        "granularity_rejected_count": len(granularity_rejected),
-        "granularity_rejected": [
-            (str(s.get("name") or "未命名"), str(s.get("granularity") or "合集级"),
-             str(s.get("url") or "")) for s in granularity_rejected],
         "single_count": single_count,
         "granularity_missing": granularity_missing,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
     }
-
-    # 隔离而非中止（DLQ 模式）：被拒条目进隔离桶，其余照常产出完整 bundle。
-    # 修正轮次标记记录可选优化循环（≤2 轮），用尽后仍产出、仅提示升级。
-    quarantined = bool(rejected or granularity_rejected)
-    if quarantined:
-        summary["recovery_round"], summary["rounds_exhausted"] = \
-            _mark_recovery_round(Path(out_dir), domain)
-    else:
-        summary["recovery_round"] = 0
-        summary["rounds_exhausted"] = False
-    summary["quarantined"] = quarantined
-    summary["quarantine_count"] = len(rejected) + len(granularity_rejected)
 
     base = Path(out_dir)
     base.mkdir(parents=True, exist_ok=True)
@@ -753,12 +643,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     summary["lineage_rows"] = len(lineage_rows)
     summary["evidence_slice_kept"] = slice_kept
     summary["evidence_slice_skipped"] = slice_skipped
-    if quarantined:
-        write_quarantine_csv(outdir / f"{domain}_{timestamp}_被拒记录.csv",
-                             rejected, granularity_rejected)
-        manifest_entries.append(
-            (f"{domain}_{timestamp}_被拒记录.csv",
-             "被拒隔离记录（未进交付物，含拒绝原因）", "postprocess.py"))
     run_meta = {
         "domain": domain,
         "timestamp": summary["timestamp_display"],
@@ -768,13 +652,8 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     write_manifest(outdir / "manifest.json", run_meta, manifest_entries)
     summary["manifest_count"] = len(manifest_entries)
 
-    # 零被拒时清除修正轮次标记（标记是恢复跟踪器，非归档物；与 --keep-raw 无关）
-    if not quarantined:
-        marker_path = Path(out_dir) / RECOVERY_MARKER
-        marker_path.unlink(missing_ok=True)
-
-    # 零被拒时删除会话临时文件（被拒轮次保留 raw.json 与留痕供修正；--keep-raw 时保留）
-    if not keep_raw and not quarantined:
+    # 删除会话临时文件（--keep-raw 时保留；无修正重跑环节，运行到此结束）
+    if not keep_raw:
         raw.unlink(missing_ok=True)
         if log_path.exists():
             log_path.unlink(missing_ok=True)
@@ -786,24 +665,20 @@ def _print_summary(summary: dict) -> None:
     print(f"领域: {summary['domain']}")
     print(f"输出目录: {summary['outdir']}")
     print(f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
-          f"  证据校验移除: {summary['ungrounded']}  粒度矛盾移除: {summary['granularity_rejected_count']}"
+          f"  证据校验移除: {summary['ungrounded']}"
           f"  最终收录: {summary['kept']}")
     if summary["invalid"]:
         print(f"无效记录(缺名称/URL): {summary['invalid']}")
     if summary["unmatched"]:
         print(f"警告: {summary['unmatched']} 条记录的分类路径未匹配到任何节点")
     if summary["rejected"]:
-        print("证据校验移除明细:")
+        print("证据校验移除明细（网址不在搜索结果留痕中，未进入清单）:")
         for name, url in summary["rejected"]:
             print(f"  - {name}: {url}")
-    if summary["granularity_rejected"]:
-        print("粒度矛盾移除明细（声明合集级/站点级但 URL 是单份文档）:")
-        for name, g, url in summary["granularity_rejected"]:
-            print(f"  - {name}（{g}）: {url}")
     if summary["granularity_missing"]:
         print(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
     if summary["single_count"]:
-        print(f"单篇级收录: {summary['single_count']} 条（P-002 例外条款使用情况，见 stats.csv）")
+        print(f"单篇级收录: {summary['single_count']} 条（见 stats.csv）")
     print(f"清单核对: 验证通过 {summary['list_verified']} 项")
     if summary["knowledge_missing"]:
         print("警告: raw.json 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
@@ -837,14 +712,6 @@ def _print_summary(summary: dict) -> None:
         print(f"  {node}: {info['count']} 条{suffix}")
     empty = summary["empty_nodes"]
     print(f"无结果节点: {'、'.join(empty) if empty else '无'}")
-    if summary["quarantined"]:
-        print(f"被拒记录: {summary['quarantine_count']} 条已隔离（见 被拒记录.csv），其余照常产出")
-        if summary["rounds_exhausted"]:
-            print("修正轮次已用尽（2/2）——如仍需修正，请用户删除 outputs/.recovery_rounds.json 后重跑")
-        else:
-            remaining = MAX_RECOVERY_ROUNDS - summary["recovery_round"]
-            print(f"可选：修正 outputs/raw.json 后重跑提升完整度（剩余修正轮次 {remaining}/{MAX_RECOVERY_ROUNDS}）；"
-                  "禁止创建脚本、禁止手工核对——越界命令会被权限拦截")
     print(f"脚本处理耗时: {summary['elapsed_seconds']} 秒")
 
 
