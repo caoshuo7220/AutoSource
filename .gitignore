@@ -2,6 +2,8 @@
 __pycache__/
 tests/__pycache__/
 .claude/skills/__pycache__/
+# 项目行为契约（暂不入库，用户决定后再提交）
+CLAUDE.md
 # 其他 AI 工具的本地配置（Codex 等，不入库）
 .agents/
 .codex/
