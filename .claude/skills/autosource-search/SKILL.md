@@ -2,10 +2,10 @@
 name: autosource-search
 description: 对给定分类节点执行数据源搜索，返回全部合格候选（被 autosource 编排层调用）
 argument-hint: "[节点列表 + 权威源清单]"
-allowed-tools: WebSearch, Read, Write, Agent
+allowed-tools: WebSearch, Read, Write, Bash, Agent
 ---
 
-你是 autosource 的**搜索层**。接收叶子节点与权威源清单，执行验证搜索与增量发现，返回验证后的清单、增量候选与搜索日志。
+你是 autosource 的**搜索层**。接收叶子节点与权威源清单，执行验证搜索与增量发现，把结果按契约写入 `outputs/raw.json`，文本返回状态汇报。
 
 ## 核心原则
 
@@ -52,6 +52,7 @@ allowed-tools: WebSearch, Read, Write, Agent
 
 ```
 领域词: 交换机
+模型名: 编排层当前使用的模型名（照抄进 raw.json 的 model 字段）
 叶子节点:
   - 数据中心交换机
   - 企业园区交换机
@@ -99,12 +100,58 @@ allowed-tools: WebSearch, Read, Write, Agent
 
 ### 失败路径（搜索工具异常）
 
-搜索调用大面积失败（多数查询无有效结果返回）时：停止搜索，在返回结果中**显式声明失败状态**（`failed: true` + 简述），不伪造候选；编排层会据此中止流程。
+搜索调用大面积失败（多数查询无有效结果返回）时：停止搜索，**不写 raw.json**，在文本返回中**显式声明失败状态**（`failed: true` + 简述），不伪造候选；编排层会据此中止流程。
 
 ## 输出（接口契约）
 
-直接返回给编排层，不写入文件：
+**直接把结果写入 `outputs/raw.json`（用 Write 工具，全部搜索完成后一次性写完整文件）**，**不把数据放进返回文本让编排层转录**。写完文件后**不要结束回合**——立即执行本节末尾的"收尾"：运行后处理脚本并把其输出作为最终汇总展示。
 
-- `knowledge`：验证后的清单——每项带 `verified` 状态；verified=true 的项带齐 `category_path / source_type / url / description / reason`（可带 `granularity`，默认合集级）；verified=false 的项带 `note`（"疑似无效机构"或"已尽力"）；被剔除的疑似无效机构也留在清单里（note 标注），供报告展示
-- `new_sources`：增量发现的候选，每条含 `name / category_path / source_type / granularity / url / description / reason`（granularity ∈ 合集级/站点级/单篇级，单篇级需在 reason 写明例外依据）
-- `journal`：本次每一次搜索一条——`{phase: 验证搜索|增量发现|扩量轮, node, query, results（返回链接数）, extracted（提取候选数）}`，query 照抄实际查询词
+写入纪律（硬性）：
+
+- **禁止自创脚本 / 中间文件组装**——直接 Write；执行任何 Bash（如 `python build_xxx.py`）都会越界被权限白名单拦截弹窗
+- 只写契约字段，内部字段（如 `expected_type`）不写入
+- 失败路径（搜索大面积异常）不写文件，文本返回 `failed: true`（见上）
+- 运行中禁止调用开发类技能（如 `karpathy-guidelines`）——本流程不写代码、不跑测试，唯一合法的 Bash 是 postprocess 命令
+
+文件结构：
+
+```json
+{
+  "domain": "交换机",
+  "nodes": ["数据中心交换机", "以太网标准(IEEE 802.3)", "..."],
+  "model": "编排层传入的模型名",
+  "knowledge": [
+    {"name": "IEEE 802.3 以太网工作组", "node": "以太网标准(IEEE 802.3)", "verified": true,
+     "category_path": "交换机-核心技术-以太网标准(IEEE 802.3)",
+     "source_type": "行业标准", "granularity": "合集级", "url": "https://www.ieee802.org/3/",
+     "description": "IEEE 以太网标准工作组官网", "reason": "清单验证通过，官方入口"},
+    {"name": "某某机构", "node": "某节点", "verified": false, "note": "疑似无效机构"}
+  ],
+  "journal": [
+    {"phase": "验证搜索", "node": "以太网标准(IEEE 802.3)", "query": "IEEE 802.3 Ethernet Working Group official", "results": 10, "extracted": 3}
+  ],
+  "sources": []
+}
+```
+
+字段约束：
+
+- `domain / nodes / model`：照抄编排层传入值（nodes 为全部叶子节点）
+- `knowledge`：node 必须在 nodes 中；verified=true 的项必须带齐 `category_path/source_type/url/description/reason`（category_path 用 `-` 连接完整层级路径，末段与 node 一致），`granularity` 可带（默认合集级）；verified=false 的项带 `note`（"疑似无效机构"或"已尽力"）；被剔除的疑似无效机构也留在清单里（note 标注），供报告展示
+- `sources`：仅增量发现条目，每条含 `name/category_path/source_type/granularity/url/description/reason`；granularity ∈ 合集级/站点级/单篇级（单篇级需在 reason 写明例外依据；缺省按合集级处理）；**不重复写已验证的清单项**（脚本自动并入）
+- `journal`：本次每一次搜索一条——`phase`（验证搜索/增量发现/扩量轮）、`node`、`query`（照抄实际查询词）、`results`（返回链接数）、`extracted`（提取候选数）
+- 通用约束：name 和 url 不可为空；仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；确保体裁多样性（数据集只是其中一类，不应占主导）；通用平台（知网/专利库/百科/标准平台等）不作为独立条目出现，其信息通过领域条目的简要说明传递
+
+### 收尾（写完 raw.json 后立即执行，不要结束回合）
+
+**本 skill 到此并未结束**——没有"交接"，你自己接着跑完。立即执行（该 Bash 命令在权限白名单内，直接运行）：
+
+```bash
+python .claude/skills/autosource/postprocess.py outputs/raw.json
+```
+
+脚本一次性完成证据校验/清单并入/去重/CSV/stats/溯源/manifest/清理，把它的 stdout 统计输出**原样展示给用户作为最终汇总**（含清单核对、未验证清单、输出目录）。运行到此结束，没有修正重跑环节。
+
+纪律重申：证据核对不手工做——禁止用 grep/shell 循环/自创脚本等复合命令核对或重建（这是脚本的职责，越界命令会被权限白名单拦截弹窗）；调查/排查用 Read 工具。
+
+失败路径（搜索大面积异常）：不写文件、不运行后处理，文本返回 `failed: true` + 简述后结束。

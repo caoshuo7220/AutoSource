@@ -584,6 +584,25 @@ class TestKnowledge:
         assert summary["incomplete"] == 1
         assert summary["unverified"] == []  # 缺 name 的 verified 项不进未验证交接单
 
+    def test_knowledge_extra_contract_fields_tolerated(self, tmp_path):
+        """契约外字段（如 expected_type）不阻断并入——搜索层直接落盘 raw.json 后，
+        条目上可能残留内部字段；脚本只取契约字段，多余字段忽略。"""
+        data = base_data()
+        kn = self._knowledge_item()
+        kn["expected_type"] = "官方文档"
+        data["knowledge"] = [kn]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [kn])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        assert summary["list_verified"] == "1/1"
+        assert summary["kept"] == 3
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        merged_row = next(r for r in rows[1:] if r[0] == "IEEE 802.3 工作组")
+        assert merged_row[2] == "行业标准"
+
     def test_knowledge_missing_tolerated(self, tmp_path):
         data = base_data()
         raw = write_raw(tmp_path, data)
@@ -989,6 +1008,45 @@ class TestLineage:
         assert by_name["A"][6] == "q1"  # 首次出现在 q1（虽 q2 也返回了它）
         assert by_name["B"][6] == "q2"
 
+    def test_source_csv_first_query_anchored_url(self, tmp_path):
+        # 留痕结构化结果带 #1 引用锚点：剥锚点后的 URL 仍必须归因到首次查询词
+        # （实测平板轮 36/84 条来源搜索为空——剥锚点后的子串被边界匹配判为前缀）
+        data = base_data()
+        data["sources"][0]["url"] = "https://a.com/doc#1"
+        data["journal"] = self._journal(["q1"])
+        raw = write_raw(tmp_path, data)
+        ev = self._evidence_results(tmp_path, {
+            "q1": ["https://a.com/doc#1", "https://b.com/data"]})
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        by_name = {r[0]: r for r in rows[1:]}
+        assert by_name["A"][6] == "q1"
+        assert by_name["A"][4] == "https://a.com/doc"  # 输出仍剥锚点
+
+    def test_first_query_consistent_with_lineage(self, tmp_path):
+        # 不变量：清单"来源搜索"= 溯源.csv 中该 URL 第一行的查询词（口径一致）
+        data = base_data()
+        data["sources"][0]["url"] = "https://a.com/doc#1"
+        data["journal"] = self._journal(["q1", "q2"])
+        raw = write_raw(tmp_path, data)
+        ev = self._evidence_results(tmp_path, {
+            "q1": ["https://a.com/doc#1"], "q2": ["https://a.com/doc#1", "https://b.com/data"]})
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        srows = read_csv_rows(source_csv)
+        by_name = {r[0]: r for r in srows[1:]}
+        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        lrows = read_csv_rows(lineage_csv)[1:]
+        for name, row in by_name.items():
+            first = next((l for l in lrows if l[4] == row[4] and l[5] == "是"), None)
+            assert first is not None, f"{name} 无血缘行"
+            assert first[2] == row[6], f"{name} 来源搜索与溯源首行不一致"
+
     def test_no_structured_results_no_lineage_file(self, tmp_path):
         data = base_data()
         data["journal"] = self._journal(["q1"])
@@ -1098,6 +1156,33 @@ class TestCliRejectedRun:
         outdir = next((tmp_path / "out").glob("算力服务器_*"))  # CLI 用真实时钟命名
         assert not list(outdir.glob("*被拒记录*"))
         assert not raw.exists()  # 无修正重跑环节，临时文件正常清理
+
+
+class TestEvidenceEncoding:
+    """证据留痕含非法 UTF-8 字节（hook 端编码损坏）时，读取容错不中止运行。
+
+    损坏行 decode 后仍是非 JSON（含替换符或残余片段），由既有 ValueError
+    跳过逻辑处理——证据校验语义不变：损坏内容不可能为任何 URL 提供依据。
+    """
+
+    def test_invalid_utf8_bytes_in_evidence_tolerated(self, tmp_path):
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        p = tmp_path / "search_log.jsonl"
+        with p.open("wb") as f:
+            f.write(b'\x98\xaf\xe4\xb8\x96\xe7\x95\x8c\xe3\x80\x82\n')  # 损坏字节片段
+            for s in data["sources"]:
+                payload = {"tool_name": "WebSearch",
+                           "tool_input": {"query": "test"},
+                           "tool_response": {"results": [{"url": s["url"],
+                                                           "title": s.get("name", "")}]}}
+                f.write(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(p))
+
+        assert summary["kept"] == 2
+        assert summary["ungrounded"] == 0
+        assert summary["evidence_slice_skipped"] >= 1
 
 
 class TestLogTool:

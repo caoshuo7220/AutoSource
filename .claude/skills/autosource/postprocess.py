@@ -238,9 +238,16 @@ def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, s
 
     首次出现 ≈ 发现时刻：验证搜索的首次出现即其定向验证查询，
     增量发现的首次出现即撞见它的那次搜索。多出处完整真相见溯源表。
+
+    匹配优先走结构化结果解析（与 build_lineage 同路径）：留痕里结果 URL
+    常带 #数字 引用锚点，剥锚点后的子串在原文中会被边界匹配判为"更长 URL
+    的前缀"而丢失归因（实测平板轮 36/84 条来源搜索为空）；结构化路径先剥
+    锚点再比对，与溯源表口径一致。结构化结果中没有的 URL（仅摘要文本
+    提及）走原文边界匹配兜底：先试未剥锚点原形，再试剥锚点形态。
     """
-    wanted = {strip_citation_anchors(str(s.get("url") or "")) for s in kept}
-    wanted.discard("")
+    originals = {strip_citation_anchors(str(s.get("url") or "")): str(s.get("url") or "")
+                 for s in kept}
+    wanted = set(originals) - {""}
     result: dict[str, str] = {}
     for line in sliced_evidence.splitlines():
         try:
@@ -248,10 +255,14 @@ def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, s
         except ValueError:
             continue
         query = _line_query(payload)
-        for stripped in list(wanted):
-            if _contains_bounded(stripped, line, URL_CHARS):
+        for url in _result_urls(payload):
+            stripped = strip_citation_anchors(url)
+            if stripped and stripped in wanted and stripped not in result:
                 result[stripped] = query
-                wanted.remove(stripped)
+        for stripped in wanted - result.keys():
+            if (_contains_bounded(originals[stripped], line, URL_CHARS)
+                    or _contains_bounded(stripped, line, URL_CHARS)):
+                result[stripped] = query
     return result
 
 
@@ -517,7 +528,9 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         raise FileNotFoundError(
             f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
             "没有证据链就不放行候选，这是设计使然）")
-    evidence = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    # 留痕由 hook 追加，偶见非法 UTF-8 字节（hook 侧编码损坏）——读取容错，
+    # 损坏行 decode 后仍非 JSON，由下游 ValueError 跳过逻辑处理；证据校验语义不变
+    evidence = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
     # 查询词精确比对用：解析留痕收集全部 JSON 字符串值（一次解析，逐行复用）
     evidence_strings = extract_strings(evidence) if journal else set()
 
