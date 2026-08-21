@@ -1,17 +1,17 @@
 """AutoSource 后处理流水线：证据校验 → 清单并入 → 去重 → 导出 CSV → 效果统计 → 清理。
 
-分工原则：LLM（编排层）只负责语义环节，唯一产出的中间产物是 raw.json；
-本脚本保证其余所有确定性环节：
+分工原则：编排层只负责语义环节且不写任何文件；raw.json 由搜索层按契约
+直接写入（唯一 LLM 中间产物），本脚本保证其余所有确定性环节：
 
 - 证据校验（grounded check）：候选 URL 必须作为完整 URL 出现在证据留痕中（留痕由
   PostToolUse hook 在每次 WebSearch 时由系统自动记录，记录过程在
   harness 侧、模型不参与），否则拒绝该条并计数——从结构上杜绝模型**意外**编造
   URL（转写错误、凭记忆补写；边界匹配，截短为父路径/裸域名不放行）。
   留痕文件本身无写保护，该机制不防对抗性篡改。
-  被拒条目不进入清单（明细打印在 stdout、计数见 stats 证据校验移除列），
+  被拒条目不进入清单（明细打印在 stdout、计数见 stdout 汇总），
   不影响其余产出，运行到此结束（无修正重跑环节）
-- 粒度声明归一化与计数（不拒绝）：granularity 缺失或非法视为合集级，
-  单篇级计数进 stats——产量优先，粒度/子站问题由后续子站合并功能处理
+- 粒度声明归一化与计数（不拒绝）：granularity 缺失或非法视为合集级——
+  产量优先，粒度/子站问题由后续子站合并功能处理
 - 知识清单：verified=true 且字段齐全的清单项自动并入 sources（LLM 不手工复制）；
   计算清单验证率（自洽性指标），未验证清单进 stdout 报告
 - 搜索日志：journal 的每个查询词必须作为完整 JSON 字符串值精确出现在证据留痕中
@@ -20,13 +20,13 @@
 - 域名 + 名称联合去重
 - 用 csv 标准库导出数据源清单（UTF-8 BOM，转义交给标准库）；写入时剥离 URL
   尾部的引用序号锚点（#数字，markdown 引用记号；单词锚点保留）
-- 计算各节点候选数与体裁分布，写 stats CSV（含空节点检测、清单验证列）
+- 计算各节点候选数与体裁分布，写 stats CSV（纯清单统计表：每节点一行 + 末尾总计行）
 - 数据血缘：从切片留痕与最终收录 join 生成 溯源.csv（每行一条搜索结果，
   正查"返回了什么、收录了哪几条"、反查"出自哪个搜索词"），数据源清单加
   "来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
 - 按 run bundle 结构归档：交付物在运行目录根（数据源清单/stats/搜索日志/溯源），
   `intermediate/` 子目录放输入快照与**本运行切片**后的证据留痕，`manifest.json`
-  记录每个文件的用途/生成方/sha256（不可变性与可审计性）；随后删除会话临时文件
+  记录每个文件的用途/生成方（自描述，供下游程序识别）；随后删除会话临时文件
 
 用法:
     python postprocess.py <raw.json> [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
@@ -55,7 +55,6 @@ raw.json 结构:
 
 import argparse
 import csv
-import hashlib
 import json
 import re
 import shutil
@@ -69,9 +68,7 @@ from urllib.parse import urlparse
 SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明", "来源搜索"]
 LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
                       "收录条目名称", "收录理由", "备注"]
-STATS_CSV_HEADER = ["领域", "时间戳", "分类节点", "候选数", "体裁分布", "无结果节点",
-                    "总候选数", "去重移除", "证据校验移除", "清单验证",
-                    "最终收录", "单篇级收录", "模型", "脚本处理耗时(秒)"]
+STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
 
 DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
@@ -224,15 +221,6 @@ def slice_evidence(evidence: str, queries: set[str]) -> tuple[str, int, int]:
     return ("\n".join(kept) + "\n" if kept else ""), len(kept), skipped
 
 
-def sha256_file(path: Path) -> str:
-    """计算文件 sha256（分块读取，供运行清单校验和）。"""
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, str]:
     """每个收录源 URL（剥引用锚点后）→ 在切片留痕中首次出现行的查询词。
 
@@ -325,25 +313,11 @@ def write_lineage_csv(path: Path, rows: list[list]) -> None:
         writer.writerows(rows)
 
 
-def write_manifest(path: Path, run_meta: dict, entries: list[tuple[str, str, str]]) -> None:
-    """写运行清单 manifest.json：每个文件的用途/生成方/sha256（校验和可脚本验证）。
-
-    entries = [(相对路径, 用途, 生成方)]；manifest 自身在写完其他文件后生成，
-    不列入清单。
-    """
-    files = [
-        {"path": rel_path, "purpose": purpose, "producer": producer,
-         "sha256": sha256_file(path.parent / rel_path)}
-        for rel_path, purpose, producer in entries
-    ]
-    path.write_text(
-        json.dumps({"run": run_meta, "files": files}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
-
-
 # 文档形态 URL 的确定性信号已按用户决策移除（2026-08-20：规则二删除，产量优先，
 # 粒度/子站问题由后续"站点与子站合并"功能处理）。granularity 仅归一化与计数。
-GRANULARITY_LEVELS = ("合集级", "站点级", "单篇级")
+# 2026-08-21：站点级并入合集级（垂直门户=边界为全站的合集；是否覆盖全站将来
+# 可从 URL 形态再判断）——存量"站点级"按非法值归一化为合集级（计入缺声明）。
+GRANULARITY_LEVELS = ("合集级", "单篇级")
 
 
 # 引用序号锚点：#N（纯数字 fragment），WebSearch 结果以 markdown 引用格式渲染
@@ -373,6 +347,46 @@ def check_granularity(sources: list[dict]) -> tuple[int, int]:
         if g == "单篇级":
             single_count += 1
     return single_count, missing_count
+
+
+# 常见语言码路径段（用于多语言版本审计计数）。审计不自动合并——只做确定性
+# 分组计数，暴露"同一内容多语言版本并存"的漏网，供提取规则（中文优先）迭代。
+LOCALE_CODES = frozenset({
+    "zh", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant",
+    "en", "en-us", "en-gb", "en-au", "en-nz", "en-ca", "en-in",
+    "ja", "ko", "de", "de-de", "fr", "fr-fr", "es", "es-es",
+    "ru", "ru-ru", "pt", "pt-br", "it", "it-it", "nl", "el",
+    "ar", "hi", "th", "vi", "id", "ms", "tr", "pl", "sv", "da",
+    "fi", "no", "cs", "he", "fa", "uk", "ro", "hu", "sk",
+})
+
+
+def _strip_locale_segment(path: str) -> str:
+    """剥掉路径首段的语言码（仅当命中已知语言码表时），用于多语言分组。"""
+    parts = [p for p in path.split("/") if p]
+    if parts and parts[0].lower() in LOCALE_CODES:
+        return "/".join(parts[1:])
+    return path
+
+
+def count_multilang_groups(sources: list[dict]) -> tuple[int, int]:
+    """审计：同域名、剥语言码路径段后相同的 URL 视为同一内容的多语言版本。
+
+    返回 (组数, 多余条目数)。只计数不合并——语言版本判定边界复杂
+    （子域语言站如 zh.wikipedia/en.wikipedia 是不同内容，不因语言合并；
+    本函数按域名分组已天然排除该情形），自动合并风险大于收益，先测量后决策。
+    """
+    groups: dict[tuple[str, str], int] = {}
+    for s in sources:
+        u = strip_citation_anchors(str(s.get("url") or ""))
+        if not u:
+            continue
+        parsed = urlparse(u)
+        key = (parsed.netloc.lower(), _strip_locale_segment(parsed.path))
+        groups[key] = groups.get(key, 0) + 1
+    group_count = sum(1 for v in groups.values() if v > 1)
+    excess = sum(v - 1 for v in groups.values() if v > 1)
+    return group_count, excess
 
 
 def merge_knowledge(knowledge: list[dict]) -> tuple[list[dict], int, int]:
@@ -430,8 +444,11 @@ def write_source_csv(path: Path, sources: list[dict],
 
 
 def write_stats_csv(path: Path, summary: dict) -> None:
-    """写效果统计 CSV：每行一个分类节点，体裁分布按数量降序合并为单列。"""
-    empty_nodes = "、".join(summary["empty_nodes"])
+    """写清单统计 CSV：每行一个分类节点（候选数/体裁分布），末尾一行总计。
+
+    纯清单统计表——运行级信息不贴行：领域/时间戳在文件名，模型在 manifest，
+    过程健康指标（证据校验移除/清单验证等）在 stdout 汇总。
+    """
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(STATS_CSV_HEADER)
@@ -440,22 +457,12 @@ def write_stats_csv(path: Path, summary: dict) -> None:
                 f"{t}:{c}"
                 for t, c in sorted(info["types"].items(), key=lambda kv: (-kv[1], kv[0]))
             )
-            writer.writerow([
-                summary["domain"],
-                summary["timestamp_display"],
-                node,
-                info["count"],
-                dist,
-                empty_nodes,
-                summary["total_found"],
-                summary["removed_duplicates"],
-                summary["ungrounded"],
-                summary["list_verified"],
-                summary["kept"],
-                summary["single_count"],
-                summary["model"],
-                summary["elapsed_seconds"],
-            ])
+            writer.writerow([node, info["count"], dist])
+        total_dist = "; ".join(
+            f"{t}:{c}"
+            for t, c in sorted(summary["total_types"].items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        writer.writerow(["总计", summary["kept"], total_dist])
 
 
 def write_journal_csv(path: Path, journal_rows: list[list]) -> None:
@@ -467,19 +474,25 @@ def write_journal_csv(path: Path, journal_rows: list[list]) -> None:
 
 
 def compute_stats(kept: list[dict], nodes: list[str]) -> dict:
-    """按去重后的源计算各节点候选数与体裁分布；empty_nodes = 零候选的节点。"""
+    """按去重后的源计算各节点候选数与体裁分布；empty_nodes = 零候选的节点。
+
+    total_types 为全领域体裁合并分布（含未匹配节点的源），供 stats 总计行。
+    """
     per_node = {n: {"count": 0, "types": {}} for n in nodes}
     unmatched = 0
+    total_types: dict[str, int] = {}
     for s in kept:
+        source_type = s.get("source_type") or "未标注"
+        total_types[source_type] = total_types.get(source_type, 0) + 1
         node = leaf_node(s.get("category_path", ""), nodes)
         if node is None:
             unmatched += 1
             continue
         per_node[node]["count"] += 1
-        source_type = s.get("source_type") or "未标注"
         per_node[node]["types"][source_type] = per_node[node]["types"].get(source_type, 0) + 1
     empty_nodes = [n for n in nodes if per_node[n]["count"] == 0]
-    return {"per_node": per_node, "empty_nodes": empty_nodes, "unmatched": unmatched}
+    return {"per_node": per_node, "empty_nodes": empty_nodes,
+            "unmatched": unmatched, "total_types": total_types}
 
 
 def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
@@ -545,6 +558,10 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     removed = len(grounded) - len(kept)
     node_stats = compute_stats(kept, nodes)
 
+    # 多语言版本审计（只计数不合并）：提取规则要求同一内容只收一个语言版本，
+    # 本计数暴露漏网，供提取规则迭代（中文优先）
+    multilang_groups, multilang_excess = count_multilang_groups(kept)
+
     journal_rows: list[list] = []
     journal_skipped = 0
     journal_queries: set[str] = set()
@@ -597,6 +614,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "kept": len(kept),
         "invalid": invalid,
         "unmatched": node_stats["unmatched"],
+        "total_types": node_stats["total_types"],
         "empty_nodes": node_stats["empty_nodes"],
         "per_node": node_stats["per_node"],
         "outdir": "",
@@ -609,6 +627,8 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
         "single_count": single_count,
         "granularity_missing": granularity_missing,
+        "multilang_groups": multilang_groups,
+        "multilang_excess": multilang_excess,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
@@ -625,45 +645,23 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
 
     write_source_csv(outdir / f"{domain}_{timestamp}_数据源清单.csv", kept,
                      first_query_by_source(kept, sliced))
-    if journal_rows:
-        write_journal_csv(outdir / f"{domain}_{timestamp}_搜索日志.csv", journal_rows)
     summary["outdir"] = str(outdir)
     write_stats_csv(outdir / f"{domain}_{timestamp}_stats.csv", summary)
 
-    # run bundle 归档（数据工程惯例）：交付物在根，中间产物入 intermediate/，
-    # manifest.json 记录每个文件的用途/生成方/sha256。
+    # 排障材料入 intermediate/（交付物只有根目录的数据源清单与 stats）
     intermediate = outdir / "intermediate"
     intermediate.mkdir()
     shutil.copy(raw, intermediate / "raw_input.json")
-    manifest_entries = [
-        (f"{domain}_{timestamp}_数据源清单.csv", "交付物：数据源清单", "postprocess.py"),
-        (f"{domain}_{timestamp}_stats.csv", "效果统计", "postprocess.py"),
-        ("intermediate/raw_input.json", "输入快照（LLM 唯一中间产物，过滤前全量）", "编排层"),
-    ]
     if journal_rows:
-        manifest_entries.append(
-            (f"{domain}_{timestamp}_搜索日志.csv", "搜索日志（人工复盘）", "postprocess.py"))
+        write_journal_csv(intermediate / f"{domain}_{timestamp}_搜索日志.csv", journal_rows)
     if sliced:
         (intermediate / "evidence_log.jsonl").write_text(sliced, encoding="utf-8")
-        manifest_entries.append(
-            ("intermediate/evidence_log.jsonl", "证据留痕（本运行切片）", "PostToolUse hook"))
     lineage_rows = build_lineage(kept, sliced, journal_map) if sliced else []
     if lineage_rows:
-        write_lineage_csv(outdir / f"{domain}_{timestamp}_溯源.csv", lineage_rows)
-        manifest_entries.append(
-            (f"{domain}_{timestamp}_溯源.csv",
-             "数据血缘：搜索结果与收录对应（正查/反查）", "postprocess.py"))
+        write_lineage_csv(intermediate / f"{domain}_{timestamp}_溯源.csv", lineage_rows)
     summary["lineage_rows"] = len(lineage_rows)
     summary["evidence_slice_kept"] = slice_kept
     summary["evidence_slice_skipped"] = slice_skipped
-    run_meta = {
-        "domain": domain,
-        "timestamp": summary["timestamp_display"],
-        "model": model,
-        "pipeline": "postprocess.py",
-    }
-    write_manifest(outdir / "manifest.json", run_meta, manifest_entries)
-    summary["manifest_count"] = len(manifest_entries)
 
     # 删除会话临时文件（--keep-raw 时保留；无修正重跑环节，运行到此结束）
     if not keep_raw:
@@ -690,8 +688,9 @@ def _print_summary(summary: dict) -> None:
             print(f"  - {name}: {url}")
     if summary["granularity_missing"]:
         print(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
-    if summary["single_count"]:
-        print(f"单篇级收录: {summary['single_count']} 条（见 stats.csv）")
+    if summary["multilang_groups"]:
+        print(f"多语言版本并存: {summary['multilang_groups']} 组（多余 {summary['multilang_excess']} 条）"
+              f"——同一内容应只收一个语言版本（中文优先），见搜索层提取规则")
     print(f"清单核对: 验证通过 {summary['list_verified']} 项")
     if summary["knowledge_missing"]:
         print("警告: raw.json 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
@@ -708,11 +707,10 @@ def _print_summary(summary: dict) -> None:
     else:
         print("未验证清单: 无")
     if summary["journal_count"]:
-        print(f"搜索日志: {summary['journal_count']} 次搜索（见搜索日志.csv）")
+        print(f"搜索日志: {summary['journal_count']} 次搜索（见 intermediate/搜索日志.csv）")
     if summary["outdir"]:
-        print(f"运行清单: manifest.json（{summary['manifest_count']} 个文件，含 sha256 校验和）")
         if summary.get("lineage_rows"):
-            print(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，正查/反查见表格）")
+            print(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")
         print(f"证据留痕切片: 保留 {summary['evidence_slice_kept']} 行 / 跳过 {summary['evidence_slice_skipped']} 行"
               f"（见 intermediate/）")
     print("各节点:")
@@ -725,7 +723,6 @@ def _print_summary(summary: dict) -> None:
         print(f"  {node}: {info['count']} 条{suffix}")
     empty = summary["empty_nodes"]
     print(f"无结果节点: {'、'.join(empty) if empty else '无'}")
-    print(f"脚本处理耗时: {summary['elapsed_seconds']} 秒")
 
 
 def main() -> None:

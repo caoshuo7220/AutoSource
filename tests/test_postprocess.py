@@ -12,10 +12,9 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource"
 sys.path.insert(0, str(SKILL_DIR))
 
-from postprocess import (check_grounded, check_granularity, deduplicate,
-                         leaf_node, query_in_evidence, run,
-                         sanitize_domain, sha256_file, slice_evidence,
-                         strip_citation_anchors)
+from postprocess import (check_grounded, check_granularity, count_multilang_groups,
+                         deduplicate, leaf_node, query_in_evidence, run,
+                         sanitize_domain, slice_evidence, strip_citation_anchors)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -256,6 +255,75 @@ class TestCheckGranularity:
         assert missing == 0
         assert sources[0]["granularity"] == "合集级"
 
+    def test_site_level_normalized_to_collection(self):
+        # 2026-08-21：站点级并入合集级——存量"站点级"按非法值归一化（计入缺声明）
+        sources = [{"name": "垂直门户", "granularity": "站点级",
+                    "url": "https://portal.com/"}]
+        single, missing = check_granularity(sources)
+        assert single == 0
+        assert missing == 1
+        assert sources[0]["granularity"] == "合集级"
+
+
+class TestMultilangAudit:
+    """多语言版本审计：同域名剥语言码路径段后相同的 URL 组计数（不自动合并）。"""
+
+    def _source(self, url, name="X"):
+        return {"name": name, "category_path": "算力服务器-服务器CPU",
+                "source_type": "官方文档", "granularity": "单篇级",
+                "url": url, "description": "d", "reason": "r"}
+
+    def test_locale_variants_grouped(self):
+        sources = [
+            self._source("https://support.apple.com/zh-cn/122240", "规格页中文"),
+            self._source("https://support.apple.com/en-nz/122240", "规格页英文"),
+            self._source("https://support.apple.com/ru-ru/122240", "规格页俄文"),
+            self._source("https://other.com/guide", "无关来源"),
+        ]
+        groups, excess = count_multilang_groups(sources)
+        assert groups == 1
+        assert excess == 2
+
+    def test_non_locale_paths_not_grouped(self):
+        sources = [
+            self._source("https://a.com/api/v1", "API"),
+            self._source("https://a.com/docs/start", "Start"),
+        ]
+        groups, excess = count_multilang_groups(sources)
+        assert groups == 0
+        assert excess == 0
+
+    def test_different_netloc_not_grouped(self):
+        # zh.wikipedia 与 en.wikipedia 是不同内容的站点，不按语言版本合并
+        sources = [
+            self._source("https://zh.wikipedia.org/wiki/IPad"),
+            self._source("https://en.wikipedia.org/wiki/IPad"),
+        ]
+        groups, excess = count_multilang_groups(sources)
+        assert groups == 0
+        assert excess == 0
+
+    def test_stats_column_and_stdout(self, tmp_path):
+        data = base_data()
+        data["sources"] = [
+            self._source("https://support.apple.com/zh-cn/122240", "规格页中文"),
+            self._source("https://support.apple.com/en-nz/122240", "规格页英文"),
+            self._source("https://support.apple.com/ru-ru/122240", "规格页俄文"),
+        ]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        import io
+        from contextlib import redirect_stdout
+        from postprocess import _print_summary
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                          evidence_log=str(ev))
+            _print_summary(summary)
+        assert summary["multilang_groups"] == 1
+        assert summary["multilang_excess"] == 2
+        assert "多语言版本并存" in buf.getvalue()  # stdout 提示保留，stats 列已删
+
 
 class TestRun:
     def test_full_pipeline(self, tmp_path):
@@ -293,25 +361,23 @@ class TestRun:
                            "简要说明", "来源搜索"]
         assert len(rows) == 3
 
-        # stats CSV：BOM + 表头 + 每节点一行，空节点列填了无结果节点
+        # stats CSV：BOM + 表头 + 每节点一行 + 末尾总计行（纯清单统计，无运行级重复列）
         stats_csv = outdir / "算力服务器_2026-08-13-183045_stats.csv"
         assert stats_csv.exists()
         assert stats_csv.read_bytes()[:3] == BOM
         rows = read_csv_rows(stats_csv)
-        assert len(rows) == 4  # header + 3 nodes
-        by_node = {r[2]: r for r in rows[1:]}
-        assert by_node["AI训练GPU"][3] == "1"
-        assert by_node["AI训练GPU"][4] == "官方文档:1"
-        assert by_node["图形渲染GPU"][3] == "1"
-        assert by_node["服务器CPU"][3] == "0"
-        assert by_node["服务器CPU"][5] == "服务器CPU"  # 无结果节点列
-        assert by_node["AI训练GPU"][0] == "算力服务器"
-        assert by_node["AI训练GPU"][1] == "2026-08-13 18:30:45"
-        assert by_node["AI训练GPU"][8] == "0"  # 证据校验移除
-        assert by_node["AI训练GPU"][9] == "0/0"  # 清单验证（无 knowledge）
-        assert by_node["AI训练GPU"][11] == "0"  # 单篇级收录
-        assert by_node["AI训练GPU"][12] == "test-model"
-        assert float(by_node["AI训练GPU"][13]) >= 0  # 脚本处理耗时
+        assert len(rows) == 5  # header + 3 nodes + 总计
+        by_node = {r[0]: r for r in rows[1:] if r[0] != "总计"}
+        assert by_node["AI训练GPU"][1] == "1"
+        assert by_node["AI训练GPU"][2] == "官方文档:1"
+        assert by_node["图形渲染GPU"][1] == "1"
+        assert by_node["服务器CPU"][1] == "0"
+        assert by_node["服务器CPU"][2] == ""
+        assert rows[-1][0] == "总计"
+        assert rows[-1][1] == "2"  # 最终收录 = 候选数求和
+        assert rows[-1][2] == "官方文档:1; 数据集:1"
+        # stats 列集合钉死：纯清单统计表（领域/时间戳在文件名、模型在 manifest、健康指标在 stdout）
+        assert rows[0] == ["分类节点", "候选数", "体裁分布"]
 
     def test_keep_raw(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
@@ -383,7 +449,7 @@ class TestRun:
         assert set(summary["empty_nodes"]) == set(data["nodes"])
         stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
         rows = read_csv_rows(stats_csv)
-        assert len(rows) == 4  # header + 3 个空节点行
+        assert len(rows) == 5  # header + 3 个空节点行 + 总计行
 
     def test_ungrounded_url_rejected_and_counted(self, tmp_path):
         data = base_data()
@@ -443,9 +509,6 @@ class TestRun:
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         assert any(r[0] == "团体标准" and r[3] == "单篇级" for r in rows)
-        stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
-        stats_rows = read_csv_rows(stats_csv)
-        assert all(r[11] == "1" for r in stats_rows[1:])  # 单篇级收录列
 
     def test_knowledge_item_with_document_url_kept(self, tmp_path):
         # 规则二已移除：清单项验证到单份 PDF 也照常收录
@@ -541,10 +604,6 @@ class TestKnowledge:
         assert "https://www.ieee802.org/3/" in urls
         # D1 否定断言：未验证项绝不进 CSV
         assert all(r[0] != "难搜机构" for r in rows)
-        # stats CSV 的清单验证单元格
-        stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
-        stats_rows = read_csv_rows(stats_csv)
-        assert all(r[9] == "1/2" for r in stats_rows[1:])
 
     def test_verified_missing_category_path_falls_back_to_node(self, tmp_path):
         data = base_data()
@@ -698,7 +757,7 @@ class TestJournal:
                       evidence_log=str(ev))
 
         assert summary["journal_count"] == 2
-        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         assert journal_csv.read_bytes()[:3] == BOM
         rows = read_csv_rows(journal_csv)
         assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
@@ -714,7 +773,7 @@ class TestJournal:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
         assert rows[1][5] == "是"
 
@@ -726,7 +785,7 @@ class TestJournal:
                       evidence_log=str(ev))
 
         assert summary["journal_count"] == 0
-        assert not list((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        assert not list((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
 
     def test_journal_non_dict_entries_skipped_and_counted(self, tmp_path):
         data = base_data()
@@ -739,7 +798,7 @@ class TestJournal:
 
         assert summary["journal_count"] == 1
         assert summary["journal_skipped"] == 1
-        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         assert len(read_csv_rows(journal_csv)) == 2  # header + 1 行
 
     def test_journal_only_missing_evidence_raises(self, tmp_path):
@@ -779,7 +838,7 @@ class TestJournal:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
-        journal_csv = next((Path(summary["outdir"])).glob("*搜索日志.csv"))
+        journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
         assert rows[1][5] == "是"
 
@@ -863,17 +922,14 @@ class TestArchives:
         assert all(not l.startswith("not json") and "无关查询" not in l for l in sliced)
         assert summary["evidence_slice_kept"] == 2
         assert summary["evidence_slice_skipped"] == 1
-        # manifest：路径齐全且 sha256 可验证
-        manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["run"]["domain"] == "算力服务器"
-        paths = {f["path"] for f in manifest["files"]}
-        assert "intermediate/raw_input.json" in paths
-        assert "intermediate/evidence_log.jsonl" in paths
-        assert any("数据源清单" in p for p in paths)
-        assert any("stats" in p for p in paths)
-        assert any("搜索日志" in p for p in paths)
-        for f in manifest["files"]:
-            assert sha256_file(outdir / f["path"]) == f["sha256"]
+        # 无 manifest（已按用户决策删除）；搜索日志在 intermediate/（本测试结果数组为空，无溯源行）
+        assert not (outdir / "manifest.json").exists()
+        assert (intermediate / "算力服务器_2026-08-13-183045_搜索日志.csv").exists()
+        assert not (intermediate / "算力服务器_2026-08-13-183045_溯源.csv").exists()
+        # 根目录只有交付物（数据源清单 + stats）
+        root_files = {p.name for p in outdir.iterdir() if p.is_file()}
+        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv",
+                              "算力服务器_2026-08-13-183045_stats.csv"}
         # 会话临时文件仍按现状删除
         assert not raw.exists()
         assert not ev.exists()
@@ -886,10 +942,8 @@ class TestArchives:
                       evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
-        manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
-        paths = {f["path"] for f in manifest["files"]}
-        assert not any("evidence_log" in p for p in paths)
         assert not (outdir / "intermediate" / "evidence_log.jsonl").exists()
+        assert not list((outdir / "intermediate").glob("*搜索日志.csv"))
 
     def test_rejected_entries_not_in_bundle(self, tmp_path):
         data = base_data()
@@ -905,9 +959,7 @@ class TestArchives:
         # 被拒仍产出完整 bundle（不落被拒文件）；raw/留痕正常清理
         assert summary["ungrounded"] == 1
         outdir = Path(summary["outdir"])
-        manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
-        paths = {f["path"] for f in manifest["files"]}
-        assert not any("被拒记录" in p for p in paths)
+        assert not list(outdir.glob("*被拒记录*"))
         assert (outdir / "intermediate" / "raw_input.json").exists()
         assert not raw.exists()
         assert not ev.exists()
@@ -945,7 +997,7 @@ class TestLineage:
                       evidence_log=str(ev))
 
         assert summary["lineage_rows"] == 3
-        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        lineage_csv = next((Path(summary["outdir"]) / "intermediate").glob("*溯源.csv"))
         rows = read_csv_rows(lineage_csv)
         assert rows[0] == ["阶段", "分类节点", "查询词", "返回结果数", "结果URL",
                            "是否收录", "收录条目名称", "收录理由", "备注"]
@@ -955,10 +1007,6 @@ class TestLineage:
         assert by_url["https://a.com/doc"][0] == "增量发现"
         assert by_url["https://a.com/doc"][3] == "10"
         assert by_url["https://c.com/other"][5] == "否"  # 未收录显式填否
-        # 血缘表进 manifest
-        manifest = json.loads((Path(summary["outdir"]) / "manifest.json")
-                              .read_text(encoding="utf-8"))
-        assert any("溯源" in f["path"] for f in manifest["files"])
 
     def test_lineage_fallback_for_summary_text_url(self, tmp_path):
         # 收录 URL 只出现在摘要文本（非结构化结果数组）→ 回退行备注
@@ -986,7 +1034,7 @@ class TestLineage:
                       evidence_log=str(p))
 
         assert summary["lineage_rows"] == 1
-        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        lineage_csv = next((Path(summary["outdir"]) / "intermediate").glob("*溯源.csv"))
         rows = read_csv_rows(lineage_csv)
         assert rows[1][5] == "是"
         assert rows[1][6] == "X"
@@ -1040,7 +1088,7 @@ class TestLineage:
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         srows = read_csv_rows(source_csv)
         by_name = {r[0]: r for r in srows[1:]}
-        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        lineage_csv = next((Path(summary["outdir"]) / "intermediate").glob("*溯源.csv"))
         lrows = read_csv_rows(lineage_csv)[1:]
         for name, row in by_name.items():
             first = next((l for l in lrows if l[4] == row[4] and l[5] == "是"), None)
@@ -1068,7 +1116,7 @@ class TestLineage:
                       evidence_log=str(p))
 
         assert summary["lineage_rows"] == 0
-        assert not list((Path(summary["outdir"])).glob("*溯源.csv"))
+        assert not list((Path(summary["outdir"]) / "intermediate").glob("*溯源.csv"))
 
 
 class TestUrlHygiene:
@@ -1114,7 +1162,7 @@ class TestUrlHygiene:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(p))
 
-        lineage_csv = next((Path(summary["outdir"])).glob("*溯源.csv"))
+        lineage_csv = next((Path(summary["outdir"]) / "intermediate").glob("*溯源.csv"))
         rows = read_csv_rows(lineage_csv)
         assert len(rows) >= 3  # header + 2 条结果行
         assert all(not re.search(r"#\d+$", r[4]) for r in rows[1:])
