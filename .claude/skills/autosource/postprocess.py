@@ -24,9 +24,9 @@
 - 数据血缘：从切片留痕与最终收录 join 生成 溯源.csv（每行一条搜索结果，
   正查"返回了什么、收录了哪几条"、反查"出自哪个搜索词"），数据源清单加
   "来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
-- 按 run bundle 结构归档：交付物在运行目录根（数据源清单/stats/搜索日志/溯源），
-  `intermediate/` 子目录放输入快照与**本运行切片**后的证据留痕，`manifest.json`
-  记录每个文件的用途/生成方（自描述，供下游程序识别）；随后删除会话临时文件
+- 按 run bundle 结构归档：交付物在运行目录根（数据源清单/stats），
+  `intermediate/` 子目录放排障材料（输入快照、本运行切片后的证据留痕、
+  搜索日志、溯源）；随后删除会话临时文件
 
 用法:
     python postprocess.py <raw.json> [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
@@ -35,7 +35,7 @@ raw.json 结构:
     {
       "domain": "领域词（用于目录命名）",
       "nodes": ["全部叶子节点"],
-      "model": "模型名（可选，写入 stats CSV 供溯源）",
+      "model": "模型名（可选，随 raw_input.json 快照留存）",
       "knowledge": [
         {"name": ..., "node": 叶子节点, "verified": true,
          "category_path": "完整层级路径", "source_type": ..., "url": ...,
@@ -59,7 +59,6 @@ import json
 import re
 import shutil
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -128,9 +127,8 @@ def _contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
 def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list[dict]]:
     """证据校验：URL 必须作为完整 URL 出现在证据留痕中。返回 (通过, 被拒)。
 
-    旧实现为子串匹配，URL 截短为任意父路径/裸域名可通过；现按 RFC 3986 字符集
-    做边界匹配，截短即拒绝。防的是意外编造（转写错误/凭记忆补 URL）；
-    留痕文件本身无写保护，不防对抗性篡改。
+    按 RFC 3986 字符集做边界匹配，截短为父路径/裸域名不放行。防的是意外
+    编造（转写错误/凭记忆补 URL）；留痕文件本身无写保护，不防对抗性篡改。
     """
     kept: list[dict] = []
     rejected: list[dict] = []
@@ -229,9 +227,9 @@ def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, s
 
     匹配优先走结构化结果解析（与 build_lineage 同路径）：留痕里结果 URL
     常带 #数字 引用锚点，剥锚点后的子串在原文中会被边界匹配判为"更长 URL
-    的前缀"而丢失归因（实测平板轮 36/84 条来源搜索为空）；结构化路径先剥
-    锚点再比对，与溯源表口径一致。结构化结果中没有的 URL（仅摘要文本
-    提及）走原文边界匹配兜底：先试未剥锚点原形，再试剥锚点形态。
+    的前缀"而丢失归因；结构化路径先剥锚点再比对，与溯源表口径一致。
+    结构化结果中没有的 URL（仅摘要文本提及）走原文边界匹配兜底：
+    先试未剥锚点原形，再试剥锚点形态。
     """
     originals = {strip_citation_anchors(str(s.get("url") or "")): str(s.get("url") or "")
                  for s in kept}
@@ -313,10 +311,8 @@ def write_lineage_csv(path: Path, rows: list[list]) -> None:
         writer.writerows(rows)
 
 
-# 文档形态 URL 的确定性信号已按用户决策移除（2026-08-20：规则二删除，产量优先，
-# 粒度/子站问题由后续"站点与子站合并"功能处理）。granularity 仅归一化与计数。
-# 2026-08-21：站点级并入合集级（垂直门户=边界为全站的合集；是否覆盖全站将来
-# 可从 URL 形态再判断）——存量"站点级"按非法值归一化为合集级（计入缺声明）。
+# granularity 仅归一化与计数、不拒绝（产量优先，粒度/子站问题由后续
+# "站点与子站合并"功能处理）；站点级已并入合集级，存量按非法值归一化。
 GRANULARITY_LEVELS = ("合集级", "单篇级")
 
 
@@ -446,8 +442,8 @@ def write_source_csv(path: Path, sources: list[dict],
 def write_stats_csv(path: Path, summary: dict) -> None:
     """写清单统计 CSV：每行一个分类节点（候选数/体裁分布），末尾一行总计。
 
-    纯清单统计表——运行级信息不贴行：领域/时间戳在文件名，模型在 manifest，
-    过程健康指标（证据校验移除/清单验证等）在 stdout 汇总。
+    纯清单统计表——运行级信息不贴行：领域/时间戳在文件名，模型在
+    raw_input.json，过程健康指标（证据校验移除/清单验证等）在 stdout 汇总。
     """
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
@@ -499,7 +495,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         evidence_log: Optional[str] = None,
         now: Optional[datetime] = None) -> dict:
     """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。"""
-    start = time.perf_counter()
     raw = Path(raw_path)
     if not raw.exists():
         raise FileNotFoundError(f"输入文件不存在: {raw_path}")
@@ -511,7 +506,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         raise ValueError("raw.json 缺少 nodes 字段（叶子节点列表，用于空节点检测与 stats）")
 
     domain = sanitize_domain(data.get("domain", ""))
-    model = str(data.get("model") or "")
     nodes = [str(n) for n in data["nodes"]]
 
     # 脏数据容错：sources 非 list 视为空并告警；name/url 缺一即跳过并计数
@@ -607,7 +601,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     summary = {
         "domain": domain,
         "timestamp": timestamp,
-        "timestamp_display": now.strftime("%Y-%m-%d %H:%M:%S"),
         "total_found": len(all_candidates),
         "removed_duplicates": removed,
         "ungrounded": ungrounded,
@@ -618,8 +611,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "empty_nodes": node_stats["empty_nodes"],
         "per_node": node_stats["per_node"],
         "outdir": "",
-        "model": model,
-        "elapsed_seconds": round(time.perf_counter() - start, 1),
         "list_verified": list_verified,
         "knowledge_missing": not knowledge,
         "incomplete": incomplete,
