@@ -6,10 +6,9 @@
       "Read(**",
       "Write(outputs/**)",
       "Edit(outputs/**)",
-      "Bash(python .claude/skills/autosource/postprocess.py *)",
+      "Bash(python .claude/skills/autosource/scripts/postprocess.py *)",
       "Skill(autosource)",
-      "Skill(autosource:*)",
-      "Skill(autosource-search)"
+      "Skill(autosource:*)"
     ],
     "additionalDirectories": [
       ".claude/skills"
@@ -22,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/skills/autosource/log_tool.py outputs/search_log.jsonl"
+            "command": "python .claude/skills/autosource/scripts/log_tool.py outputs/search_log.jsonl"
           }
         ]
       }

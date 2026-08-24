@@ -23,10 +23,9 @@
 ## 架构
 
 ```
-编排层  .claude/skills/autosource/SKILL.md    ← 领域拆解 → 知识清单 → 调搜索层 → 调后处理
-搜索层  .claude/skills/autosource-search/SKILL.md  ← 验证搜索 + 增量发现，按契约写入 raw.json 并收尾执行后处理
-后处理  .claude/skills/autosource/postprocess.py   ← 证据校验/去重/CSV/stats/清理（确定性环节全部代码化）
-证据链  .claude/skills/autosource/log_tool.py      ← PostToolUse hook：系统记录搜索留痕，防 URL 编造
+Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流程：拆解 → 知识清单 → 验证搜索 → 增量发现 → 扩量 → 收尾
+后处理    .claude/skills/autosource/scripts/postprocess.py ← 证据校验/去重/CSV/stats/清理（确定性环节全部代码化）
+证据链    .claude/skills/autosource/scripts/log_tool.py    ← PostToolUse hook：系统记录搜索留痕，防 URL 编造
 ```
 
 设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**。
@@ -34,7 +33,7 @@
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 88 个测试，预期全过
+python -m pytest tests/ -q   # 93 个测试，预期全过
 ```
 
 ## 文档索引

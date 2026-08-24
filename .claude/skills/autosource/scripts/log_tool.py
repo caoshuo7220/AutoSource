@@ -12,7 +12,7 @@
   作为完整 URL 找到（边界匹配）。
 
 用法（hook 配置中）:
-    python .claude/skills/autosource/log_tool.py outputs/search_log.jsonl
+    python .claude/skills/autosource/scripts/log_tool.py outputs/search_log.jsonl
 """
 
 import json

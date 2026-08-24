@@ -8,8 +8,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# 将 .claude/skills/autosource 加入 path 以便导入
-SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource"
+# 将 .claude/skills/autosource/scripts 加入 path 以便导入
+SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource" / "scripts"
 sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity, count_multilang_groups,
