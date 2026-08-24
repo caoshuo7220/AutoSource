@@ -57,6 +57,12 @@ def test_skill_frontmatter_tools_no_agent():
     assert "Agent" not in frontmatter
 
 
+def test_incremental_search_count_per_node():
+    """增量发现每节点 8 次（2026-08-24 起：固定 4 + 自由 4——专家反馈题材覆盖偏窄，以加量换广度）。"""
+    assert "每节点 **8 次**搜索" in SKILL_MD
+    assert "**自由 4 次**" in SKILL_MD
+
+
 def test_settings_reference_existing_scripts():
     """settings.json 的 hook 命令与 postprocess 权限规则指向真实存在的脚本文件。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
