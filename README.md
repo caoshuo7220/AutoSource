@@ -6,7 +6,7 @@
 
 ```
 /autosource 交换机
-/autosource 算力服务器 -c "GPU服务器" "CPU服务器" -t "数据集" "产品文档"
+/autosource 算力服务器 -c "GPU服务器" "CPU服务器"
 
 输出: outputs/{领域词}_{时间戳}/
       ├── {领域词}_{时间戳}_数据源清单.csv   ← 交付物（UTF-8 BOM，Excel 直接打开）
@@ -33,7 +33,7 @@ Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流�
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 93 个测试，预期全过
+python -m pytest tests/ -q   # 96 个测试，预期全过
 ```
 
 ## 文档索引

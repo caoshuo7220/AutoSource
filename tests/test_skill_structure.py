@@ -36,6 +36,27 @@ def test_skill_references_only_scripts_paths():
     assert "/autosource-search" not in SKILL_MD
 
 
+def test_skill_uses_unified_granularity_terms():
+    """清单条目粒度术语统一为 合集级/单篇级（2026-08-21 决策 + 2026-08-24 统一），
+    不再使用"体系级"这一遗留叫法。"""
+    assert "体系级" not in SKILL_MD
+    assert "合集级" in SKILL_MD
+
+
+def test_skill_has_no_phantom_t_filter():
+    """-t 类型过滤参数已删除（2026-08-24 审查）：description 与参数表不得再宣传。
+    按参数形态断言（-t "…"），避免误伤 allowed-tools 等含 "-t" 子串的正常词。"""
+    assert "-t \"" not in SKILL_MD
+    assert "类型过滤" not in SKILL_MD
+
+
+def test_skill_frontmatter_tools_no_agent():
+    """frontmatter allowed-tools 为运行所需最小集，不含未被流程使用的 Agent。"""
+    frontmatter = SKILL_MD.split("---")[1]
+    assert "allowed-tools" in frontmatter
+    assert "Agent" not in frontmatter
+
+
 def test_settings_reference_existing_scripts():
     """settings.json 的 hook 命令与 postprocess 权限规则指向真实存在的脚本文件。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))

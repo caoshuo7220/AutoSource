@@ -13,3 +13,4 @@ outputs/
 docs/日报/
 # local overrides (not committed)
 .claude/settings.local.json
+evals/
