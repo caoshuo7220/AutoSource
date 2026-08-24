@@ -29,7 +29,10 @@
   搜索日志、溯源）；随后删除会话临时文件
 
 用法:
-    python postprocess.py <raw.json> [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
+    python postprocess.py --prepare                    # 流程开始：预留唯一运行目录并打印路径
+    python postprocess.py <运行目录>/raw.json ...      # 阶段 6 收尾：消费运行目录内的 raw.json
+    python postprocess.py outputs/raw.json ...         # 兼容旧固定路径（父目录非 run_ 时走原逻辑）
+    可选参数: [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
 
 raw.json 结构:
     {
@@ -71,6 +74,28 @@ STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
 
 DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
+
+# prepare 预留的运行目录：run_{时间戳}（收尾时由脚本重命名为 {领域词}_{时间戳}）。
+# 路径由脚本生成、每次运行唯一——连续/并发运行的 raw.json 不会互相覆盖
+# （旧固定路径 outputs/raw.json 仍兼容，父目录不匹配本模式时走原逻辑）。
+RUN_DIR_RE = re.compile(r"^run_(\d{4}-\d{2}-\d{2}-\d{6})(_\d+)?$")
+
+
+def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
+    """预留本次运行目录（run_{时间戳}/，同秒加 _N 后缀）并返回路径字符串。
+
+    流程开始时调用（--prepare）：目录在流程开头即存在，阶段 5 把 raw.json
+    写入其中，收尾时脚本读 raw.json 的领域词把目录重命名为最终交付目录。
+    """
+    now = now or datetime.now()
+    timestamp = now.strftime("%Y-%m-%d-%H%M%S")
+    run_dir = base / f"run_{timestamp}"
+    counter = 1
+    while run_dir.exists():
+        run_dir = base / f"run_{timestamp}_{counter}"
+        counter += 1
+    run_dir.mkdir(parents=True)
+    return str(run_dir)
 
 
 def _domain(url: str) -> str:
@@ -596,7 +621,13 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
             "按方案中止处理；raw.json 已保留供人工检查")
 
     now = now or datetime.now()
-    timestamp = now.strftime("%Y-%m-%d-%H%M%S")
+    # prepare 预留的运行目录：复用 run_ 名内的时间戳（= 运行开始时刻），
+    # 收尾时把目录重命名为 {领域词}_{时间戳}（命名与旧逻辑一致）
+    prepared_timestamp = None
+    run_match = RUN_DIR_RE.match(raw.parent.name)
+    if run_match:
+        prepared_timestamp = run_match.group(1)
+    timestamp = prepared_timestamp or now.strftime("%Y-%m-%d-%H%M%S")
 
     summary = {
         "domain": domain,
@@ -632,7 +663,12 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     while outdir.exists():
         outdir = base / f"{domain}_{timestamp}_{counter}"
         counter += 1
-    outdir.mkdir(parents=True)
+    if prepared_timestamp:
+        # 预留目录整体改名（raw.json 随目录移动），无需新建
+        raw.parent.rename(outdir)
+        raw = outdir / raw.name
+    else:
+        outdir.mkdir(parents=True)
 
     write_source_csv(outdir / f"{domain}_{timestamp}_数据源清单.csv", kept,
                      first_query_by_source(kept, sliced))
@@ -725,12 +761,20 @@ def main() -> None:
         pass
 
     parser = argparse.ArgumentParser(description="AutoSource 后处理流水线")
-    parser.add_argument("raw_json", help="编排层产出的 raw.json 路径")
+    parser.add_argument("raw_json", nargs="?", help="raw.json 路径（阶段 5 写入运行目录内；--prepare 模式下省略）")
+    parser.add_argument("--prepare", action="store_true",
+                        help="预留本次运行目录（outputs/run_{时间戳}/，每次运行唯一）并打印路径——流程开始时调用")
     parser.add_argument("--evidence-log", default=DEFAULT_EVIDENCE_LOG,
                         help="证据留痕文件（PostToolUse hook 自动记录，默认 outputs/search_log.jsonl）")
     parser.add_argument("--out-dir", default="outputs", help="输出根目录（默认 outputs）")
     parser.add_argument("--keep-raw", action="store_true", help="保留 raw.json 与证据留痕不删除")
     args = parser.parse_args()
+
+    if args.prepare:
+        print(prepare_run_dir(Path(args.out_dir)))
+        return
+    if not args.raw_json:
+        parser.error("需要 raw.json 路径（或使用 --prepare 预留运行目录）")
 
     try:
         summary = run(args.raw_json, out_dir=args.out_dir, keep_raw=args.keep_raw,

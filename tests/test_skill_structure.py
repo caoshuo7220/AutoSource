@@ -63,6 +63,13 @@ def test_incremental_search_count_per_node():
     assert "**自由 4 次**" in SKILL_MD
 
 
+def test_prepare_run_dir_contract():
+    """运行目录契约：--prepare 预留唯一目录，阶段 5 写其中 raw.json，阶段 6 同一路径收尾。"""
+    assert "postprocess.py --prepare" in SKILL_MD
+    assert "<运行目录>/raw.json" in SKILL_MD
+    assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
+
+
 def test_settings_reference_existing_scripts():
     """settings.json 的 hook 命令与 postprocess 权限规则指向真实存在的脚本文件。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))

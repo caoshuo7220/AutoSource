@@ -13,8 +13,8 @@ SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource" /
 sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity, count_multilang_groups,
-                         deduplicate, leaf_node, query_in_evidence, run,
-                         sanitize_domain, slice_evidence, strip_citation_anchors)
+                         deduplicate, leaf_node, prepare_run_dir, query_in_evidence,
+                         run, sanitize_domain, slice_evidence, strip_citation_anchors)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -1231,6 +1231,76 @@ class TestEvidenceEncoding:
         assert summary["kept"] == 2
         assert summary["ungrounded"] == 0
         assert summary["evidence_slice_skipped"] >= 1
+
+
+class TestPrepareRunDir:
+    """--prepare：流程开始时预留唯一运行目录（run_{时间戳}/，同秒加后缀）。"""
+
+    def test_creates_unique_dir_with_same_second_suffix(self, tmp_path):
+        p1 = Path(prepare_run_dir(tmp_path, now=FIXED_NOW))
+        p2 = Path(prepare_run_dir(tmp_path, now=FIXED_NOW))
+        assert p1.name == "run_2026-08-13-183045"
+        assert p2.name == "run_2026-08-13-183045_1"
+        assert p1.is_dir() and p2.is_dir()
+
+    def test_prepare_flag_prints_path_and_creates_dir(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "postprocess.py"),
+             "--prepare", "--out-dir", str(tmp_path)],
+            capture_output=True, text=True, encoding="utf-8", timeout=30)
+        assert result.returncode == 0
+        path = Path(result.stdout.strip())
+        assert path.parent == tmp_path
+        assert re.match(r"run_\d{4}-\d{2}-\d{2}-\d{6}$", path.name)
+        assert path.is_dir()
+
+
+class TestPreparedRunDirFlow:
+    """收尾：预留目录重命名为 {领域词}_{时间戳}，raw.json 归档，交付物在根。"""
+
+    def _prepared_run(self, tmp_path, data, timestamp="2026-08-13-183045"):
+        run_dir = tmp_path / f"run_{timestamp}"
+        run_dir.mkdir()
+        raw = run_dir / "raw.json"
+        raw.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        evidence = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path), evidence_log=str(evidence),
+                      now=FIXED_NOW)
+        return summary, run_dir
+
+    def test_renamed_to_domain_timestamp_and_archived(self, tmp_path):
+        data = base_data()
+        summary, run_dir = self._prepared_run(tmp_path, data)
+        assert summary["outdir"].endswith("算力服务器_2026-08-13-183045")
+        assert not run_dir.exists()  # run_ 目录已重命名为最终交付目录
+        outdir = Path(summary["outdir"])
+        assert outdir.is_dir()
+        assert (outdir / "intermediate" / "raw_input.json").is_file()
+        assert not (outdir / "raw.json").exists()  # 归档后不再留根目录
+        assert len(list(outdir.glob("*.csv"))) == 2  # 交付物只有根目录两个文件
+
+    def test_reuses_run_dir_timestamp_not_clock(self, tmp_path):
+        # 预留目录时间戳与注入时钟不同：收尾必须复用 run_ 名内的时间戳
+        data = base_data()
+        summary, _ = self._prepared_run(tmp_path, data, timestamp="2026-08-24-103503")
+        assert summary["outdir"].endswith("算力服务器_2026-08-24-103503")
+
+    def test_same_name_clash_gets_suffix(self, tmp_path):
+        # 重命名目标已存在（如并发同域运行）：加 _1 后缀，不覆盖
+        data = base_data()
+        (tmp_path / "算力服务器_2026-08-13-183045").mkdir()
+        summary, _ = self._prepared_run(tmp_path, data)
+        assert summary["outdir"].endswith("算力服务器_2026-08-13-183045_1")
+
+    def test_legacy_fixed_path_still_supported(self, tmp_path):
+        # 旧固定路径 outputs/raw.json（父目录非 run_）：行为不变，收尾删除暂存
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        evidence = write_evidence(tmp_path, data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path), evidence_log=str(evidence),
+                      now=FIXED_NOW)
+        assert summary["outdir"].endswith("算力服务器_2026-08-13-183045")
+        assert not (tmp_path / "raw.json").exists()
 
 
 class TestLogTool:

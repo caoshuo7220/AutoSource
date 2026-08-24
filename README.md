@@ -33,7 +33,7 @@ Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流�
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 96 个测试，预期全过
+python -m pytest tests/ -q   # 104 个测试，预期全过
 ```
 
 ## 文档索引
