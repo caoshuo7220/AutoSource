@@ -70,6 +70,46 @@ def test_prepare_run_dir_contract():
     assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
 
 
+def test_source_role_dimension_and_coverage_check():
+    """来源角色维度 + 覆盖评估：角度池含来源角色类，薄弱判定含来源维度单一。"""
+    assert "来源角色" in SKILL_MD
+    assert "来源维度单一" in SKILL_MD
+
+
+def test_verification_query_component_pool():
+    """验证搜索组件池：自由组合（每词 2-4 组件），来源识别必带，旧固定模板废止。"""
+    assert "组件池" in SKILL_MD
+    assert "来源识别（必带其一）" in SKILL_MD
+    assert "{机构/体系名} 官方文档 / 官网" not in SKILL_MD
+
+
+def test_no_cost_driven_trimming():
+    """防模型自砍搜索次数：无"代价"成本措辞，两处决策点写明不以搜索成本缩减/合并。"""
+    assert "列多列杂的代价" not in SKILL_MD
+    assert "无需以搜索成本为由缩减清单" in SKILL_MD
+    assert "不以搜索次数或运行时长为由合并节点" in SKILL_MD
+
+
+def test_settings_deny_outputs_read():
+    """防历史自锚定：deny Read(outputs/**) + Glob(outputs*)（转录实证的两条通道）。"""
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    deny = settings["permissions"].get("deny", [])
+    assert "Read(outputs/**)" in deny
+    assert "Glob(outputs*)" in deny
+
+
+def test_skill_no_history_output_reading():
+    """阶段 0 禁止读取历史运行产物（解释式提示词，与 deny 规则互补）。"""
+    assert "禁止读取 outputs/ 下历史运行的产物" in SKILL_MD
+
+
+def test_finish_writes_domain_analysis_report():
+    """收尾最后一步：写领域分析报告（第三交付物），模板在 references/。"""
+    assert "分析报告.md" in SKILL_MD
+    assert "领域分析报告" in SKILL_MD
+    assert (SKILL_DIR / "references" / "分析报告模板.md").is_file()
+
+
 def test_settings_reference_existing_scripts():
     """settings.json 的 hook 命令与 postprocess 权限规则指向真实存在的脚本文件。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))

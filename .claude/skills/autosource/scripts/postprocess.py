@@ -43,7 +43,7 @@ raw.json 结构:
         {"name": ..., "node": 叶子节点, "verified": true,
          "category_path": "完整层级路径", "source_type": ..., "url": ...,
          "description": ..., "reason": ...},
-        {"name": ..., "node": ..., "verified": false, "note": "疑似无效机构|已尽力"}
+        {"name": ..., "node": ..., "verified": false, "note": "疑似无效机构|未找到官方入口"}
       ],
       "journal": [
         {"phase": "验证搜索", "node": ..., "query": "查询词原文",

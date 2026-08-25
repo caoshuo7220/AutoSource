@@ -10,6 +10,10 @@
       "Skill(autosource)",
       "Skill(autosource:*)"
     ],
+    "deny": [
+      "Read(outputs/**)",
+      "Glob(outputs*)"
+    ],
     "additionalDirectories": [
       ".claude/skills"
     ]

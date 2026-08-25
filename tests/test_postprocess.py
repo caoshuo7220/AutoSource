@@ -589,7 +589,7 @@ class TestKnowledge:
         data = base_data()
         kn = self._knowledge_item()
         data["knowledge"] = [kn, {"name": "难搜机构", "node": "服务器CPU", "verified": False,
-                                  "note": "已尽力"}]
+                                  "note": "未找到官方入口"}]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [kn])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
@@ -597,7 +597,7 @@ class TestKnowledge:
 
         assert summary["list_verified"] == "1/2"
         assert summary["kept"] == 3  # 2 增量 + 1 清单并入
-        assert summary["unverified"] == [("难搜机构", "已尽力")]
+        assert summary["unverified"] == [("难搜机构", "未找到官方入口")]
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         urls = [r[4] for r in rows[1:]]
@@ -926,7 +926,7 @@ class TestArchives:
         assert not (outdir / "manifest.json").exists()
         assert (intermediate / "算力服务器_2026-08-13-183045_搜索日志.csv").exists()
         assert not (intermediate / "算力服务器_2026-08-13-183045_溯源.csv").exists()
-        # 根目录只有交付物（数据源清单 + stats）
+        # 脚本在根目录只写两个交付物（数据源清单 + stats；分析报告.md 由模型收尾时写入）
         root_files = {p.name for p in outdir.iterdir() if p.is_file()}
         assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv",
                               "算力服务器_2026-08-13-183045_stats.csv"}
@@ -1277,7 +1277,7 @@ class TestPreparedRunDirFlow:
         assert outdir.is_dir()
         assert (outdir / "intermediate" / "raw_input.json").is_file()
         assert not (outdir / "raw.json").exists()  # 归档后不再留根目录
-        assert len(list(outdir.glob("*.csv"))) == 2  # 交付物只有根目录两个文件
+        assert len(list(outdir.glob("*.csv"))) == 2  # 脚本只写两个 CSV（分析报告.md 由模型收尾时写入）
 
     def test_reuses_run_dir_timestamp_not_clock(self, tmp_path):
         # 预留目录时间戳与注入时钟不同：收尾必须复用 run_ 名内的时间戳
