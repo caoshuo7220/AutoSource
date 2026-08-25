@@ -142,9 +142,29 @@ def test_contradiction_and_wording_cleanup():
     assert "以下纪律仍适用" in SKILL_MD
     assert "自锚定" in SKILL_MD
     assert SKILL_MD.count("数据集只是其中一类，不应占主导") == 1
-    assert "见总则“平台准入判据”" in SKILL_MD
+    assert "见通用纪律“平台准入判据”" in SKILL_MD
     for bad in ["乱搜", "掺长尾垃圾", "不死循环", "纪律保留", "不花一次搜索"]:
         assert bad not in SKILL_MD
+    # 厂商/产品名规则单一归属：并入通用纪律词类清单第 4 条，阶段 3 改指针，图标移除
+    assert "**厂商 / 产品名**（按意图区分）" in SKILL_MD
+    assert "厂商 / 产品名的用法见通用纪律“搜索词构造”" in SKILL_MD
+    assert SKILL_MD.count("裸搜产品名") == 1
+    assert "禁止裸搜产品名" not in SKILL_MD
+    assert "❌" not in SKILL_MD and "✅" not in SKILL_MD
+
+
+def test_intro_structure_reorganized():
+    """2026-08-25 结构重排（skill-creator 规范）：文件头分组为 分工与边界 / 参数与运行约定 / 通用纪律，
+    流程图带阶段编号成为全文地图；总则改名通用纪律（原"阶段 2-4 适用"标注与内容矛盾），
+    证据链标题注明脚本强制校验（解释为什么硬）。"""
+    assert "初始化（预留运行目录） → 0 领域拆解 → 1 知识清单" in SKILL_MD
+    assert "## 分工与边界" in SKILL_MD
+    assert "## 参数与运行约定" in SKILL_MD
+    assert "## 通用纪律" in SKILL_MD
+    assert "### 搜索词构造" in SKILL_MD
+    assert "（脚本强制校验）" in SKILL_MD
+    assert "总则" not in SKILL_MD
+    assert "**运行约定**：" not in SKILL_MD
 
 
 def test_settings_reference_existing_scripts():
