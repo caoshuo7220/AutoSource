@@ -64,10 +64,23 @@ def test_incremental_search_count_per_node():
 
 
 def test_prepare_run_dir_contract():
-    """运行目录契约：--prepare 预留唯一目录，阶段 5 写其中 raw.json，阶段 6 同一路径收尾。"""
+    """运行目录契约：--prepare 预留唯一目录，阶段 5 写其中 raw.json，阶段 6 同一路径收尾。
+    预留步骤命名"初始化"（2026-08-25 起）——旧名"阶段 0 前"易误读为阶段序列的一部分。"""
     assert "postprocess.py --prepare" in SKILL_MD
     assert "<运行目录>/raw.json" in SKILL_MD
     assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
+    assert "## 初始化 · 预留运行目录" in SKILL_MD
+    assert "阶段 0 前" not in SKILL_MD
+
+
+def test_termination_condition_aligned_with_finalization():
+    """终止条件与定案机制对齐（2026-08-25 修订）：定案为"未找到官方入口"的清单项
+    永不"验证通过"，原表述"清单全部验证通过"在常规运行下永远无法满足；
+    改为"全部了结（验证通过或已定案）"，删除冗余的"连续两轮无进展"括弧，
+    并明确扩量轮上限为全局 2 轮。"""
+    assert "清单项全部了结（验证通过或已定案）" in SKILL_MD
+    assert "扩量轮上限 2 轮（全局）" in SKILL_MD
+    assert "连续两轮无进展" not in SKILL_MD
 
 
 def test_source_role_dimension_and_coverage_check():
@@ -77,10 +90,15 @@ def test_source_role_dimension_and_coverage_check():
 
 
 def test_verification_query_component_pool():
-    """验证搜索组件池：自由组合（每词 2-4 组件），来源识别必带，旧固定模板废止。"""
+    """验证搜索组件池：自由组合（每词 2-4 组件），来源识别必带，旧固定模板废止。
+    2026-08-25 重组：语言规则独立成条（双语来源可原名+英文名并搜），
+    "每项只搜 1 次"全文唯一（原两处重复合并）。"""
     assert "组件池" in SKILL_MD
     assert "来源识别（必带其一）" in SKILL_MD
     assert "{机构/体系名} 官方文档 / 官网" not in SKILL_MD
+    assert "按来源语言搜索" in SKILL_MD
+    assert "原名+英文名" in SKILL_MD
+    assert SKILL_MD.count("只搜 1 次") == 1
 
 
 def test_no_cost_driven_trimming():
@@ -107,7 +125,26 @@ def test_finish_writes_domain_analysis_report():
     """收尾最后一步：写领域分析报告（第三交付物），模板在 references/。"""
     assert "分析报告.md" in SKILL_MD
     assert "领域分析报告" in SKILL_MD
-    assert (SKILL_DIR / "references" / "分析报告模板.md").is_file()
+    template = (SKILL_DIR / "references" / "分析报告模板.md").read_text(encoding="utf-8")
+    assert "严格按以下固定模板" in template
+    assert "ALWAYS" not in template  # 2026-08-25 审查：英文全大写命令式改为中文祈使
+    assert "不是统计罗列" not in template  # 与写作纪律 3 重复，删
+
+
+def test_contradiction_and_wording_cleanup():
+    """2026-08-25 全局审查修订钉桩：矛盾表述对齐（Bash 范围/定案时机/剔除语义），
+    非正式措辞移除（乱搜/掺长尾垃圾/不死循环/纪律保留/不花一次搜索），
+    重复规则改指针（数据集主导只留总纲、通用平台指向总则），裸禁令补理由（自锚定）。"""
+    assert "初始化 `--prepare` 与阶段 6 收尾" in SKILL_MD
+    assert "（阶段 6 收尾执行）" not in SKILL_MD
+    assert "留待扩量轮换角度重试后按阶段 4 定案" in SKILL_MD
+    assert "从有效来源中剔除" in SKILL_MD
+    assert "以下纪律仍适用" in SKILL_MD
+    assert "自锚定" in SKILL_MD
+    assert SKILL_MD.count("数据集只是其中一类，不应占主导") == 1
+    assert "见总则“平台准入判据”" in SKILL_MD
+    for bad in ["乱搜", "掺长尾垃圾", "不死循环", "纪律保留", "不花一次搜索"]:
+        assert bad not in SKILL_MD
 
 
 def test_settings_reference_existing_scripts():
