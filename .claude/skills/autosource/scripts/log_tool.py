@@ -12,12 +12,27 @@
   作为完整 URL 找到（边界匹配）。
 
 用法（hook 配置中）:
-    python .claude/skills/autosource/scripts/log_tool.py outputs/search_log.jsonl
+    python .claude/skills/autosource/scripts/log_tool.py
+    留痕路径由脚本按会话自动命名（CLAUDE_CODE_SESSION_ID 环境变量），
+    并行运行各写各的会话文件、各删各的——互不销毁对方证据。
 """
 
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def default_log_path() -> Path:
+    """留痕默认路径：按会话隔离（并行运行互不删除对方留痕）。
+
+    hook 子进程继承 CLAUDE_CODE_SESSION_ID 环境变量；无该变量时回退到
+    共享旧路径（兼容手动调用/测试）。
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session_id:
+        return Path("outputs") / f"search_log_{session_id}.jsonl"
+    return Path("outputs/search_log.jsonl")
 
 
 def main() -> None:
@@ -27,7 +42,7 @@ def main() -> None:
     except (ValueError, UnicodeDecodeError):
         return
 
-    log_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("outputs/search_log.jsonl")
+    log_path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_log_path()
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)

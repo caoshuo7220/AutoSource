@@ -31,6 +31,7 @@
 用法:
     python postprocess.py --prepare                    # 流程开始：预留唯一运行目录并打印路径
     python postprocess.py <运行目录>/raw.json ...      # 阶段 6 收尾：消费运行目录内的 raw.json
+    python postprocess.py --rename-report <输出目录>    # 阶段 6 最后：报告命名（内容由模型写入）
     python postprocess.py outputs/raw.json ...         # 兼容旧固定路径（父目录非 run_ 时走原逻辑）
     可选参数: [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
 
@@ -59,6 +60,7 @@ raw.json 结构:
 import argparse
 import csv
 import json
+import os
 import re
 import shutil
 import sys
@@ -74,6 +76,20 @@ STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
 
 DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
+
+
+def default_evidence_log() -> str:
+    """默认证据留痕路径：按会话隔离（并行运行互不删除对方留痕）。
+
+    与 log_tool.py 的命名规则一致：hook 按 CLAUDE_CODE_SESSION_ID 写
+    会话文件，postprocess 读同一会话文件、也只删同一会话文件——并行
+    运行的证据链互不干扰（2026-08-26 实证：共享文件被并行运行的
+    postprocess 删除，另一运行证据链断裂）。
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session_id:
+        return f"outputs/search_log_{session_id}.jsonl"
+    return DEFAULT_EVIDENCE_LOG
 
 # prepare 预留的运行目录：run_{时间戳}（收尾时由脚本重命名为 {领域词}_{时间戳}）。
 # 路径由脚本生成、每次运行唯一——连续/并发运行的 raw.json 不会互相覆盖
@@ -96,6 +112,25 @@ def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
         counter += 1
     run_dir.mkdir(parents=True)
     return str(run_dir)
+
+
+def finalize_report(outdir: str) -> str:
+    """把模型写入的 分析报告.md 重命名为 {目录名}_分析报告.md。
+
+    报告内容由模型生成（语义环节），文件名是确定性环节——按目录名派生，
+    与数据源清单/stats 同前缀；模型没有时钟、禁止模型自行命名（
+    时间戳编造是本项目已实证的失败模式）。报告缺失或目标已存在时报错——
+    错误显式化，不让命名漂移静默发生。
+    """
+    d = Path(outdir)
+    report = d / "分析报告.md"
+    if not report.exists():
+        raise FileNotFoundError(f"未找到 分析报告.md: {report}（报告需先由模型写入该文件）")
+    target = d / f"{d.name}_分析报告.md"
+    if target.exists():
+        raise FileExistsError(f"目标文件已存在: {target}")
+    report.rename(target)
+    return str(target)
 
 
 def _domain(url: str) -> str:
@@ -555,7 +590,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     journal = data.get("journal") if isinstance(data.get("journal"), list) else []
 
     # 证据校验：候选 URL 必须逐字出现在证据留痕中（PostToolUse hook 系统记录）
-    log_path = Path(evidence_log) if evidence_log else Path(DEFAULT_EVIDENCE_LOG)
+    log_path = Path(evidence_log) if evidence_log else Path(default_evidence_log())
     if (valid or merged or journal) and not log_path.exists():
         raise FileNotFoundError(
             f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
@@ -764,14 +799,23 @@ def main() -> None:
     parser.add_argument("raw_json", nargs="?", help="raw.json 路径（阶段 5 写入运行目录内；--prepare 模式下省略）")
     parser.add_argument("--prepare", action="store_true",
                         help="预留本次运行目录（outputs/run_{时间戳}/，每次运行唯一）并打印路径——流程开始时调用")
-    parser.add_argument("--evidence-log", default=DEFAULT_EVIDENCE_LOG,
-                        help="证据留痕文件（PostToolUse hook 自动记录，默认 outputs/search_log.jsonl）")
+    parser.add_argument("--evidence-log", default=None,
+                        help="证据留痕文件（PostToolUse hook 自动记录；缺省按会话隔离命名 outputs/search_log_{会话}.jsonl）")
     parser.add_argument("--out-dir", default="outputs", help="输出根目录（默认 outputs）")
     parser.add_argument("--keep-raw", action="store_true", help="保留 raw.json 与证据留痕不删除")
+    parser.add_argument("--rename-report", metavar="DIR",
+                        help="把 DIR/分析报告.md 重命名为 {目录名}_分析报告.md（报告内容由模型写入，文件名由脚本命名）——阶段 6 写报告后调用")
     args = parser.parse_args()
 
     if args.prepare:
         print(prepare_run_dir(Path(args.out_dir)))
+        return
+    if args.rename_report:
+        try:
+            print(f"分析报告已重命名: {finalize_report(args.rename_report)}")
+        except (FileNotFoundError, FileExistsError) as e:
+            print(f"错误: {e}", file=sys.stderr)
+            sys.exit(1)
         return
     if not args.raw_json:
         parser.error("需要 raw.json 路径（或使用 --prepare 预留运行目录）")

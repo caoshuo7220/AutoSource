@@ -58,9 +58,11 @@ def test_skill_frontmatter_tools_no_agent():
 
 
 def test_incremental_search_count_per_node():
-    """增量发现每节点 8 次（2026-08-24 起：固定 4 + 自由 4——专家反馈题材覆盖偏窄，以加量换广度）。"""
+    """增量发现每节点 8 次（2026-08-24 起：固定 4 + 自由 4——专家反馈题材覆盖偏窄，以加量换广度）。
+    2026-08-26 重排：角度池独立成组（六类分行）。"""
     assert "每节点 **8 次**搜索" in SKILL_MD
     assert "**自由 4 次**" in SKILL_MD
+    assert "**角度池**" in SKILL_MD
 
 
 def test_prepare_run_dir_contract():
@@ -87,6 +89,7 @@ def test_source_role_dimension_and_coverage_check():
     """来源角色维度 + 覆盖评估：角度池含来源角色类，薄弱判定含来源维度单一。"""
     assert "来源角色" in SKILL_MD
     assert "来源维度单一" in SKILL_MD
+    assert "**薄弱判定**" in SKILL_MD
 
 
 def test_verification_query_component_pool():
@@ -108,6 +111,13 @@ def test_no_cost_driven_trimming():
     assert "不以搜索次数或运行时长为由合并节点" in SKILL_MD
 
 
+def test_settings_raises_web_search_session_budget():
+    """项目级 settings.json 调高每会话 WebSearch 配额——Claude Code 默认 200 次/会话，
+    2026-08-25 两轮运行撞线实证（扩量轮被配额砍掉）。项目级分发：所有使用者受益。"""
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings.get("env", {}).get("CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION") == "1000"
+
+
 def test_settings_deny_outputs_read():
     """防历史自锚定：deny Read(outputs/**) + Glob(outputs*)（转录实证的两条通道）。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
@@ -122,13 +132,17 @@ def test_skill_no_history_output_reading():
 
 
 def test_finish_writes_domain_analysis_report():
-    """收尾最后一步：写领域分析报告（第三交付物），模板在 references/。"""
+    """收尾最后一步：写领域分析报告（第三交付物），模板在 references/；
+    文件名由脚本 --rename-report 命名（模型写内容、不自行命名）。"""
     assert "分析报告.md" in SKILL_MD
     assert "领域分析报告" in SKILL_MD
+    assert "--rename-report" in SKILL_MD
+    assert "_分析报告.md" in SKILL_MD
     template = (SKILL_DIR / "references" / "分析报告模板.md").read_text(encoding="utf-8")
     assert "严格按以下固定模板" in template
     assert "ALWAYS" not in template  # 2026-08-25 审查：英文全大写命令式改为中文祈使
     assert "不是统计罗列" not in template  # 与写作纪律 3 重复，删
+    assert "不要自行命名" in template
 
 
 def test_contradiction_and_wording_cleanup():
@@ -139,8 +153,8 @@ def test_contradiction_and_wording_cleanup():
     assert "（阶段 6 收尾执行）" not in SKILL_MD
     assert "留待扩量轮换角度重试后按阶段 4 定案" in SKILL_MD
     assert "从有效来源中剔除" in SKILL_MD
-    assert "以下纪律仍适用" in SKILL_MD
-    assert "自锚定" in SKILL_MD
+    assert "以下约束仍适用" in SKILL_MD
+    assert "历史清单是上轮结果的基线，照搬会继承上轮的遗漏与偏差" in SKILL_MD
     assert SKILL_MD.count("数据集只是其中一类，不应占主导") == 1
     assert "见通用纪律“平台准入判据”" in SKILL_MD
     for bad in ["乱搜", "掺长尾垃圾", "不死循环", "纪律保留", "不花一次搜索"]:
@@ -151,6 +165,11 @@ def test_contradiction_and_wording_cleanup():
     assert SKILL_MD.count("裸搜产品名") == 1
     assert "禁止裸搜产品名" not in SKILL_MD
     assert "❌" not in SKILL_MD and "✅" not in SKILL_MD
+    # 数据源类型标签治理（2026-08-26 起）：从词类词汇中选，不自创同义新词；
+    # 组合仅限词类词汇两两拼合、不加领域名（子集分裂治理）
+    assert "#### 数据源类型（标签从词类词汇中选）" in SKILL_MD
+    assert "不另造同义新词" in SKILL_MD
+    assert "不要往标签里加领域名" in SKILL_MD
 
 
 def test_intro_structure_reorganized():
@@ -178,5 +197,6 @@ def test_settings_reference_existing_scripts():
             cmd = hook["command"]
             if "log_tool.py" in cmd:
                 assert "scripts/log_tool.py" in cmd
+                assert "log_tool.py outputs/" not in cmd  # 2026-08-26 起按会话隔离命名，不留固定共享路径
                 log_tool = cmd.split("python ", 1)[1].split(" outputs/", 1)[0]
                 assert (ROOT / log_tool).is_file()

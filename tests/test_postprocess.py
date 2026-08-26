@@ -2,19 +2,23 @@
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 # 将 .claude/skills/autosource/scripts 加入 path 以便导入
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource" / "scripts"
 sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity, count_multilang_groups,
-                         deduplicate, leaf_node, prepare_run_dir, query_in_evidence,
-                         run, sanitize_domain, slice_evidence, strip_citation_anchors)
+                         deduplicate, default_evidence_log, finalize_report,
+                         leaf_node, prepare_run_dir, query_in_evidence, run,
+                         sanitize_domain, slice_evidence, strip_citation_anchors)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -1326,3 +1330,51 @@ class TestLogTool:
             input="not json", capture_output=True, encoding="utf-8", timeout=30)
         assert result.returncode == 0
         assert not log.exists()
+
+
+class TestFinalizeReport:
+    def test_renames_with_dirname_prefix(self, tmp_path):
+        d = tmp_path / "电源和能源硬件_2026-08-25-180439"
+        d.mkdir()
+        (d / "分析报告.md").write_text("报告内容", encoding="utf-8")
+        result = finalize_report(str(d))
+        assert result == str(d / "电源和能源硬件_2026-08-25-180439_分析报告.md")
+        assert (d / "电源和能源硬件_2026-08-25-180439_分析报告.md").read_text(encoding="utf-8") == "报告内容"
+        assert not (d / "分析报告.md").exists()
+
+    def test_missing_report_raises(self, tmp_path):
+        d = tmp_path / "某领域_2026-08-25-180439"
+        d.mkdir()
+        with pytest.raises(FileNotFoundError):
+            finalize_report(str(d))
+
+    def test_target_exists_raises(self, tmp_path):
+        d = tmp_path / "某领域_2026-08-25-180439"
+        d.mkdir()
+        (d / "分析报告.md").write_text("新", encoding="utf-8")
+        (d / "某领域_2026-08-25-180439_分析报告.md").write_text("旧", encoding="utf-8")
+        with pytest.raises(FileExistsError):
+            finalize_report(str(d))
+
+
+class TestSessionIsolatedEvidenceLog:
+    """证据留痕按会话隔离（2026-08-26 起）：并行运行互不删除对方留痕。"""
+
+    def test_default_evidence_log_uses_session_id(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-abc")
+        assert default_evidence_log() == "outputs/search_log_sess-abc.jsonl"
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+        assert default_evidence_log() == "outputs/search_log.jsonl"
+
+    def test_log_tool_without_arg_writes_session_file(self, tmp_path):
+        payload = json.dumps(
+            {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-1")
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "log_tool.py")],
+            input=payload, capture_output=True, encoding="utf-8", timeout=30,
+            cwd=str(tmp_path), env=env)
+        assert result.returncode == 0
+        log = tmp_path / "outputs" / "search_log_sess-1.jsonl"
+        assert log.exists()
+        assert json.loads(log.read_text(encoding="utf-8").strip())["tool_input"]["query"] == "测试"

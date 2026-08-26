@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": "1000"
+  },
   "permissions": {
     "allow": [
       "WebSearch",
@@ -25,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/skills/autosource/scripts/log_tool.py outputs/search_log.jsonl"
+            "command": "python .claude/skills/autosource/scripts/log_tool.py"
           }
         ]
       }
