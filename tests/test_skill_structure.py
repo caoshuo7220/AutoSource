@@ -170,6 +170,7 @@ def test_contradiction_and_wording_cleanup():
     assert "#### 数据源类型（标签从词类词汇中选）" in SKILL_MD
     assert "不另造同义新词" in SKILL_MD
     assert "不要往标签里加领域名" in SKILL_MD
+    assert "市场研究" in SKILL_MD  # 2026-08-26 交换机运行实证（26 条高频、用词稳定）纳入体裁词表
 
 
 def test_intro_structure_reorganized():
