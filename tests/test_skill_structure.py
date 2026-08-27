@@ -58,11 +58,14 @@ def test_skill_frontmatter_tools_no_agent():
 
 
 def test_incremental_search_count_per_node():
-    """增量发现每节点 8 次（2026-08-24 起：固定 4 + 自由 4——专家反馈题材覆盖偏窄，以加量换广度）。
-    2026-08-26 重排：角度池独立成组（六类分行）。"""
-    assert "每节点 **8 次**搜索" in SKILL_MD
-    assert "**自由 4 次**" in SKILL_MD
+    """增量发现每节点 12 次（2026-08-27 起：固定 4 + 自由 8——数据验证搜索次数是增产主力，
+    同时修复论文/专利/标准裸搜命中通用平台首页导致提取 0 的问题）。
+    角度池独立成组（六类分行），并新增易失效角度说明。"""
+    assert "每节点 **12 次**搜索" in SKILL_MD
+    assert "**自由 8 次**" in SKILL_MD
     assert "**角度池**" in SKILL_MD
+    assert "**易失效角度（必须带领域词 + 入口词）**" in SKILL_MD
+    assert "**英文裸后缀同样易失效**" in SKILL_MD  # 2026-08-27：英文 X list 模式返回垃圾页，扩展易失效规则
 
 
 def test_prepare_run_dir_contract():
@@ -76,12 +79,14 @@ def test_prepare_run_dir_contract():
 
 
 def test_termination_condition_aligned_with_finalization():
-    """终止条件与定案机制对齐（2026-08-25 修订）：定案为"未找到官方入口"的清单项
-    永不"验证通过"，原表述"清单全部验证通过"在常规运行下永远无法满足；
-    改为"全部了结（验证通过或已定案）"，删除冗余的"连续两轮无进展"括弧，
-    并明确扩量轮上限为全局 2 轮。"""
+    """终止条件与定案机制对齐（2026-08-27 修订）：扩量轮从"全局 2 轮"改为"按节点独立判断"，
+    仍薄弱节点继续、非薄弱节点停止，连续一轮无新增即收敛。
+    总条件为"非薄弱或已收敛"——收敛是正规退出路径，避免体裁单一等客观上仍薄弱的节点
+    使"所有节点非薄弱"字面条件永不满足（与 08-25"全部验证通过"同类病）。"""
     assert "清单项全部了结（验证通过或已定案）" in SKILL_MD
-    assert "扩量轮上限 2 轮（全局）" in SKILL_MD
+    assert "非薄弱或已收敛" in SKILL_MD
+    assert "扩量轮按节点独立判断，不再全局共享轮数" in SKILL_MD
+    assert "某节点连续一轮无任何新增有效来源时，该节点视为收敛并停止" in SKILL_MD
     assert "连续两轮无进展" not in SKILL_MD
 
 
@@ -101,7 +106,26 @@ def test_verification_query_component_pool():
     assert "{机构/体系名} 官方文档 / 官网" not in SKILL_MD
     assert "按来源语言搜索" in SKILL_MD
     assert "原名+英文名" in SKILL_MD
+    assert "**首轮优先官方入口**" in SKILL_MD  # 2026-08-27：验证首轮 42% 落空实证，官网式优先、落空留扩量轮
     assert SKILL_MD.count("只搜 1 次") == 1
+
+
+def test_extraction_per_item_no_whole_row_rejection():
+    """提取端禁止整行拒收（2026-08-27 交换机 Nokia 事件实证：查询返回 10 条官方文档页提取 0）：
+    逐条判断、提取为 0 的唯一前提、粒度"优先收合集入口"歧义澄清。"""
+    assert "#### 逐条判断（禁止整行拒收）" in SKILL_MD
+    assert "提取为 0 的唯一前提" in SKILL_MD
+    assert "没看到合集入口就整行放弃" in SKILL_MD
+    assert "合集入口与单篇同时出现在结果里" in SKILL_MD
+
+
+def test_node_search_profile():
+    """节点搜索画像（2026-08-26 起）：基础契约钉桩——不改 nodes 契约、禁编造机构、
+    核心搜索词含行业术语与细分场景词（2026-08-27 补：薄弱节点维度窄的治理）。"""
+    assert "### 节点搜索画像" in SKILL_MD
+    assert "不改变 `nodes` 字段契约" in SKILL_MD
+    assert "禁止为填画像强行编造机构名称" in SKILL_MD
+    assert "行业术语与细分场景词" in SKILL_MD
 
 
 def test_no_cost_driven_trimming():
