@@ -66,6 +66,7 @@ def test_incremental_search_count_per_node():
     assert "**角度池**" in SKILL_MD
     assert "**易失效角度（必须带领域词 + 入口词）**" in SKILL_MD
     assert "**英文裸后缀同样易失效**" in SKILL_MD  # 2026-08-27：英文 X list 模式返回垃圾页，扩展易失效规则
+    assert "directory / registry / collection 这类泛化目录词" in SKILL_MD  # 2026-08-27：directory 实证命中率低，降级为泛化目录词
 
 
 def test_prepare_run_dir_contract():

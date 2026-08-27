@@ -209,6 +209,27 @@ class TestCheckGroundedBoundaries:
         assert len(kept) == 1
         assert rejected == []
 
+    def test_numeric_fragment_truncation_kept(self):
+        # 截短到纯数字引用锚点之前不再拒绝（2026-08-27 交换机 274 轮 10 条实证）
+        evidence = '{"results":[{"url":"https://a.com/doc.pdf#2#1"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com/doc.pdf"}], evidence)
+        assert len(kept) == 1
+        assert rejected == []
+
+    def test_word_fragment_truncation_kept(self):
+        # 截短到文字片段之前（#top）不再拒绝——片段不改变资源主体
+        evidence = '{"results":[{"url":"https://a.com/page#top"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com/page"}], evidence)
+        assert len(kept) == 1
+        assert rejected == []
+
+    def test_query_truncation_rejected(self):
+        # 去 query 参数仍拒绝（?page=2 会改变内容）
+        evidence = '{"results":[{"url":"https://a.com/list?page=2"}]}'
+        kept, rejected = check_grounded([{"url": "https://a.com/list"}], evidence)
+        assert kept == []
+        assert len(rejected) == 1
+
 
 class TestStripCitationAnchors:
     def test_double_digit_anchors_stripped(self):

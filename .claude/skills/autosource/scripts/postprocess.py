@@ -164,13 +164,20 @@ def leaf_node(category_path: str, nodes: list[str]) -> Optional[str]:
 # 证据边界匹配的字符集：RFC 3986 的 unreserved + reserved + "%"。
 # 候选 URL 必须作为完整 URL 出现在留痕中——匹配的前后相邻字符若属于该集合，
 # 说明该匹配只是更长 URL 的前缀（截短为父路径/裸域名），拒绝。
+# 例外：`#` 是 fragment 分隔符（fragment 不发给服务器、不改变资源主体），
+# 候选以 `#` 结尾视为完整资源 URL 放行；`?` 是 query 分隔符（会改变内容），不豁免。
 URL_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%"
 )
 
 
 def _contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
-    """needle 在 haystack 中的出现必须前后不与 boundary_chars 相邻（完整边界匹配）。"""
+    """needle 在 haystack 中的出现必须前后不与 boundary_chars 相邻（完整边界匹配）。
+
+    `#` 是 fragment 分隔符（fragment 不改变资源主体）：needle 以 `#` 结尾视为
+    完整资源 URL 而非"更长 URL 的前缀"，放行；`?` 是 query 分隔符（会改变内容），
+    仍按 boundary_chars 严格拒绝。before 侧不豁免。
+    """
     if not needle:
         return False
     start = haystack.find(needle)
@@ -178,7 +185,8 @@ def _contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
         end = start + len(needle)
         before = haystack[start - 1] if start > 0 else ""
         after = haystack[end] if end < len(haystack) else ""
-        if before not in boundary_chars and after not in boundary_chars:
+        after_ok = after not in boundary_chars or after == "#"
+        if before not in boundary_chars and after_ok:
             return True
         start = haystack.find(needle, end)
     return False
