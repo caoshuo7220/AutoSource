@@ -1378,6 +1378,57 @@ class TestFinalizeReport:
             finalize_report(str(d))
 
 
+class TestReportStatsInjection:
+    """数据总览注入（2026-08-28 起）：报告统计数字由脚本生成、模型不写数字——
+    修"报告体裁数与 stats 对不上"（模型凭去重前记忆自算）的确定性下沉缺口。"""
+
+    def _setup(self, tmp_path, report_text, with_stats=True):
+        d = tmp_path / "交换机_2026-08-28-114546"
+        d.mkdir()
+        (d / "分析报告.md").write_text(report_text, encoding="utf-8")
+        if with_stats:
+            (d / "交换机_2026-08-28-114546_stats.csv").write_text(
+                "分类节点,候选数,体裁分布\n"
+                "工业交换机,98,\"厂商文档: 30; 行业标准: 10\"\n"
+                "数据中心交换机,84,\"厂商文档: 40; 资讯平台: 20\"\n"
+                "总计,182,\"厂商文档: 70; 行业标准: 10; 资讯平台: 20\"\n",
+                encoding="utf-8-sig")
+            (d / "交换机_2026-08-28-114546_数据源清单.csv").write_text(
+                "数据源名称,分类路径,数据源类型,粒度,访问地址,简要说明,来源搜索\n"
+                "a,交换机-工业交换机,厂商文档,合集级,https://a.com,desc,src\n"
+                "b,交换机-工业交换机,厂商文档,单篇级,https://b.com,desc,src\n"
+                "c,交换机-数据中心交换机,行业标准,单篇级,https://c.com,desc,src\n",
+                encoding="utf-8-sig")
+        return d
+
+    def test_inject_into_existing_section(self, tmp_path):
+        d = self._setup(tmp_path,
+            "# 交换机 领域分析报告\n"
+            "> 本报告基于本次自动发现的数据源生成。\n\n"
+            "## 数据总览\n\n（本段由收尾脚本自动生成）\n\n"
+            "## 一、领域概览\n（定性内容）\n")
+        result = finalize_report(str(d))
+        text = Path(result).read_text(encoding="utf-8")
+        assert "数据源总数：182 条（合集级 1 / 单篇级 2）" in text
+        assert "体裁分布：厂商文档: 70; 行业标准: 10; 资讯平台: 20" in text
+        assert "工业交换机: 98" in text
+        assert "（本段由收尾脚本自动生成）" not in text
+        assert "## 一、领域概览" in text
+
+    def test_insert_after_title_when_section_missing(self, tmp_path):
+        d = self._setup(tmp_path,
+            "# 交换机 领域分析报告\n\n## 一、领域概览\n（定性内容）\n")
+        result = finalize_report(str(d))
+        text = Path(result).read_text(encoding="utf-8")
+        assert text.index("## 数据总览") < text.index("## 一、领域概览")
+        assert "数据源总数：182 条" in text
+
+    def test_missing_stats_skips_injection(self, tmp_path):
+        d = self._setup(tmp_path, "# 标题\n\n## 一、领域概览\n内容\n", with_stats=False)
+        result = finalize_report(str(d))
+        assert "数据总览" not in Path(result).read_text(encoding="utf-8")
+
+
 class TestSessionIsolatedEvidenceLog:
     """证据留痕按会话隔离（2026-08-26 起）：并行运行互不删除对方留痕。"""
 

@@ -168,6 +168,11 @@ def test_finish_writes_domain_analysis_report():
     assert "ALWAYS" not in template  # 2026-08-25 审查：英文全大写命令式改为中文祈使
     assert "不是统计罗列" not in template  # 与写作纪律 3 重复，删
     assert "不要自行命名" in template
+    # 2026-08-28：统计数字由脚本注入（报告体裁数与 stats 对不上的修复）——模型不写任何统计数字
+    assert "## 数据总览" in template
+    assert "不写任何统计数字" in template
+    assert "由收尾脚本自动生成" in template
+    assert "统计数字一律不写" in SKILL_MD
 
 
 def test_contradiction_and_wording_cleanup():

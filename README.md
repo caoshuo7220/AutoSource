@@ -34,7 +34,7 @@ Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流�
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 124 个测试，预期全过
+python -m pytest tests/ -q   # 127 个测试，预期全过
 ```
 
 ## 文档索引
@@ -47,3 +47,5 @@ python -m pytest tests/ -q   # 124 个测试，预期全过
 | [docs/04-问题记录手册.md](docs/04-问题记录手册.md) | 问题清单（P-001~P-008）、决策记录与讨论日志 |
 | [docs/05-交付手册.md](docs/05-交付手册.md) | 交付接手者必读：关键决策、已知问题、下一步 |
 | [docs/06-参考方案手册.md](docs/06-参考方案手册.md) | 外部调研：同类方案盘点、可复用组件、社区共识模式对照 |
+| [docs/07-根因分析.md](docs/07-根因分析.md) | 重大波动的完整根因解剖（案例：交换机 274→172）与可复现的分析方法 |
+| [docs/08-存储架构改造方案.md](docs/08-存储架构改造方案.md) | 写入截断根治方案（已定案待实施）：MCP 四工具 + manifest 瘦身 + store JSONL |

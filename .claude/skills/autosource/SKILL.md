@@ -270,7 +270,7 @@ python .claude/skills/autosource/scripts/postprocess.py <运行目录>/raw.json
 
 脚本一次性完成证据校验 / 清单并入 / 去重 / CSV / stats / 溯源 / 清理——运行目录重命名为 `outputs/{领域词}_{时间戳}/`，raw.json 归档进 intermediate/raw_input.json——把它的 stdout 统计输出**原样展示给用户作为最终汇总**（含清单核对、未验证清单、输出目录）。
 
-**收尾的最后一步：写领域分析报告。** 先 Read `.claude/skills/autosource/references/分析报告模板.md`，按其模板把报告 Write 到 stdout 所示输出目录的 `分析报告.md`（**内容由模型写、文件名由脚本命名，不要自行命名**）。写完报告，立即执行（该 Bash 命令在权限白名单内，直接运行；`<输出目录>` 照抄 stdout 的"输出目录"）：
+**收尾的最后一步：写领域分析报告。** 先 Read `.claude/skills/autosource/references/分析报告模板.md`，按其模板把报告 Write 到 stdout 所示输出目录的 `分析报告.md`（**内容由模型写、文件名由脚本命名，不要自行命名**；**统计数字一律不写**——"数据总览"段由脚本在下一步自动生成）。写完报告，立即执行（该 Bash 命令在权限白名单内，直接运行；`<输出目录>` 照抄 stdout 的"输出目录"）：
 
 ```bash
 python .claude/skills/autosource/scripts/postprocess.py --rename-report <输出目录>
