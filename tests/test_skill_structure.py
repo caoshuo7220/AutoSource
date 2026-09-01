@@ -1,4 +1,4 @@
-"""skill 结构约定的钉桩测试：单 skill 合并、脚本归位 scripts/、路径引用一致。"""
+"""skill 结构约定的契约钉进测试：单 skill 合并、脚本归位 scripts/、路径引用一致。"""
 import json
 from pathlib import Path
 
@@ -70,13 +70,35 @@ def test_incremental_search_count_per_node():
 
 
 def test_prepare_run_dir_contract():
-    """运行目录契约：--prepare 预留唯一目录，阶段 5 写其中 raw.json，阶段 6 同一路径收尾。
-    预留步骤命名"初始化"（2026-08-25 起）——旧名"阶段 0 前"易误读为阶段序列的一部分。"""
+    """运行目录契约：--prepare 预留唯一目录，阶段 1/5 写其中 manifest.json，阶段 6 同一路径收尾。
+    预留步骤命名"初始化"（2026-08-25 起）——旧名"阶段 0 前"易误读为阶段序列的一部分。
+    raw.json 契约已取消（docs/05 存储改造：sources/journal 走 store，元数据走 manifest）。"""
     assert "postprocess.py --prepare" in SKILL_MD
-    assert "<运行目录>/raw.json" in SKILL_MD
+    assert "运行目录 + `/manifest.json`" in SKILL_MD
     assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
+    assert "raw.json" not in SKILL_MD  # raw.json 契约整体取消（docs/05）
     assert "## 初始化 · 预留运行目录" in SKILL_MD
     assert "阶段 0 前" not in SKILL_MD
+
+
+def test_storage_contract_mcp_tools():
+    """存储架构契约（docs/05 定案）：四工具 + manifest 两段式 Write + 禁 Edit + 记录时机 + 哨兵。
+    数据落盘只走 MCP 工具——模型不 Write 数据文件、不自创脚本组装。"""
+    for tool in ["record_sources", "record_search", "coverage", "finalize"]:
+        assert tool in SKILL_MD
+    assert "manifest.json" in SKILL_MD
+    assert "**必须整体 Write，禁止 Edit**" in SKILL_MD
+    assert "每完成一个节点的 12 次搜索" in SKILL_MD
+    assert "**防截断哨兵**" in SKILL_MD
+    assert "数据落盘只走 MCP 工具" in SKILL_MD
+    assert "model = " not in SKILL_MD  # 防误用：禁止模型用 Write 写数据文件组装
+
+
+def test_scripts_include_store_and_mcp_server():
+    """docs/05 实现落地：store.py（存储层）与 mcp_server.py（四工具服务）归位 scripts/。"""
+    assert (SCRIPTS_DIR / "store.py").is_file()
+    assert (SCRIPTS_DIR / "mcp_server.py").is_file()
+    assert (ROOT / ".mcp.json").is_file()
 
 
 def test_termination_condition_aligned_with_finalization():
@@ -121,7 +143,7 @@ def test_extraction_per_item_no_whole_row_rejection():
 
 
 def test_node_search_profile():
-    """节点搜索画像（2026-08-26 起）：基础契约钉桩——不改 nodes 契约、禁编造机构、
+    """节点搜索画像（2026-08-26 起）：基础契约钉进测试——不改 nodes 契约、禁编造机构、
     核心搜索词含行业术语与细分场景词（2026-08-27 补：薄弱节点维度窄的治理）。"""
     assert "### 节点搜索画像" in SKILL_MD
     assert "不改变 `nodes` 字段契约" in SKILL_MD
@@ -176,10 +198,10 @@ def test_finish_writes_domain_analysis_report():
 
 
 def test_contradiction_and_wording_cleanup():
-    """2026-08-25 全局审查修订钉桩：矛盾表述对齐（Bash 范围/定案时机/剔除语义），
+    """2026-08-25 全局审查修订钉进测试：矛盾表述对齐（Bash 范围/定案时机/剔除语义），
     非正式措辞移除（乱搜/掺长尾垃圾/不死循环/纪律保留/不花一次搜索），
     重复规则改指针（数据集主导只留总纲、通用平台指向总则），裸禁令补理由（自锚定）。"""
-    assert "初始化 `--prepare` 与阶段 6 收尾" in SKILL_MD
+    assert "初始化 `--prepare` 与阶段 6 报告命名 `--rename-report`" in SKILL_MD
     assert "（阶段 6 收尾执行）" not in SKILL_MD
     assert "留待扩量轮换角度重试后按阶段 4 定案" in SKILL_MD
     assert "从有效来源中剔除" in SKILL_MD

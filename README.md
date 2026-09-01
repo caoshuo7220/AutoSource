@@ -10,12 +10,13 @@
 
 输出: outputs/{领域词}_{时间戳}/
       ├── {领域词}_{时间戳}_数据源清单.csv   ← 交付物（UTF-8 BOM，Excel 直接打开）
-      ├── {领域词}_{时间戳}_stats.csv        ← 交付物（清单统计：每节点条数/体裁分布 + 总计行）
       ├── {领域词}_{时间戳}_分析报告.md      ← 交付物（领域分析：概览/技术格局/产业生态/标准体系/中外对比/趋势观察）
-      └── intermediate/                      ← 排障材料（发现问题时才查）
+      └── intermediate/                      ← 排障与对比材料（发现问题时才查）
+          ├── {领域词}_{时间戳}_stats.csv    ← 清单统计（每节点条数/体裁分布 + 总计行；跨轮对比）
           ├── {领域词}_{时间戳}_搜索日志.csv  ← 搜索复盘（每次搜索的查询词/提取数）
           ├── {领域词}_{时间戳}_溯源.csv      ← 数据血缘（正查/反查：结果与收录对应）
-          ├── raw_input.json                ← 输入快照（过滤前全量，调试/复盘）
+          ├── store_input.jsonl             ← 存储快照（record 工具落库的原始 store）
+          ├── manifest_input.json           ← 清单快照（声明版/最终核对态归档）
           └── evidence_log.jsonl            ← 证据留痕（本运行切片，调试/复盘）
 ```
 
@@ -25,27 +26,27 @@
 
 ```
 Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流程：拆解 → 知识清单 → 验证搜索 → 增量发现 → 扩量 → 收尾
-后处理    .claude/skills/autosource/scripts/postprocess.py ← 证据校验/去重/CSV/stats/清理（确定性环节全部代码化）
+后处理    .claude/skills/autosource/scripts/postprocess.py ← 证据校验/去重/CSV/stats/清理 + finalize 折叠（确定性环节全部代码化）
+存储层    .claude/skills/autosource/scripts/store.py       ← store.jsonl 追加日志 + 入库即验 + coverage 对账（模型不碰数据文件）
+MCP 服务  .claude/skills/autosource/scripts/mcp_server.py  ← 四工具：record_sources / record_search / coverage / finalize（.mcp.json 注册，会话自动拉起）
 证据链    .claude/skills/autosource/scripts/log_tool.py    ← PostToolUse hook：系统记录搜索留痕，防 URL 编造
 ```
 
-设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**。
+设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**——数据落盘走 MCP 工具入库（单次输出 ≤ 一个节点批次，写入截断机制性消失），元数据走 manifest.json。
 
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 127 个测试，预期全过
+python -m pytest tests/ -q   # 160 个测试，预期全过
 ```
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [docs/01-需求文档.md](docs/01-需求文档.md) | 需求规格与验收标准（做什么） |
-| [docs/02-搜索方案.md](docs/02-搜索方案.md) | 两路搜索方案设计（知识清单 + 验证搜索 + 增量发现），已定稿并已实施 |
-| [docs/03-实施计划.md](docs/03-实施计划.md) | 已建成的实现与当前状态 |
-| [docs/04-问题记录手册.md](docs/04-问题记录手册.md) | 问题清单（P-001~P-008）、决策记录与讨论日志 |
-| [docs/05-交付手册.md](docs/05-交付手册.md) | 交付接手者必读：关键决策、已知问题、下一步 |
+| [docs/01-交付手册.md](docs/01-交付手册.md) | 交付接手者必读：项目全景、关键决策、验收标准、使用说明 |
+| [docs/02-日志手册.md](docs/02-日志手册.md) | 每日工作日志（干了什么、每个决策的来龙去脉）、两路方案决策集附录（D1-D11） |
+| [docs/03-待办账本.md](docs/03-待办账本.md) | 挂账/待实施/验收未决项（单一事实源，带触发条件与出处） |
+| [docs/04-根因分析.md](docs/04-根因分析.md) | 重大波动的完整根因解剖（案例：交换机 274→172）与可复现的分析方法 |
+| [docs/05-存储架构改造方案.md](docs/05-存储架构改造方案.md) | 写入截断根治方案（已实施，2026-08-31 验收通过）：MCP 四工具 + manifest 瘦身 + store JSONL |
 | [docs/06-参考方案手册.md](docs/06-参考方案手册.md) | 外部调研：同类方案盘点、可复用组件、社区共识模式对照 |
-| [docs/07-根因分析.md](docs/07-根因分析.md) | 重大波动的完整根因解剖（案例：交换机 274→172）与可复现的分析方法 |
-| [docs/08-存储架构改造方案.md](docs/08-存储架构改造方案.md) | 写入截断根治方案（已定案待实施）：MCP 四工具 + manifest 瘦身 + store JSONL |

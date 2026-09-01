@@ -13,8 +13,10 @@
 
 用法（hook 配置中）:
     python .claude/skills/autosource/scripts/log_tool.py
-    留痕路径由脚本按会话自动命名（CLAUDE_CODE_SESSION_ID 环境变量），
-    并行运行各写各的会话文件、各删各的——互不销毁对方证据。
+    留痕按运行目录归属（2026-08-31 分层原则修订）：--prepare 预留运行目录时
+    写入 .session_id 会话标记，本脚本按标记找到本会话的运行目录、写
+    run_*/evidence.jsonl（outputs/ 顶层不再平铺会话级留痕文件）；
+    无匹配运行目录（未 prepare / 旧流程）时回退按会话命名的共享路径。
 """
 
 import json
@@ -24,7 +26,7 @@ from pathlib import Path
 
 
 def default_log_path() -> Path:
-    """留痕默认路径：按会话隔离（并行运行互不删除对方留痕）。
+    """回退留痕路径：按会话隔离命名（旧流程/未 prepare 场景）。
 
     hook 子进程继承 CLAUDE_CODE_SESSION_ID 环境变量；无该变量时回退到
     共享旧路径（兼容手动调用/测试）。
@@ -35,6 +37,28 @@ def default_log_path() -> Path:
     return Path("outputs/search_log.jsonl")
 
 
+def run_scoped_log_path() -> Path | None:
+    """按会话标记定位本会话运行目录内的留痕：outputs/run_*/.session_id == 会话 ID。
+
+    多个匹配时取最新目录（同会话多轮的边角，取最近一次 --prepare）；
+    无匹配返回 None（调用方回退 default_log_path）。
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not session_id:
+        return None
+    candidates = []
+    for marker in Path("outputs").glob("run_*/.session_id"):
+        try:
+            if marker.read_text(encoding="utf-8").strip() == session_id:
+                candidates.append(marker.parent)
+        except OSError:
+            continue
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda d: d.stat().st_mtime)
+    return newest / "evidence.jsonl"
+
+
 def main() -> None:
     # 读取 hook 通过 stdin 传入的 JSON（含 tool_name / tool_input / tool_response）
     try:
@@ -42,7 +66,10 @@ def main() -> None:
     except (ValueError, UnicodeDecodeError):
         return
 
-    log_path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_log_path()
+    if len(sys.argv) > 1:
+        log_path = Path(sys.argv[1])
+    else:
+        log_path = run_scoped_log_path() or default_log_path()
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)

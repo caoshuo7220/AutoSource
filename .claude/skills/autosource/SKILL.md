@@ -11,16 +11,16 @@ allowed-tools: WebSearch, Read, Write, Bash
 输入 `/autosource <领域描述>`，执行一条线性流程：
 
 ```
-初始化（预留运行目录） → 0 领域拆解 → 1 知识清单 → 2 验证搜索 → 3 增量发现 → 4 覆盖评估与扩量 → 5 写入 raw.json → 6 收尾
+初始化（预留运行目录） → 0 领域拆解 → 1 知识清单 → 2 验证搜索 → 3 增量发现 → 4 覆盖评估与扩量 → 5 重写 manifest → 6 收尾
 ```
 
 流程中间没有交接停靠点——运行到最后一步（阶段 6 收尾）才算结束，任何一个中间环节都不是终点。
 
 ## 分工与边界
 
-**分工原则**：LLM 只负责语义环节（领域拆解、知识清单、搜索、验证与提取判断），一切确定性环节（时间戳、目录命名、证据校验、清单并入、去重、CSV 编码、stats 统计、搜索日志、文件清理）由脚本保证。raw.json 由本流程按契约用 Write 直接落盘（阶段 5）。
+**分工原则**：LLM 只负责语义环节（领域拆解、知识清单、搜索、验证与提取判断），一切确定性环节（时间戳、目录命名、入库校验、证据链、对账、去重、CSV 编码、stats 统计、搜索日志、折叠收尾、文件清理）由脚本保证。**数据落盘不靠写大文件**：新增条目与搜索日志通过 record_sources / record_search 工具入库（store.jsonl 由脚本持有、模型不可见），收尾由 finalize 工具一次性折叠；元数据（领域/节点/模型/知识清单）在 manifest.json，由模型 Write 两次（阶段 0-1 声明版、阶段 5 最终核对态）。模型最大单次输出 = 一个节点的条目批次（15-25KB），离截断边界约 10 倍——写入截断在机制上不可能发生。
 
-**运行期边界**：本流程不写代码、不跑测试——运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令（初始化 `--prepare` 与阶段 6 收尾）。
+**运行期边界**：本流程不写代码、不跑测试——运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令（初始化 `--prepare` 与阶段 6 报告命名 `--rename-report`）；数据写入只走四个 MCP 工具（record_sources / record_search / coverage / finalize），禁止自创脚本或 Write 数据文件组装。
 
 ## 参数与运行约定
 
@@ -29,8 +29,8 @@ allowed-tools: WebSearch, Read, Write, Bash
 | `<领域描述>` | 是 | 粗粒度文本，如 `算力服务器` |
 | `-c` | 否 | 预设分类路径，如 `-c "GPU服务器" "CPU服务器"` |
 
-- **领域词**：从领域描述中提炼核心关键词，空格替换为 `_`，作为 raw.json 的 domain 字段。
-- **输出目录**：流程开始时脚本预留 `outputs/run_{时间戳}/`（每次运行唯一），收尾时重命名为 `outputs/{领域词}_{时间戳}/` 并生成交付物——最终产物位置以收尾 stdout 的"输出目录"为准。
+- **领域词**：从领域描述中提炼核心关键词，空格替换为 `_`，作为 manifest.json 的 domain 字段。
+- **输出目录**：流程开始时脚本预留 `outputs/run_{时间戳}/`（每次运行唯一），finalize 时重命名为 `outputs/{领域词}_{时间戳}/` 并生成交付物——最终产物位置以 finalize 返回的"输出目录"为准。
 
 示例：输入 `帮我收集用于AI训练的GPU算力服务器相关数据源` → 目录 `outputs/算力服务器_2026-08-12-143000/`。
 
@@ -47,16 +47,16 @@ allowed-tools: WebSearch, Read, Write, Bash
 
 ### 证据链与写入纪律（脚本强制校验）
 
-- 候选 URL 必须**逐字照抄**搜索结果——每次搜索的原始结果由系统自动留痕（PostToolUse hook），脚本会校验每个 URL 必须能逐字在留痕中找到，找不到的整条被拒绝
+- 候选 URL 必须**逐字照抄**搜索结果——每次搜索的原始结果由系统自动留痕（PostToolUse hook），record_sources 入库时逐条校验每个 URL 必须能逐字在留痕中找到，找不到的当场拒绝并返回原因（可立即修正重传）
 - 禁止凭先验知识补 URL；模型"记得"某个权威源时，必须先专门搜一次、让它的 URL 出现在结果里，才能收录
 - 禁止对 URL 做任何"规范化"（补路径、换域名、去参数）——照抄原文
 - 禁止截短 URL（取父路径/裸域名）——校验为边界匹配，截短不放行
 - URL 尾部的 `#…` 片段（数字引用锚点或文字锚点）不改变资源主体，**照抄即可**——脚本在输出 CSV 前确定性剥离纯数字引用锚点；漏抄片段不再被证据校验拒绝，但截短路径主体（父路径/裸域名）或去掉 query 参数（`?…`）仍会被拒绝
-- journal 的 query 照抄**实际发出的**查询词（脚本逐字比对留痕，不一致会被标注"证据缺失"）
-- raw.json **直接 Write 一次性写完**——禁止自创脚本 / 中间文件组装（执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗）
-- 只写契约字段，内部字段（如 `expected_type`）不写入
+- record_search 的 query 照抄**实际发出的**查询词（脚本逐字比对留痕，不一致会被标注"证据缺失"）
+- **数据落盘只走 MCP 工具**：record_sources（新增条目批次）、record_search（搜索日志批次）、finalize（收尾折叠）——禁止自创脚本 / Write 数据文件组装（执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗）
+- 只传契约字段，内部字段（如 `expected_type`）不写入
 - **证据核对不手工做**——禁止用 grep/shell 循环/自创脚本等复合命令核对或重建（这是脚本的职责，越界命令会被权限白名单拦截弹窗）；调查/排查用 Read 工具
-- 被拒条目不进清单——证据校验由脚本执行
+- 被拒条目不进清单——入库校验由脚本执行，被拒明细在 record_sources 的返回里当场可见，修正后重传该条即可
 
 ### 提取规则
 
@@ -94,7 +94,7 @@ allowed-tools: WebSearch, Read, Write, Bash
 
 ### 失败路径（搜索工具异常）
 
-搜索调用大面积失败（多数查询无有效结果返回）时：停止搜索，**不写 raw.json、不运行后处理**，**向用户显式声明失败状态**（`failed: true` + 简述），不伪造候选，如实报告"搜索工具异常，本次运行中止"。已预留的运行目录保持为空残留。
+搜索调用大面积失败（多数查询无有效结果返回）时：停止搜索，**不调用 finalize、不产出交付物**，**向用户显式声明失败状态**（`failed: true` + 简述），不伪造候选，如实报告"搜索工具异常，本次运行中止"。已预留的运行目录保持为空残留。
 
 ## 初始化 · 预留运行目录
 
@@ -104,7 +104,7 @@ allowed-tools: WebSearch, Read, Write, Bash
 python .claude/skills/autosource/scripts/postprocess.py --prepare
 ```
 
-脚本创建 `outputs/run_{时间戳}/`（每次运行唯一，同秒自动加后缀）并打印完整路径——**照抄该路径**：阶段 5 用它写 raw.json，阶段 6 传同一路径收尾。该目录从此刻起就是本次运行的专属目录；若后续搜索失败中止，它保持为空残留。
+脚本创建 `outputs/run_{时间戳}/`（每次运行唯一，同秒自动加后缀）并打印完整路径——**照抄该路径**：阶段 1/5 用它写 manifest.json，阶段 6 传同一路径收尾。该目录从此刻起就是本次运行的专属目录；若后续搜索失败中止，它保持为空残留。
 
 ## 阶段 0 · 领域拆解
 
@@ -152,7 +152,7 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 **预期体裁**：仅用于构造验证搜索词；最终 `source_type` 以验证时的实际形态为准，允许修正
 
-**输出**：将清单展示给用户。无需等待用户确认。
+**输出**：将清单展示给用户（无需等待用户确认）。随后立即 Write **manifest.json**（阶段 0-1 声明版）到初始化 `--prepare` 打印的运行目录——`{domain, nodes, model, knowledge}`，knowledge 各项只含 name/node/预期体裁（URL 留空待验证）。这是唯一由模型直接 Write 的元数据文件，阶段 5 会整体重写为最终核对态。
 
 ## 阶段 2 · 验证搜索
 
@@ -160,7 +160,7 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 ```
 领域词: 交换机
-模型名: 当前实际使用的模型名（照抄进 raw.json 的 model 字段）
+模型名: 当前实际使用的模型名（照抄进 manifest.json 的 model 字段）
 叶子节点:
   - 数据中心交换机
   - 企业园区交换机
@@ -180,8 +180,9 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
   - 合集级清单项只搜到合集内**单篇载体**（PDF、单条 KB 等）：扩量轮换角度专找入口（如 `{机构名} documentation`）；仍找不到入口 → **以该单篇验证通过**，granularity 修正为"单篇级"，reason 注明"仅找到单篇载体，未找到合集入口"
   - 单篇级清单项：搜索结果中出现**该载体本身**即通过
   - 连单篇载体都没有 → 标记未验证，留待扩量轮换角度重试后按阶段 4 定案
-- **通过后**：在**清单项内**填上 `category_path（完整路径）/ source_type / granularity / url / description / reason`（URL 照抄）；预期体裁允许按实际形态修正
-- **未通过**：先标记 verified=false，不急于分类——扩量轮换角度重试后按阶段 4 定案
+- **通过后**：在**清单项内**填上 `category_path（完整路径）/ source_type / granularity / url / description / reason`（URL 照抄），预期体裁允许按实际形态修正——核对结果**暂存会话**，阶段 5 随 manifest 重写落盘（清单核对结果不进 store）
+- **未通过**：先标记 verified=false，不急于分类——扩量轮换角度重试后按阶段 4 定案（同样暂存会话）
+- **搜索日志记录**：每 ~10-15 次验证搜索调用一次 record_search 批量落库（每项 `phase/node/query/results/extracted`，query 照抄实际发出的查询词）——逐条记、批量落，不要每次搜索单独调用
 - 验证搜索时顺带发现的新源 → 全量提取（同样遵守粒度规则、平台准入判据与证据链约束）
 
 ## 阶段 3 · 增量发现
@@ -206,10 +207,11 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 - **查询词构造**：围绕当前节点名称或节点搜索画像中的核心搜索词，组合一个发现型角度词；优先使用该节点适用的来源类型或来源角色。固定 4 次按中文/英文表达分别搜索；自由 8 次仅使用中文搜索词。以下约束仍适用：必须带发现型词汇，厂商 / 产品名的用法见通用纪律“搜索词构造”。不要要求每次查询同时包含所有组件，也不要把画像中的机构名称当作必须搜索的固定清单。**每个查询词必须包含领域词（或节点核心词），且角度词尽量带入口词（检索 / 列表 / 分类 / 目录 / 合集）；论文、专利、标准三类角度按上方“易失效角度”规则执行。**
 - **提取纪律**：全量提取、URL 逐字照抄、每条带 reason、遵守粒度规则与平台准入判据
+- **记录时机（group commit）**：每完成一个节点的 12 次搜索，把该节点全部新增条目一次 record_sources 落库、该节点 12 条搜索记录一次 record_search 落库——两个批量调用，不要每次搜索后逐条调用。批量大小 = 单节点条目量（约 15-25KB），远离截断边界；落库后该节点内容即由脚本持有，会话压缩也不丢失
 
 ## 阶段 4 · 覆盖评估与扩量（含清单定案）
 
-**薄弱判定**：每节点统计候选数与体裁分布，并按 6 个核心来源维度核对覆盖情况（官方组织与标准 / 厂商与产品生态 / 学术与研究 / 开源与社区 / 数据集与公共数据 / 行业协会与市场信息），按以下标准判定薄弱节点：
+**薄弱判定**：每节点统计候选数与体裁分布，并按 6 个核心来源维度核对覆盖情况（官方组织与标准 / 厂商与产品生态 / 学术与研究 / 开源与社区 / 数据集与公共数据 / 行业协会与市场信息），按以下标准判定薄弱节点。候选数与提取数可从 **coverage()** 读取（只测条数缺失）；体裁/来源维度是否单一由模型按判定表在会话内判断：
 
 | 情形 | 判定 |
 |------|------|
@@ -227,50 +229,45 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 **扩量轮内的搜索范围**：① 未验证清单项换角度验证（每轮每项 1 次）；② 体裁单一的节点换体裁词补搜（每轮 ≤4 次）；③ 来源维度单一的节点按空缺维度补搜（每轮 ≤4 次，用来源角色词构造查询）。除这三类外不做其他补搜。
 
-## 阶段 5 · 写入 raw.json（接口契约）
+**记录时机**：扩量轮每节点收敛后，把该节点补充条目与搜索记录按节点批量落库（同阶段 3 的两个批量调用）。**收尾前用 coverage() 自查**：某节点 missing > 0（提取过但落库不足）时只补该节点。
 
-**把结果写入本次运行目录的 `raw.json`（用 Write 工具，路径 = 初始化 `--prepare` 打印的路径 + `/raw.json`，全部搜索完成后一次性写完整文件）**。写完文件后**不要结束回合**——立即执行阶段 6 收尾。
+## 阶段 5 · 重写 manifest（knowledge 最终核对态）
 
-文件结构：
+**把阶段 0-1 写入的 `manifest.json` 用 Write 工具整体重写一遍**（路径 = 初始化 `--prepare` 打印的运行目录 + `/manifest.json`；**必须整体 Write，禁止 Edit**——outputs 目录权限只放行 Write）。重写后文件 ≤15KB，远离截断边界。写完文件后**不要结束回合**——立即执行阶段 6 收尾。
 
 ```json
 {
-  "domain": "交换机",
-  "nodes": ["数据中心交换机", "以太网标准(IEEE 802.3)", "..."],
-  "model": "当前实际使用的模型名",
-  "knowledge": [
-    {"name": "IEEE 802.3 以太网工作组", "node": "以太网标准(IEEE 802.3)", "verified": true,
-     "category_path": "交换机-核心技术-以太网标准(IEEE 802.3)",
-     "source_type": "行业标准", "granularity": "合集级", "url": "https://www.ieee802.org/3/",
-     "description": "IEEE 以太网标准工作组官网", "reason": "清单验证通过，官方入口"},
-    {"name": "某某机构", "node": "某节点", "verified": false, "note": "疑似无效机构"}
-  ],
-  "journal": [
-    {"phase": "验证搜索", "node": "以太网标准(IEEE 802.3)", "query": "IEEE 802.3 Ethernet Working Group official", "results": 10, "extracted": 3}
-  ],
-  "sources": []
+  “domain”: “交换机”,
+  “nodes”: [“数据中心交换机”, “以太网标准(IEEE 802.3)”, “...”],
+  “model”: “当前实际使用的模型名”,
+  “knowledge”: [
+    {“name”: “IEEE 802.3 以太网工作组”, “node”: “以太网标准(IEEE 802.3)”, “verified”: true,
+     “category_path”: “交换机-核心技术-以太网标准(IEEE 802.3)”,
+     “source_type”: “行业标准”, “granularity”: “合集级”, “url”: “https://www.ieee802.org/3/”,
+     “description”: “IEEE 以太网标准工作组官网”, “reason”: “清单验证通过，官方入口”},
+    {“name”: “某某机构”, “node”: “某节点”, “verified”: false, “note”: “疑似无效机构”}
+  ]
 }
 ```
 
 字段约束：
 
-- `domain / nodes / model`：domain 为领域词、nodes 为全部叶子节点、model 为当前实际使用的模型名
-- `knowledge`：node 必须在 nodes 中；verified=true 的项必须带齐 `category_path/source_type/url/description/reason`（category_path 用 `-` 连接完整层级路径，末段与 node 一致），`granularity` 可带（默认合集级）；verified=false 的项带 `note`（"疑似无效机构"或"未找到官方入口"）；被剔除的疑似无效机构也留在清单里（note 标注），供报告展示
-- `sources`：仅增量发现条目，每条含 `name/category_path/source_type/granularity/url/description/reason`；granularity ∈ 合集级/单篇级（单篇级需在 reason 写明依据；缺省按合集级处理）；**不重复写已验证的清单项**（脚本自动并入）
-- `journal`：每次搜索一条——`phase`（验证搜索/增量发现/扩量轮）、`node`、`query`（照抄实际查询词）、`results`（返回链接数）、`extracted`（提取候选数）
-- 通用约束：name 和 url 不可为空；仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；确保体裁多样性；通用平台规则见通用纪律“平台准入判据”
+- `knowledge` 是**最终核对态**——阶段 2/3/4 暂存在会话里的全部核对结果在此落盘：node 必须在 nodes 中；verified=true 的项带齐 `category_path/source_type/url/description/reason`（category_path 用 `-` 连接完整层级路径，末段与 node 一致），`granularity` 可带（默认合集级）；verified=false 的项带 `note`（”疑似无效机构”或”未找到官方入口”）；被剔除的疑似无效机构也留在清单里（note 标注），供报告展示
+- `domain / nodes / model` 与阶段 0-1 声明版一致
+- 清单核对结果**不进 store**——store 只承载增量条目与搜索日志；verified=true 的清单项由脚本在收尾时并入
+- 通用约束：name 和 url 不可为空；仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；确保体裁多样性；通用平台规则见通用纪律”平台准入判据”
 
-## 阶段 6 · 收尾（写完 raw.json 后立即执行，不要结束回合）
+## 阶段 6 · 收尾（写完 manifest 后立即执行，不要结束回合）
 
-**流程到此并未结束，没有交接环节——继续执行收尾，把流程跑完。** 立即执行（该 Bash 命令在权限白名单内，直接运行；`<运行目录>` 照抄初始化 `--prepare` 打印的路径）：
+**流程到此并未结束，没有交接环节——继续执行收尾，把流程跑完。** 立即调用 **finalize 工具**（`<运行目录>` 照抄初始化 `--prepare` 打印的路径）：
 
-```bash
-python .claude/skills/autosource/scripts/postprocess.py <运行目录>/raw.json
+```
+finalize(run_dir=<运行目录>)
 ```
 
-脚本一次性完成证据校验 / 清单并入 / 去重 / CSV / stats / 溯源 / 清理——运行目录重命名为 `outputs/{领域词}_{时间戳}/`，raw.json 归档进 intermediate/raw_input.json——把它的 stdout 统计输出**原样展示给用户作为最终汇总**（含清单核对、未验证清单、输出目录）。
+折叠一次性完成 证据终检 / 清单并入 / 去重 / CSV / stats / 溯源 / 搜索日志 / 清理——运行目录重命名为 `outputs/{领域词}_{时间戳}/`，store 与 manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）——把 finalize 的返回文本**原样展示给用户作为最终汇总**（含清单核对、未验证清单、输出目录）。**防截断哨兵**：若 store 无来源但搜索有提取，finalize 会拒绝并报错——说明漏调了 record_sources，补录后重跑即可（失败时运行目录不会被重命名）。
 
-**收尾的最后一步：写领域分析报告。** 先 Read `.claude/skills/autosource/references/分析报告模板.md`，按其模板把报告 Write 到 stdout 所示输出目录的 `分析报告.md`（**内容由模型写、文件名由脚本命名，不要自行命名**；**统计数字一律不写**——"数据总览"段由脚本在下一步自动生成）。写完报告，立即执行（该 Bash 命令在权限白名单内，直接运行；`<输出目录>` 照抄 stdout 的"输出目录"）：
+**收尾的最后一步：写领域分析报告。** 先 Read `.claude/skills/autosource/references/分析报告模板.md`，按其模板把报告 Write 到 finalize 返回的"输出目录"里的 `分析报告.md`（**内容由模型写、文件名由脚本命名，不要自行命名**；**统计数字一律不写**——"数据总览"段由脚本在下一步自动生成）。写完报告，立即执行（该 Bash 命令在权限白名单内，直接运行；`<输出目录>` 照抄 finalize 返回的"输出目录"）：
 
 ```bash
 python .claude/skills/autosource/scripts/postprocess.py --rename-report <输出目录>

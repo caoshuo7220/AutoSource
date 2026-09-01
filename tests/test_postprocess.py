@@ -15,10 +15,11 @@ import pytest
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource" / "scripts"
 sys.path.insert(0, str(SKILL_DIR))
 
-from postprocess import (check_grounded, check_granularity, count_multilang_groups,
-                         deduplicate, default_evidence_log, finalize_report,
+from postprocess import (check_grounded, check_granularity,
+                         deduplicate, default_evidence_log, finalize_report, fold,
                          leaf_node, prepare_run_dir, query_in_evidence, run,
-                         sanitize_domain, slice_evidence, strip_citation_anchors)
+                         run_evidence_log, sanitize_domain, slice_evidence,
+                         strip_citation_anchors)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -291,49 +292,19 @@ class TestCheckGranularity:
 
 
 class TestMultilangAudit:
-    """多语言版本审计：同域名剥语言码路径段后相同的 URL 组计数（不自动合并）。"""
-
-    def _source(self, url, name="X"):
-        return {"name": name, "category_path": "算力服务器-服务器CPU",
-                "source_type": "官方文档", "granularity": "单篇级",
-                "url": url, "description": "d", "reason": "r"}
-
-    def test_locale_variants_grouped(self):
-        sources = [
-            self._source("https://support.apple.com/zh-cn/122240", "规格页中文"),
-            self._source("https://support.apple.com/en-nz/122240", "规格页英文"),
-            self._source("https://support.apple.com/ru-ru/122240", "规格页俄文"),
-            self._source("https://other.com/guide", "无关来源"),
-        ]
-        groups, excess = count_multilang_groups(sources)
-        assert groups == 1
-        assert excess == 2
-
-    def test_non_locale_paths_not_grouped(self):
-        sources = [
-            self._source("https://a.com/api/v1", "API"),
-            self._source("https://a.com/docs/start", "Start"),
-        ]
-        groups, excess = count_multilang_groups(sources)
-        assert groups == 0
-        assert excess == 0
-
-    def test_different_netloc_not_grouped(self):
-        # zh.wikipedia 与 en.wikipedia 是不同内容的站点，不按语言版本合并
-        sources = [
-            self._source("https://zh.wikipedia.org/wiki/IPad"),
-            self._source("https://en.wikipedia.org/wiki/IPad"),
-        ]
-        groups, excess = count_multilang_groups(sources)
-        assert groups == 0
-        assert excess == 0
-
-    def test_stats_column_and_stdout(self, tmp_path):
+    def test_multilang_audit_removed(self, tmp_path):
+        """2026-09-01 钉进测试：多语言审计已下线——两轮实测全为假阳性
+        （分组键忽略 query 参数，同端点不同资源被误判为多语言重复），
+        真多语言重复零发生；无消费者 + 假信号会误导触发，修不如删。
+        stdout 不再报告该指标，summary 不再携带相关键。"""
         data = base_data()
         data["sources"] = [
-            self._source("https://support.apple.com/zh-cn/122240", "规格页中文"),
-            self._source("https://support.apple.com/en-nz/122240", "规格页英文"),
-            self._source("https://support.apple.com/ru-ru/122240", "规格页俄文"),
+            {"name": "规格页中文", "category_path": "算力服务器-服务器CPU",
+             "source_type": "官方文档", "granularity": "单篇级",
+             "url": "https://support.apple.com/zh-cn/122240", "description": "d", "reason": "r"},
+            {"name": "规格页英文", "category_path": "算力服务器-服务器CPU",
+             "source_type": "官方文档", "granularity": "单篇级",
+             "url": "https://support.apple.com/en-nz/122240", "description": "d", "reason": "r"},
         ]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
@@ -345,9 +316,8 @@ class TestMultilangAudit:
             summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                           evidence_log=str(ev))
             _print_summary(summary)
-        assert summary["multilang_groups"] == 1
-        assert summary["multilang_excess"] == 2
-        assert "多语言版本并存" in buf.getvalue()  # stdout 提示保留，stats 列已删
+        assert not any(k.startswith("multilang") for k in summary)
+        assert "多语言版本并存" not in buf.getvalue()
 
 
 class TestRun:
@@ -387,7 +357,7 @@ class TestRun:
         assert len(rows) == 3
 
         # stats CSV：BOM + 表头 + 每节点一行 + 末尾总计行（纯清单统计，无运行级重复列）
-        stats_csv = outdir / "算力服务器_2026-08-13-183045_stats.csv"
+        stats_csv = outdir / "intermediate" / "算力服务器_2026-08-13-183045_stats.csv"
         assert stats_csv.exists()
         assert stats_csv.read_bytes()[:3] == BOM
         rows = read_csv_rows(stats_csv)
@@ -472,7 +442,7 @@ class TestRun:
 
         assert summary["kept"] == 0
         assert set(summary["empty_nodes"]) == set(data["nodes"])
-        stats_csv = next((Path(summary["outdir"])).glob("*stats.csv"))
+        stats_csv = next((Path(summary["outdir"]) / "intermediate").glob("*stats.csv"))
         rows = read_csv_rows(stats_csv)
         assert len(rows) == 5  # header + 3 个空节点行 + 总计行
 
@@ -932,15 +902,14 @@ class TestArchives:
             {"phase": "验证搜索", "node": "服务器CPU", "query": q, "results": 5, "extracted": 1}
             for q in queries]
         raw = write_raw(tmp_path, data)
-        raw_text = raw.read_text(encoding="utf-8")
         ev = self._evidence_mixed(tmp_path, queries, data["sources"])
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
         intermediate = outdir / "intermediate"
-        # 输入快照内容等于 raw.json（会话临时文件已被清理，先存原文再比对）
-        assert (intermediate / "raw_input.json").read_text(encoding="utf-8") == raw_text
+        # raw_input.json 已取消（2026-08-31：与 store_input.jsonl 重复的推导件）
+        assert not (intermediate / "raw_input.json").exists()
         # 切片：只保留本运行查询行（无关行/损坏行/候选行全部排除）
         sliced = (intermediate / "evidence_log.jsonl").read_text(encoding="utf-8").splitlines()
         assert len(sliced) == 2
@@ -951,10 +920,11 @@ class TestArchives:
         assert not (outdir / "manifest.json").exists()
         assert (intermediate / "算力服务器_2026-08-13-183045_搜索日志.csv").exists()
         assert not (intermediate / "算力服务器_2026-08-13-183045_溯源.csv").exists()
-        # 脚本在根目录只写两个交付物（数据源清单 + stats；分析报告.md 由模型收尾时写入）
+        # 脚本在根目录只写数据源清单（分析报告.md 由模型收尾时写入）；
+        # stats.csv 随排障材料入 intermediate/（2026-08-31：根目录只留两个交付物——清单+报告）
         root_files = {p.name for p in outdir.iterdir() if p.is_file()}
-        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv",
-                              "算力服务器_2026-08-13-183045_stats.csv"}
+        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv"}
+        assert (intermediate / "算力服务器_2026-08-13-183045_stats.csv").exists()
         # 会话临时文件仍按现状删除
         assert not raw.exists()
         assert not ev.exists()
@@ -985,7 +955,7 @@ class TestArchives:
         assert summary["ungrounded"] == 1
         outdir = Path(summary["outdir"])
         assert not list(outdir.glob("*被拒记录*"))
-        assert (outdir / "intermediate" / "raw_input.json").exists()
+        assert not (outdir / "intermediate" / "raw_input.json").exists()
         assert not raw.exists()
         assert not ev.exists()
 
@@ -1083,7 +1053,7 @@ class TestLineage:
 
     def test_source_csv_first_query_anchored_url(self, tmp_path):
         # 留痕结构化结果带 #1 引用锚点：剥锚点后的 URL 仍必须归因到首次查询词
-        # （实测平板轮 36/84 条来源搜索为空——剥锚点后的子串被边界匹配判为前缀）
+        # （实测平板电脑轮 36/84 条来源搜索为空——剥锚点后的子串被边界匹配判为前缀）
         data = base_data()
         data["sources"][0]["url"] = "https://a.com/doc#1"
         data["journal"] = self._journal(["q1"])
@@ -1300,9 +1270,9 @@ class TestPreparedRunDirFlow:
         assert not run_dir.exists()  # run_ 目录已重命名为最终交付目录
         outdir = Path(summary["outdir"])
         assert outdir.is_dir()
-        assert (outdir / "intermediate" / "raw_input.json").is_file()
+        assert not (outdir / "intermediate" / "raw_input.json").exists()
         assert not (outdir / "raw.json").exists()  # 归档后不再留根目录
-        assert len(list(outdir.glob("*.csv"))) == 2  # 脚本只写两个 CSV（分析报告.md 由模型收尾时写入）
+        assert len(list(outdir.glob("*.csv"))) == 1  # 脚本只写清单 CSV（stats 入 intermediate/，报告由模型收尾时写入）
 
     def test_reuses_run_dir_timestamp_not_clock(self, tmp_path):
         # 预留目录时间戳与注入时钟不同：收尾必须复用 run_ 名内的时间戳
@@ -1387,7 +1357,8 @@ class TestReportStatsInjection:
         d.mkdir()
         (d / "分析报告.md").write_text(report_text, encoding="utf-8")
         if with_stats:
-            (d / "交换机_2026-08-28-114546_stats.csv").write_text(
+            (d / "intermediate").mkdir()
+            (d / "intermediate" / "交换机_2026-08-28-114546_stats.csv").write_text(
                 "分类节点,候选数,体裁分布\n"
                 "工业交换机,98,\"厂商文档: 30; 行业标准: 10\"\n"
                 "数据中心交换机,84,\"厂商文档: 40; 资讯平台: 20\"\n"
@@ -1450,3 +1421,192 @@ class TestSessionIsolatedEvidenceLog:
         log = tmp_path / "outputs" / "search_log_sess-1.jsonl"
         assert log.exists()
         assert json.loads(log.read_text(encoding="utf-8").strip())["tool_input"]["query"] == "测试"
+
+
+class TestRunScopedEvidence:
+    """证据留痕运行级归属（2026-08-31 分层原则修订）：--prepare 写会话标记，
+    hook 按标记把留痕写进 run_*/evidence.jsonl，收尾按运行目录读/切片/删除——
+    outputs/ 顶层不再有平铺的会话级留痕文件。"""
+
+    def test_prepare_writes_session_marker(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-run-ev")
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        assert (run_dir / ".session_id").read_text(encoding="utf-8") == "sess-run-ev"
+
+    def test_run_uses_run_dir_evidence_and_cleans_up(self, tmp_path):
+        """不传 --evidence-log 时优先用运行目录内的 evidence.jsonl；收尾后根目录
+        不留证据与标记（切片已进 intermediate/）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        data = base_data()
+        data["journal"] = [{"phase": "增量发现", "node": "AI训练GPU",
+                            "query": "GPU 排名 数据库", "results": 10, "extracted": 2}]
+        write_raw(run_dir, data)
+        (run_dir / "evidence.jsonl").write_text(
+            json.dumps({"tool_name": "WebSearch", "tool_input": {"query": "test"},
+                        "tool_response": {"results": [{"url": "https://a.com/doc"}]}},
+                       ensure_ascii=False) + "\n" +
+            json.dumps({"tool_name": "WebSearch", "tool_input": {"query": "test"},
+                        "tool_response": {"results": [{"url": "https://b.com/data"}]}},
+                       ensure_ascii=False) + "\n" +
+            json.dumps({"tool_name": "WebSearch", "tool_input": {"query": "GPU 排名 数据库"},
+                        "tool_response": {"results": [{"url": "https://x.com/list"}]}},
+                       ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        summary = run(str(run_dir / "raw.json"), out_dir=str(tmp_path / "outputs"),
+                      now=FIXED_NOW)
+        assert summary["kept"] == 2
+        outdir = Path(summary["outdir"])
+        assert not (outdir / "evidence.jsonl").exists()
+        assert not (outdir / ".session_id").exists()
+        assert (outdir / "intermediate" / "evidence_log.jsonl").exists()
+
+    def test_run_evidence_log_prefers_run_dir(self, tmp_path):
+        run_dir = tmp_path / "run_2026-01-01-000000"
+        run_dir.mkdir()
+        ev = run_dir / "evidence.jsonl"
+        ev.write_text("x", encoding="utf-8")
+        assert run_evidence_log(run_dir) == ev
+        assert run_evidence_log(tmp_path) is None  # 非 run_ 目录不适用
+        assert run_evidence_log(run_dir.parent / "run_empty") is None
+
+    def test_log_tool_writes_run_scoped_evidence(self, tmp_path):
+        run_dir = tmp_path / "outputs" / "run_2026-01-01-000000"
+        run_dir.mkdir(parents=True)
+        (run_dir / ".session_id").write_text("sess-run-ev", encoding="utf-8")
+        payload = json.dumps(
+            {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-run-ev")
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "log_tool.py")],
+            input=payload, capture_output=True, encoding="utf-8", timeout=30,
+            cwd=str(tmp_path), env=env)
+        assert result.returncode == 0
+        assert (run_dir / "evidence.jsonl").exists()
+        assert not (tmp_path / "outputs" / "search_log_sess-run-ev.jsonl").exists()
+
+
+class TestFinalizeFold:
+    """docs/05 存储改造：finalize 折叠（store+manifest → 等价 raw → 全链路）。"""
+
+    FOLD_NODES = ["AI训练GPU", "图形渲染GPU", "服务器CPU"]
+
+    def _manifest(self, run_dir: Path, knowledge=None):
+        data = {"domain": "算力服务器", "nodes": self.FOLD_NODES, "model": "test-model",
+                "knowledge": knowledge if knowledge is not None else [
+                    {"name": "K1", "node": "AI训练GPU", "verified": True,
+                     "category_path": "算力服务器-GPU服务器-AI训练GPU",
+                     "source_type": "官方文档", "granularity": "合集级",
+                     "url": "https://k.com/doc", "description": "kd", "reason": "kr"}]}
+        p = run_dir / "manifest.json"
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def _source_row(self, node="AI训练GPU", name="A", url="https://a.com/doc",
+                    category_path="算力服务器-GPU服务器-AI训练GPU", **kw):
+        row = {"type": "source", "node": node, "name": name, "category_path": category_path,
+               "source_type": "官方文档", "granularity": "合集级", "url": url,
+               "description": "d", "reason": "r"}
+        row.update(kw)
+        return row
+
+    def _search_row(self, node="AI训练GPU", query="GPU 排名 数据库", extracted=3, **kw):
+        row = {"type": "search", "phase": "增量发现", "node": node, "query": query,
+               "results": 10, "extracted": extracted}
+        row.update(kw)
+        return row
+
+    def _write_store(self, run_dir: Path, rows):
+        p = run_dir / "store.jsonl"
+        p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                     encoding="utf-8")
+        return p
+
+    def test_fold_equivalent_to_run(self, tmp_path):
+        """相同输入：fold(store+manifest) 与 run(raw.json) 的交付物逐文件一致。"""
+        queries = ["GPU 排名 数据库"]
+        sources = [{"name": "A", "category_path": "算力服务器-GPU服务器-AI训练GPU",
+                    "source_type": "官方文档", "url": "https://a.com/doc",
+                    "description": "d", "reason": "r"}]
+        knowledge = [{"name": "K1", "node": "AI训练GPU", "verified": True,
+                      "category_path": "算力服务器-GPU服务器-AI训练GPU",
+                      "source_type": "官方文档", "url": "https://k.com/doc",
+                      "description": "kd", "reason": "kr"}]
+        evidence1 = write_evidence_queries(tmp_path, queries, sources + knowledge)
+        evidence2_dir = tmp_path / "b"
+        evidence2_dir.mkdir()
+        evidence2 = write_evidence_queries(evidence2_dir, queries, sources + knowledge)
+
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)
+        self._write_store(run_dir, [self._source_row(), self._search_row()])
+        fold_summary = fold(str(run_dir), evidence_log=str(evidence1),
+                            out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+
+        raw = write_raw(tmp_path, {
+            "domain": "算力服务器", "nodes": self.FOLD_NODES, "model": "test-model",
+            "knowledge": knowledge,
+            "journal": [{"phase": "增量发现", "node": "AI训练GPU",
+                         "query": "GPU 排名 数据库", "results": 10, "extracted": 3}],
+            "sources": [{"name": "A", "category_path": "算力服务器-GPU服务器-AI训练GPU",
+                         "source_type": "官方文档", "url": "https://a.com/doc",
+                         "description": "d", "reason": "r"}],
+        })
+        run_summary = run(str(raw), out_dir=str(tmp_path / "outputs"),
+                          evidence_log=str(evidence2), now=FIXED_NOW)
+
+        assert fold_summary["kept"] == run_summary["kept"]
+        # raw_input.json 已取消（2026-08-31）：fold 与 CLI 路径交付物逐字节等价即可
+        for name in [f"算力服务器_2026-08-13-183045_数据源清单.csv",
+                     f"intermediate/算力服务器_2026-08-13-183045_stats.csv",
+                     f"intermediate/算力服务器_2026-08-13-183045_搜索日志.csv",
+                     f"intermediate/算力服务器_2026-08-13-183045_溯源.csv"]:
+            fold_file = Path(fold_summary["outdir"]) / name
+            run_file = Path(run_summary["outdir"]) / name
+            assert fold_file.read_text(encoding="utf-8-sig" if name.endswith(".csv") else "utf-8") \
+                == run_file.read_text(encoding="utf-8-sig" if name.endswith(".csv") else "utf-8"), name
+
+    def test_fold_archives_store_manifest_and_cleans_root(self, tmp_path):
+        """2026-09-01 实测 bug 钉进测试：fold 只归档并删除了 manifest，store.jsonl
+        既未归档也未删除——交付目录根残留 store.jsonl（用户实测发现）。
+        修复口径：store 归档进 intermediate/store_input.jsonl 且原件删除，
+        交付目录根只留数据源清单（分析报告.md 由模型收尾时写入）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir, knowledge=[])  # 空清单空 store：无来源无搜索（本测试只钉归档与清理行为）
+        store_text = ""
+        (run_dir / "store.jsonl").write_text(store_text, encoding="utf-8")
+        summary = fold(str(run_dir), out_dir=str(tmp_path / "outputs"),
+                       evidence_log=str(tmp_path / "不存在.jsonl"), now=FIXED_NOW)
+        outdir = Path(summary["outdir"])
+        root_files = {p.name for p in outdir.iterdir() if p.is_file()}
+        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv"}
+        assert (outdir / "intermediate" / "store_input.jsonl").read_text(encoding="utf-8") \
+            == store_text
+        assert (outdir / "intermediate" / "manifest_input.json").exists()
+        assert not (outdir / "store.jsonl").exists()
+        assert not (outdir / "manifest.json").exists()
+
+    def test_sentinel_empty_sources_with_extractions_raises(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir, knowledge=[])
+        self._write_store(run_dir, [self._search_row(extracted=3)])
+        with pytest.raises(ValueError, match="来源未入库"):
+            fold(str(run_dir), out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        # 失败发生在重命名前：运行目录原样保留，可修正后重跑
+        assert run_dir.exists()
+        assert run_dir.name.startswith("run_")
+        assert not (run_dir / "raw.json").exists()
+
+    def test_manifest_missing_raises(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        with pytest.raises(FileNotFoundError, match="manifest.json"):
+            fold(str(run_dir), out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert run_dir.exists() and run_dir.name.startswith("run_")
+
+    def test_failure_before_rename_leaves_run_dir(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)
+        self._write_store(run_dir, [self._source_row(), self._search_row(extracted=1)])
+        with pytest.raises(FileNotFoundError, match="证据留痕"):
+            fold(str(run_dir), evidence_log=str(tmp_path / "absent.jsonl"),
+                 out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert run_dir.exists() and run_dir.name.startswith("run_")

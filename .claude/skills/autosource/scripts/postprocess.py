@@ -24,22 +24,27 @@
 - 数据血缘：从切片留痕与最终收录 join 生成 溯源.csv（每行一条搜索结果，
   正查"返回了什么、收录了哪几条"、反查"出自哪个搜索词"），数据源清单加
   "来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
-- 按 run bundle 结构归档：交付物在运行目录根（数据源清单/stats），
-  `intermediate/` 子目录放排障材料（输入快照、本运行切片后的证据留痕、
-  搜索日志、溯源）；随后删除会话临时文件
+- 按 run bundle 结构归档：交付物在运行目录根（数据源清单；分析报告.md 由
+  模型收尾时写入），`intermediate/` 子目录放排障材料与对比材料（stats、
+  本运行切片后的证据留痕、搜索日志、溯源）；随后删除会话临时文件
 
 用法:
     python postprocess.py --prepare                    # 流程开始：预留唯一运行目录并打印路径
-    python postprocess.py <运行目录>/raw.json ...      # 阶段 6 收尾：消费运行目录内的 raw.json
+    python postprocess.py <运行目录>/raw.json ...      # 旧 raw.json 契约（CLI 兼容路径；新契约由 finalize 折叠）
     python postprocess.py --rename-report <输出目录>    # 阶段 6 最后：报告命名（内容由模型写入）
     python postprocess.py outputs/raw.json ...         # 兼容旧固定路径（父目录非 run_ 时走原逻辑）
     可选参数: [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
+
+新契约（docs/05 存储架构改造）：数据落盘走 MCP 工具 record_sources / record_search
+（store.jsonl，见 store.py），元数据走 manifest.json（模型 Write 两次），收尾由
+finalize 工具调用本模块的 fold()——读 store + manifest 组装等价 raw.json 后复用
+run() 全链路（逻辑一行不改，只换入口）。
 
 raw.json 结构:
     {
       "domain": "领域词（用于目录命名）",
       "nodes": ["全部叶子节点"],
-      "model": "模型名（可选，随 raw_input.json 快照留存）",
+      "model": "模型名（可选，fold 路径随 manifest_input.json 归档留存）",
       "knowledge": [
         {"name": ..., "node": 叶子节点, "verified": true,
          "category_path": "完整层级路径", "source_type": ..., "url": ...,
@@ -102,6 +107,9 @@ def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
 
     流程开始时调用（--prepare）：目录在流程开头即存在，阶段 5 把 raw.json
     写入其中，收尾时脚本读 raw.json 的领域词把目录重命名为最终交付目录。
+    同时写入 .session_id 会话标记——hook 按标记把证据留痕写进本目录的
+    evidence.jsonl（运行级归属，outputs/ 顶层零平铺文件）；收尾时随目录
+    清理。无会话 ID 环境变量（手动调用）则不写标记、留痕走旧共享路径。
     """
     now = now or datetime.now()
     timestamp = now.strftime("%Y-%m-%d-%H%M%S")
@@ -111,7 +119,23 @@ def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
         run_dir = base / f"run_{timestamp}_{counter}"
         counter += 1
     run_dir.mkdir(parents=True)
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session_id:
+        (run_dir / ".session_id").write_text(session_id, encoding="utf-8")
     return str(run_dir)
+
+
+def run_evidence_log(run_dir: Path) -> Optional[Path]:
+    """运行目录内的证据留痕（运行级归属，2026-08-31 分层原则修订）。
+
+    hook 按 .session_id 标记写入 run_*/evidence.jsonl；存在则收尾优先用它，
+    否则回退会话级共享路径（旧流程/未 prepare 场景）。仅对 run_ 前缀目录
+    生效——旧固定路径（outputs/raw.json）不受影响。
+    """
+    if not RUN_DIR_RE.match(run_dir.name):
+        return None
+    p = run_dir / "evidence.jsonl"
+    return p if p.exists() else None
 
 
 def _report_stats_block(outdir: Path):
@@ -121,7 +145,9 @@ def _report_stats_block(outdir: Path):
     提取数是去重前口径，与最终清单不一致（2026-08-28 实证：报告体裁数与
     stats 对不上）。stats.csv 缺失时返回 None（跳过注入，不阻断重命名）。
     """
-    stats_csv = next((f for f in outdir.iterdir() if f.name.endswith("_stats.csv")), None)
+    inter = outdir / "intermediate"
+    stats_csv = next((f for f in inter.iterdir() if f.name.endswith("_stats.csv")), None) \
+        if inter.is_dir() else None
     if stats_csv is None:
         return None
     node_rows = []
@@ -478,46 +504,6 @@ def check_granularity(sources: list[dict]) -> tuple[int, int]:
     return single_count, missing_count
 
 
-# 常见语言码路径段（用于多语言版本审计计数）。审计不自动合并——只做确定性
-# 分组计数，暴露"同一内容多语言版本并存"的漏网，供提取规则（中文优先）迭代。
-LOCALE_CODES = frozenset({
-    "zh", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant",
-    "en", "en-us", "en-gb", "en-au", "en-nz", "en-ca", "en-in",
-    "ja", "ko", "de", "de-de", "fr", "fr-fr", "es", "es-es",
-    "ru", "ru-ru", "pt", "pt-br", "it", "it-it", "nl", "el",
-    "ar", "hi", "th", "vi", "id", "ms", "tr", "pl", "sv", "da",
-    "fi", "no", "cs", "he", "fa", "uk", "ro", "hu", "sk",
-})
-
-
-def _strip_locale_segment(path: str) -> str:
-    """剥掉路径首段的语言码（仅当命中已知语言码表时），用于多语言分组。"""
-    parts = [p for p in path.split("/") if p]
-    if parts and parts[0].lower() in LOCALE_CODES:
-        return "/".join(parts[1:])
-    return path
-
-
-def count_multilang_groups(sources: list[dict]) -> tuple[int, int]:
-    """审计：同域名、剥语言码路径段后相同的 URL 视为同一内容的多语言版本。
-
-    返回 (组数, 多余条目数)。只计数不合并——语言版本判定边界复杂
-    （子域语言站如 zh.wikipedia/en.wikipedia 是不同内容，不因语言合并；
-    本函数按域名分组已天然排除该情形），自动合并风险大于收益，先测量后决策。
-    """
-    groups: dict[tuple[str, str], int] = {}
-    for s in sources:
-        u = strip_citation_anchors(str(s.get("url") or ""))
-        if not u:
-            continue
-        parsed = urlparse(u)
-        key = (parsed.netloc.lower(), _strip_locale_segment(parsed.path))
-        groups[key] = groups.get(key, 0) + 1
-    group_count = sum(1 for v in groups.values() if v > 1)
-    excess = sum(v - 1 for v in groups.values() if v > 1)
-    return group_count, excess
-
-
 def merge_knowledge(knowledge: list[dict]) -> tuple[list[dict], int, int]:
     """把 verified=true 且字段齐全的清单项转为 sources 条目。
 
@@ -576,7 +562,8 @@ def write_stats_csv(path: Path, summary: dict) -> None:
     """写清单统计 CSV：每行一个分类节点（候选数/体裁分布），末尾一行总计。
 
     纯清单统计表——运行级信息不贴行：领域/时间戳在文件名，模型在
-    raw_input.json，过程健康指标（证据校验移除/清单验证等）在 stdout 汇总。
+    manifest_input.json（fold 路径），过程健康指标（证据校验移除/清单验证等）
+    在 stdout 汇总。
     """
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
@@ -662,8 +649,11 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     # journal：每次搜索一条，查询词需在证据留痕中逐字出现
     journal = data.get("journal") if isinstance(data.get("journal"), list) else []
 
-    # 证据校验：候选 URL 必须逐字出现在证据留痕中（PostToolUse hook 系统记录）
-    log_path = Path(evidence_log) if evidence_log else Path(default_evidence_log())
+    # 证据校验：候选 URL 必须逐字出现在证据留痕中（PostToolUse hook 系统记录）。
+    # 运行级归属优先（run_*/evidence.jsonl，hook 按会话标记写入），否则回退
+    # 会话级共享路径（旧流程/手动调用）
+    log_path = Path(evidence_log) if evidence_log else (
+        run_evidence_log(raw.parent) or Path(default_evidence_log()))
     if (valid or merged or journal) and not log_path.exists():
         raise FileNotFoundError(
             f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
@@ -684,10 +674,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     kept = deduplicate(grounded)
     removed = len(grounded) - len(kept)
     node_stats = compute_stats(kept, nodes)
-
-    # 多语言版本审计（只计数不合并）：提取规则要求同一内容只收一个语言版本，
-    # 本计数暴露漏网，供提取规则迭代（中文优先）
-    multilang_groups, multilang_excess = count_multilang_groups(kept)
 
     journal_rows: list[list] = []
     journal_skipped = 0
@@ -722,7 +708,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     ]
 
     # 失败路径：搜索过（journal 非空）却 0 候选 → 疑似搜索工具异常，
-    # 中止并保留 raw.json 供人工检查（方案 02-搜索方案.md 失败路径）
+    # 中止并保留 raw.json 供人工检查（两路方案失败路径，见 docs/02 附录决策集）
     if len(all_candidates) == 0 and journal_rows:
         raise ValueError(
             "搜索过（journal 非空）但候选为 0——疑似搜索工具异常，"
@@ -757,8 +743,6 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
         "single_count": single_count,
         "granularity_missing": granularity_missing,
-        "multilang_groups": multilang_groups,
-        "multilang_excess": multilang_excess,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
@@ -781,12 +765,12 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     write_source_csv(outdir / f"{domain}_{timestamp}_数据源清单.csv", kept,
                      first_query_by_source(kept, sliced))
     summary["outdir"] = str(outdir)
-    write_stats_csv(outdir / f"{domain}_{timestamp}_stats.csv", summary)
 
-    # 排障材料入 intermediate/（交付物只有根目录的数据源清单与 stats）
+    # 排障材料入 intermediate/；stats 属对比/原料类材料一并放入
+    # （2026-08-31 起根目录只留数据源清单，分析报告.md 由模型收尾时写入）
     intermediate = outdir / "intermediate"
     intermediate.mkdir()
-    shutil.copy(raw, intermediate / "raw_input.json")
+    write_stats_csv(intermediate / f"{domain}_{timestamp}_stats.csv", summary)
     if journal_rows:
         write_journal_csv(intermediate / f"{domain}_{timestamp}_搜索日志.csv", journal_rows)
     if sliced:
@@ -798,66 +782,152 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     summary["evidence_slice_kept"] = slice_kept
     summary["evidence_slice_skipped"] = slice_skipped
 
-    # 删除会话临时文件（--keep-raw 时保留；无修正重跑环节，运行到此结束）
+    # 删除会话临时文件（--keep-raw 时保留；无修正重跑环节，运行到此结束）。
+    # 会话标记与运行级证据随目录重命名来到 outdir——收尾完成即失效，一并清理；
+    # （log_path 为预留目录路径时已随重命名失效，exists() 自然为假）
     if not keep_raw:
         raw.unlink(missing_ok=True)
         if log_path.exists():
             log_path.unlink(missing_ok=True)
+        (outdir / ".session_id").unlink(missing_ok=True)
+        (outdir / "evidence.jsonl").unlink(missing_ok=True)
 
     return summary
 
 
-def _print_summary(summary: dict) -> None:
-    print(f"领域: {summary['domain']}")
-    print(f"输出目录: {summary['outdir']}")
-    print(f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
-          f"  证据校验移除: {summary['ungrounded']}"
-          f"  最终收录: {summary['kept']}")
+def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] = None,
+         now: Optional[datetime] = None) -> dict:
+    """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/05）。
+
+    store.jsonl 只承载增量条目与搜索日志；manifest.json 承载 domain/nodes/model/
+    knowledge（清单声明与最终核对态）。组装是确定性环节，由脚本完成——复用 run()
+    全链路，逻辑一行不改，只换入口。
+
+    防截断哨兵：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
+    违约未调用 record_sources 时失败响亮，不再静默丢数据）。
+    失败发生在目录重命名之前——运行目录保持 run_ 原名，修正后可安全重跑（幂等）。
+    成功后 store/manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）。
+    """
+    run_dir_path = Path(run_dir)
+    manifest_path = run_dir_path / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"manifest.json 不存在: {manifest_path}（阶段 0-1 应先 Write manifest）")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"manifest.json 损坏: {e}")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("nodes"), list):
+        raise ValueError('manifest.json 结构错误：应为 {"domain", "nodes", ...} 对象')
+
+    from store import load_store  # 延迟导入避免循环依赖（store 反向 import postprocess）
+
+    store_path = run_dir_path / "store.jsonl"
+    records, bad_lines = load_store(store_path) if store_path.exists() else ([], 0)
+
+    # store 行含内部字段（type/node）——组装等价 raw 时剥离；
+    # store 原件由 intermediate/store_input.jsonl 保留
+    sources = [{k: v for k, v in r.items() if k not in ("type", "node", "ts")}
+               for r in records if r.get("type") == "source"]
+    searches = [r for r in records if r.get("type") == "search"]
+    journal = [{"phase": s.get("phase", ""), "node": s.get("node", ""),
+                "query": s.get("query", ""), "results": s.get("results", ""),
+                "extracted": s.get("extracted", "")} for s in searches]
+    extracted_total = 0
+    for j in journal:
+        try:
+            extracted_total += int(j["extracted"])
+        except (TypeError, ValueError):
+            pass
+    if not sources and extracted_total > 0:
+        raise ValueError(
+            f"来源未入库：搜索提取合计 {extracted_total} 条，但 store 中来源为 0——"
+            "疑似未调用 record_sources；修正后重跑 finalize（运行目录未被重命名）")
+
+    data = {
+        "domain": manifest.get("domain", ""),
+        "nodes": [str(n) for n in manifest["nodes"]],
+        "model": manifest.get("model", ""),
+        "knowledge": manifest.get("knowledge") if isinstance(manifest.get("knowledge"), list) else [],
+        "journal": journal,
+        "sources": sources,
+    }
+    raw_path = run_dir_path / "raw.json"
+    raw_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    summary = run(str(raw_path), out_dir=out_dir, evidence_log=evidence_log, now=now)
+
+    # run() 成功时目录已整体重命名——store/manifest 随目录移动，路径重新指向
+    # 新目录后归档进 intermediate/ 并删除原件（2026-09-01 修复：此前 store 漏归档，
+    # 交付目录根残留 store.jsonl——根目录只留数据源清单，报告由模型收尾写入）
+    outdir = Path(summary["outdir"])
+    intermediate = outdir / "intermediate"
+    store_path = outdir / "store.jsonl"
+    manifest_path = outdir / "manifest.json"
+    shutil.copy(store_path, intermediate / "store_input.jsonl")
+    store_path.unlink()
+    shutil.copy(manifest_path, intermediate / "manifest_input.json")
+    manifest_path.unlink()
+    summary["store_bad_lines"] = bad_lines
+    return summary
+
+
+def summary_text(summary: dict) -> str:
+    """汇总统计的可读文本（CLI stdout 与 MCP finalize 工具共用同一份口径）。"""
+    lines = [f"领域: {summary['domain']}",
+             f"输出目录: {summary['outdir']}",
+             f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
+             f"  证据校验移除: {summary['ungrounded']}"
+             f"  最终收录: {summary['kept']}"]
     if summary["invalid"]:
-        print(f"无效记录(缺名称/URL): {summary['invalid']}")
+        lines.append(f"无效记录(缺名称/URL): {summary['invalid']}")
     if summary["unmatched"]:
-        print(f"警告: {summary['unmatched']} 条记录的分类路径未匹配到任何节点")
+        lines.append(f"警告: {summary['unmatched']} 条记录的分类路径未匹配到任何节点")
     if summary["rejected"]:
-        print("证据校验移除明细（网址不在搜索结果留痕中，未进入清单）:")
+        lines.append("证据校验移除明细（网址不在搜索结果留痕中，未进入清单）:")
         for name, url in summary["rejected"]:
-            print(f"  - {name}: {url}")
+            lines.append(f"  - {name}: {url}")
     if summary["granularity_missing"]:
-        print(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
-    if summary["multilang_groups"]:
-        print(f"多语言版本并存: {summary['multilang_groups']} 组（多余 {summary['multilang_excess']} 条）"
-              f"——同一内容应只收一个语言版本（中文优先），见搜索层提取规则")
-    print(f"清单核对: 验证通过 {summary['list_verified']} 项")
+        lines.append(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
+    lines.append(f"清单核对: 验证通过 {summary['list_verified']} 项")
     if summary["knowledge_missing"]:
-        print("警告: raw.json 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
+        lines.append("警告: manifest 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
     if summary["incomplete"]:
-        print(f"警告: {summary['incomplete']} 条 verified 清单项缺 name/url，未并入")
+        lines.append(f"警告: {summary['incomplete']} 条 verified 清单项缺 name/url，未并入")
     if summary["sources_broken"]:
-        print("警告: sources 字段不是列表，已按空处理")
+        lines.append("警告: sources 字段不是列表，已按空处理")
+    if summary.get("store_bad_lines"):
+        lines.append(f"警告: store.jsonl 有 {summary['store_bad_lines']} 行损坏被跳过")
     if summary["journal_skipped"]:
-        print(f"警告: {summary['journal_skipped']} 条 journal 记录结构损坏被跳过")
+        lines.append(f"警告: {summary['journal_skipped']} 条 journal 记录结构损坏被跳过")
     if summary["unverified"]:
-        print("未验证清单（人工交接单）:")
+        lines.append("未验证清单（人工交接单）:")
         for name, note in summary["unverified"]:
-            print(f"  - {name}（{note}）")
+            lines.append(f"  - {name}（{note}）")
     else:
-        print("未验证清单: 无")
+        lines.append("未验证清单: 无")
     if summary["journal_count"]:
-        print(f"搜索日志: {summary['journal_count']} 次搜索（见 intermediate/搜索日志.csv）")
+        lines.append(f"搜索日志: {summary['journal_count']} 次搜索（见 intermediate/搜索日志.csv）")
     if summary["outdir"]:
         if summary.get("lineage_rows"):
-            print(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")
-        print(f"证据留痕切片: 保留 {summary['evidence_slice_kept']} 行 / 跳过 {summary['evidence_slice_skipped']} 行"
-              f"（见 intermediate/）")
-    print("各节点:")
+            lines.append(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")
+        lines.append(f"证据留痕切片: 保留 {summary['evidence_slice_kept']} 行 / 跳过 {summary['evidence_slice_skipped']} 行"
+                     f"（见 intermediate/）")
+    lines.append("各节点:")
     for node, info in summary["per_node"].items():
         dist = "; ".join(
             f"{t}:{c}"
             for t, c in sorted(info["types"].items(), key=lambda kv: (-kv[1], kv[0]))
         )
         suffix = f" ({dist})" if dist else ""
-        print(f"  {node}: {info['count']} 条{suffix}")
+        lines.append(f"  {node}: {info['count']} 条{suffix}")
     empty = summary["empty_nodes"]
-    print(f"无结果节点: {'、'.join(empty) if empty else '无'}")
+    lines.append(f"无结果节点: {'、'.join(empty) if empty else '无'}")
+    return "\n".join(lines)
+
+
+def _print_summary(summary: dict) -> None:
+    print(summary_text(summary))
 
 
 def main() -> None:
