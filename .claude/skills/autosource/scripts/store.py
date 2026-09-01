@@ -111,6 +111,7 @@ def record_search(store_path: Path, entries: list) -> int:
             "query": str(e.get("query") or ""),
             "results": e.get("results", ""),
             "extracted": e.get("extracted", ""),
+            "verified": e.get("verified", ""),
         })
     return append_records(store_path, rows)
 

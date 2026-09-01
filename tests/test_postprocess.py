@@ -755,10 +755,39 @@ class TestJournal:
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         assert journal_csv.read_bytes()[:3] == BOM
         rows = read_csv_rows(journal_csv)
-        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
+        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失"]
         assert len(rows) == 3
         assert rows[1][2] == "IEEE 802.3 official"
-        assert rows[1][5] == "否"  # 证据缺失列：未缺失显式填否
+        assert rows[1][5] == ""  # 验证通过列：非验证行留空
+        assert rows[1][6] == "否"  # 证据缺失列：未缺失显式填否
+
+    def test_verification_count_mismatch_flagged(self, tmp_path):
+        """2026-09-01 钉进测试：journal verified 计数与清单验证通过数的一致性校验
+        ——验证通过与顺路新源拆分两个字段后的脚本闭环；不一致显式警告。"""
+        data = base_data()
+        data["journal"] = [{"phase": "验证搜索", "node": "AI训练GPU",
+                            "query": "IEEE 802.3 official", "results": 10,
+                            "extracted": 0, "verified": True}]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"], data["sources"])
+        import io
+        from contextlib import redirect_stdout
+        from postprocess import _print_summary
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                          evidence_log=str(ev))
+            _print_summary(summary)
+        assert summary["verification_mismatch"] is True
+        assert "验证通过标记数与清单验证通过数不一致" in buf.getvalue()
+
+    def test_verification_count_consistent_no_warning(self, tmp_path):
+        data = base_data()
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, [], data["sources"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+        assert summary["verification_mismatch"] is False
 
     def test_journal_query_missing_flagged(self, tmp_path):
         data = base_data()
@@ -770,7 +799,7 @@ class TestJournal:
 
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
-        assert rows[1][5] == "是"
+        assert rows[1][6] == "是"
 
     def test_no_journal_no_csv(self, tmp_path):
         data = base_data()
@@ -835,7 +864,7 @@ class TestJournal:
 
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
-        assert rows[1][5] == "是"
+        assert rows[1][6] == "是"
 
 
 class TestSliceEvidence:

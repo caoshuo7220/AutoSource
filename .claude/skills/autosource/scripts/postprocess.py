@@ -78,7 +78,7 @@ SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒�
 LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
                       "收录条目名称", "收录理由", "备注"]
 STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
-JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失"]
+JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失"]
 
 DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
 
@@ -679,6 +679,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     journal_skipped = 0
     journal_queries: set[str] = set()
     journal_map: dict[str, tuple] = {}
+    verification_claims = 0  # journal 声称的验证通过次数（验证搜索/扩量轮行）
     for j in journal:
         if not isinstance(j, dict):
             journal_skipped += 1
@@ -689,12 +690,19 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
             journal_map.setdefault(query, (
                 str(j.get("phase") or ""), str(j.get("node") or ""), j.get("results", "")))
         missing = "是" if (query and query not in evidence_strings) else "否"
+        # verified：一个字段一个事实——验证通过与顺路新源（extracted）分开记账
+        # （2026-09-01 两轮口径不一致治理：交换机轮把验证通过计入 extracted）
+        raw_verified = j.get("verified", "")
+        verified_ok = raw_verified is True or str(raw_verified).strip().lower() in ("true", "1", "是")
+        if verified_ok and str(j.get("phase") or "") in ("验证搜索", "扩量轮"):
+            verification_claims += 1
         journal_rows.append([
             j.get("phase", ""),
             j.get("node", ""),
             query,
             j.get("results", ""),
             j.get("extracted", ""),
+            "是" if verified_ok else "",
             missing,
         ])
 
@@ -737,6 +745,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "per_node": node_stats["per_node"],
         "outdir": "",
         "list_verified": list_verified,
+        "verification_mismatch": verification_claims != len(merged),
         "knowledge_missing": not knowledge,
         "incomplete": incomplete,
         "unverified": unverified,
@@ -832,7 +841,8 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     searches = [r for r in records if r.get("type") == "search"]
     journal = [{"phase": s.get("phase", ""), "node": s.get("node", ""),
                 "query": s.get("query", ""), "results": s.get("results", ""),
-                "extracted": s.get("extracted", "")} for s in searches]
+                "extracted": s.get("extracted", ""), "verified": s.get("verified", "")}
+               for s in searches]
     extracted_total = 0
     for j in journal:
         try:
@@ -890,6 +900,9 @@ def summary_text(summary: dict) -> str:
     if summary["granularity_missing"]:
         lines.append(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
     lines.append(f"清单核对: 验证通过 {summary['list_verified']} 项")
+    if summary.get("verification_mismatch"):
+        lines.append("警告: 搜索日志验证通过标记数与清单验证通过数不一致——"
+                     "journal verified 字段记账有误或漏填（复盘时注意）")
     if summary["knowledge_missing"]:
         lines.append("警告: manifest 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
     if summary["incomplete"]:

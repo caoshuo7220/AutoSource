@@ -182,7 +182,7 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
   - 连单篇载体都没有 → 标记未验证，留待扩量轮换角度重试后按阶段 4 定案
 - **通过后**：在**清单项内**填上 `category_path（完整路径）/ source_type / granularity / url / description / reason`（URL 照抄），预期体裁允许按实际形态修正——核对结果**暂存会话**，阶段 5 随 manifest 重写落盘（清单核对结果不进 store）
 - **未通过**：先标记 verified=false，不急于分类——扩量轮换角度重试后按阶段 4 定案（同样暂存会话）
-- **搜索日志记录**：每 ~10-15 次验证搜索调用一次 record_search 批量落库（每项 `phase/node/query/results/extracted`，query 照抄实际发出的查询词）——逐条记、批量落，不要每次搜索单独调用
+- **搜索日志记录**：每 ~10-15 次验证搜索调用一次 record_search 批量落库——验证搜索项 `phase/node/query/results/extracted/verified`（**verified=该次验证是否通过**：搜到该机构入口填 true、未通过填 false；**extracted 只记顺路新源数，验证通过本身不计入**——两个字段各装一个事实）；增量发现项无 verified 字段。query 照抄实际发出的查询词——逐条记、批量落，不要每次搜索单独调用
 - 验证搜索时顺带发现的新源 → 全量提取（同样遵守粒度规则、平台准入判据与证据链约束）
 
 ## 阶段 3 · 增量发现

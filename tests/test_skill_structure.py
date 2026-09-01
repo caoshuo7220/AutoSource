@@ -151,6 +151,13 @@ def test_node_search_profile():
     assert "行业术语与细分场景词" in SKILL_MD
 
 
+def test_journal_verified_field_contract():
+    """2026-09-01：验证搜索日志拆分 verified/extracted 两字段（一个字段装一个事实，
+    治理两轮记账口径不一致——交换机轮曾把验证通过计入 extracted）。"""
+    assert "verified" in SKILL_MD
+    assert "extracted 只记顺路新源数" in SKILL_MD
+
+
 def test_no_cost_driven_trimming():
     """防模型自砍搜索次数：无"代价"成本措辞，两处决策点写明不以搜索成本缩减/合并。"""
     assert "列多列杂的代价" not in SKILL_MD

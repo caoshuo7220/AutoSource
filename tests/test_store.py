@@ -155,6 +155,16 @@ class TestRecordSearch:
         assert records[0]["type"] == "search"
         assert records[0]["query"] == "GPU 排名 数据库"
 
+    def test_search_verified_field_roundtrip(self, tmp_path):
+        """2026-09-01：验证搜索日志拆分 verified/extracted 两字段——store 透传不丢失。"""
+        store = tmp_path / "store.jsonl"
+        assert record_search(store, [{"phase": "验证搜索", "node": "n", "query": "q",
+                                      "results": 10, "extracted": 0,
+                                      "verified": True}]) == 1
+        records, _ = load_store(store)
+        assert records[0]["verified"] is True
+        assert records[0]["extracted"] == 0
+
     def test_non_dict_rows_skipped(self, tmp_path):
         store = tmp_path / "store.jsonl"
         assert record_search(store, [{"query": "q"}, "垃圾", None]) == 1
