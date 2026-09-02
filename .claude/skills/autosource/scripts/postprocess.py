@@ -452,7 +452,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "per_node": node_stats["per_node"],
         "outdir": "",
         "list_verified": list_verified,
-        "verification_mismatch": verification_claims < len(merged),
+        "verification_mismatch": (verification_claims, len(merged))
+                                 if verification_claims < len(merged) else None,
         "scope_framework": scope_framework,
         "scope_other": scope_other,
         "knowledge_missing": not knowledge,
@@ -613,9 +614,12 @@ def summary_text(summary: dict) -> str:
     if summary["granularity_missing"]:
         lines.append(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
     lines.append(f"清单核对: 验证通过 {summary['list_verified']} 项")
-    if summary.get("verification_mismatch"):
+    mismatch = summary.get("verification_mismatch")
+    if mismatch:
+        claims, merged = mismatch
         lines.append("警告: 搜索日志验证通过标记数与清单验证通过数不一致——"
-                     "journal verified 字段记账有误或漏填（复盘时注意）")
+                     f"journal 声称 {claims} 次 < 清单实际并入 {merged} 项"
+                     f"（差 {merged - claims}）：verified 记账漏填（复盘时注意）")
     if summary.get("scope_framework") is not None:
         f, o = summary["scope_framework"], summary["scope_other"]
         f_avg = f"{f['extracted'] / f['count']:.1f}" if f["count"] else "0"

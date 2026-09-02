@@ -788,8 +788,10 @@ class TestJournal:
             summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                           evidence_log=str(ev))
             _print_summary(summary)
-        assert summary["verification_mismatch"] is True
-        assert "验证通过标记数与清单验证通过数不一致" in buf.getvalue()
+        assert summary["verification_mismatch"] == (1, 2)
+        out = buf.getvalue()
+        assert "验证通过标记数与清单验证通过数不一致" in out
+        assert "声称 1 次 < 清单实际并入 2 项（差 1）" in out  # 2026-09-02：警告带数字，复盘一眼看到差距
 
     def test_verification_overclaim_not_flagged(self, tmp_path):
         """声称数 ≥ 实际并入数（一次搜索验证多个入口/复验多记）不误报。"""
@@ -809,7 +811,7 @@ class TestJournal:
         ev = write_evidence(tmp_path, ["https://a.com/doc"])
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
-        assert summary["verification_mismatch"] is False
+        assert summary["verification_mismatch"] is None
 
     def test_verification_count_consistent_no_warning(self, tmp_path):
         data = base_data()
@@ -817,7 +819,7 @@ class TestJournal:
         ev = write_evidence_queries(tmp_path, [], data["sources"])
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
-        assert summary["verification_mismatch"] is False
+        assert summary["verification_mismatch"] is None
 
 
     def test_journal_query_missing_flagged(self, tmp_path):
@@ -937,7 +939,7 @@ class TestQueryScope:
         ev = write_evidence(tmp_path, ["https://a.com/doc"])
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
-        assert summary["verification_mismatch"] is False  # claims=1 == merged=1，缩写不误报
+        assert summary["verification_mismatch"] is None  # claims=1 == merged=1，缩写不误报
         assert summary["scope_framework"] == {"count": 1, "extracted": 2}
         assert summary["scope_other"]["count"] == 1
         assert summary["scope_other"]["extracted"] == 8
