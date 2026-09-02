@@ -763,13 +763,23 @@ class TestJournal:
 
     def test_verification_count_mismatch_flagged(self, tmp_path):
         """2026-09-01 钉进测试：journal verified 计数与清单验证通过数的一致性校验
-        ——验证通过与顺路新源拆分两个字段后的脚本闭环；不一致显式警告。"""
+        ——方向性判定：仅当声称数 < 实际并入数（漏填）时警告；≥ 视为正常
+        （一次搜索验证多入口 / 复验会多记，不误报）。"""
         data = base_data()
+        kn1 = {"name": "机构A", "node": "AI训练GPU", "verified": True,
+               "category_path": "算力服务器-GPU服务器-AI训练GPU",
+               "source_type": "官方文档", "granularity": "合集级",
+               "url": "https://a.com/doc", "description": "d", "reason": "r"}
+        kn2 = {"name": "机构B", "node": "AI训练GPU", "verified": True,
+               "category_path": "算力服务器-GPU服务器-AI训练GPU",
+               "source_type": "官方文档", "granularity": "合集级",
+               "url": "https://k.com/doc", "description": "d", "reason": "r"}
+        data["knowledge"] = [kn1, kn2]  # merged=2
         data["journal"] = [{"phase": "验证搜索", "node": "AI训练GPU",
-                            "query": "IEEE 802.3 official", "results": 10,
-                            "extracted": 0, "verified": True}]
+                            "query": "机构A 官网", "results": 10,
+                            "extracted": 0, "verified": True}]  # claims=1 < 2
         raw = write_raw(tmp_path, data)
-        ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"], data["sources"])
+        ev = write_evidence(tmp_path, ["https://a.com/doc", "https://k.com/doc"])
         import io
         from contextlib import redirect_stdout
         from postprocess import _print_summary
@@ -781,6 +791,26 @@ class TestJournal:
         assert summary["verification_mismatch"] is True
         assert "验证通过标记数与清单验证通过数不一致" in buf.getvalue()
 
+    def test_verification_overclaim_not_flagged(self, tmp_path):
+        """声称数 ≥ 实际并入数（一次搜索验证多个入口/复验多记）不误报。"""
+        data = base_data()
+        kn = {"name": "机构A", "node": "AI训练GPU", "verified": True,
+              "category_path": "算力服务器-GPU服务器-AI训练GPU",
+              "source_type": "官方文档", "granularity": "合集级",
+              "url": "https://a.com/doc", "description": "d", "reason": "r"}
+        data["knowledge"] = [kn]  # merged=1
+        data["journal"] = [
+            {"phase": "验证搜索", "node": "AI训练GPU", "query": "机构A 官网",
+             "results": 10, "extracted": 0, "verified": True},
+            {"phase": "扩量轮", "node": "AI训练GPU", "query": "机构A 官方文档",
+             "results": 10, "extracted": 0, "verified": True},
+        ]  # claims=2 >= 1
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, ["https://a.com/doc"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+        assert summary["verification_mismatch"] is False
+
     def test_verification_count_consistent_no_warning(self, tmp_path):
         data = base_data()
         raw = write_raw(tmp_path, data)
@@ -788,6 +818,7 @@ class TestJournal:
         summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
         assert summary["verification_mismatch"] is False
+
 
     def test_journal_query_missing_flagged(self, tmp_path):
         data = base_data()
@@ -865,6 +896,97 @@ class TestJournal:
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
         assert rows[1][6] == "是"
+
+
+class TestQueryScope:
+    """2026-09-01：选题分类（后验统计）——实体选题放开后的验证度量。
+    判定键只有一个：查询词是否含领域词/节点名，完全确定性；
+    英文角度词/抽象词归非框架内是已知近似，数字按趋势读不按绝对值。"""
+
+    def test_phase_group_prefix_tolerant(self):
+        """2026-09-01 实测 bug 钉进测试：phase 是模型自由文本（"验证搜索"曾被缩写
+        为"验证"、"增量发现"为"增量"），字面全等匹配导致选题分布 0/0 与
+        verified 警告误报——按前缀归组。"""
+        from postprocess import _phase_group
+        assert _phase_group("验证搜索") == "验证"
+        assert _phase_group("验证") == "验证"
+        assert _phase_group("增量发现") == "增量"
+        assert _phase_group("增量") == "增量"
+        assert _phase_group("扩量轮") == "扩量"
+        assert _phase_group("扩量") == "扩量"
+        assert _phase_group("") == ""
+        assert _phase_group("乱写") == ""
+
+    def test_short_phase_names_still_counted(self, tmp_path):
+        """缩写 phase 下选题分布与 verified 校验照常工作（不 0/0、不误报）。"""
+        data = base_data()
+        kn = {"name": "机构A", "node": "AI训练GPU", "verified": True,
+              "category_path": "算力服务器-GPU服务器-AI训练GPU",
+              "source_type": "官方文档", "granularity": "合集级",
+              "url": "https://a.com/doc", "description": "d", "reason": "r"}
+        data["knowledge"] = [kn]
+        data["journal"] = [
+            {"phase": "验证", "node": "AI训练GPU", "query": "机构A 官网",
+             "results": 10, "extracted": 0, "verified": True},
+            {"phase": "增量", "node": "AI训练GPU", "query": "算力服务器 厂商 文档",
+             "results": 10, "extracted": 2},
+            {"phase": "增量", "node": "AI训练GPU", "query": "超以太网联盟 UEC",
+             "results": 10, "extracted": 8},
+        ]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, ["https://a.com/doc"])
+        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+        assert summary["verification_mismatch"] is False  # claims=1 == merged=1，缩写不误报
+        assert summary["scope_framework"] == {"count": 1, "extracted": 2}
+        assert summary["scope_other"]["count"] == 1
+        assert summary["scope_other"]["extracted"] == 8
+
+    def test_domain_or_node_word_is_framework(self):
+        from postprocess import classify_query_scope
+        assert classify_query_scope("算力服务器 厂商 文档", "算力服务器",
+                                    ["AI训练GPU"]) == "框架内"
+        assert classify_query_scope("AI训练GPU 厂商 文档", "算力服务器",
+                                    ["AI训练GPU"]) == "框架内"
+        assert classify_query_scope("", "算力服务器", ["AI训练GPU"]) == "框架内"
+
+    def test_no_domain_no_node_word_is_non_framework(self):
+        from postprocess import classify_query_scope
+        assert classify_query_scope("超以太网联盟 UEC", "算力服务器",
+                                    ["AI训练GPU"]) == "非框架内"
+        assert classify_query_scope("TOP500 supercomputer list", "算力服务器",
+                                    ["AI训练GPU"]) == "非框架内"
+
+    def test_scope_summary_and_stdout(self, tmp_path):
+        data = base_data()
+        data["journal"] = [
+            {"phase": "增量发现", "node": "AI训练GPU", "query": "算力服务器 厂商 文档",
+             "results": 10, "extracted": 2},
+            {"phase": "增量发现", "node": "AI训练GPU", "query": "超以太网联盟 UEC",
+             "results": 10, "extracted": 8},
+            {"phase": "验证搜索", "node": "AI训练GPU", "query": "寒武纪 官网",
+             "results": 10, "extracted": 0, "verified": True},
+        ]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["算力服务器 厂商 文档", "超以太网联盟 UEC",
+                                               "寒武纪 官网"], data["sources"])
+        import io
+        from contextlib import redirect_stdout
+        from postprocess import _print_summary
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                          evidence_log=str(ev))
+            _print_summary(summary)
+        # 验证搜索行不参与分类
+        assert summary["scope_framework"] == {"count": 1, "extracted": 2}
+        assert summary["scope_other"]["count"] == 1
+        assert summary["scope_other"]["extracted"] == 8
+        assert summary["scope_other"]["by_node"] == {"AI训练GPU": (1, 8)}
+        out = buf.getvalue()
+        assert "选题分布" in out
+        assert "不含领域词 1 次" in out
+        assert "含领域词 1 次" in out
 
 
 class TestSliceEvidence:
@@ -1359,7 +1481,9 @@ class TestFinalizeReport:
         (d / "分析报告.md").write_text("报告内容", encoding="utf-8")
         result = finalize_report(str(d))
         assert result == str(d / "电源和能源硬件_2026-08-25-180439_分析报告.md")
-        assert (d / "电源和能源硬件_2026-08-25-180439_分析报告.md").read_text(encoding="utf-8") == "报告内容"
+        content = (d / "电源和能源硬件_2026-08-25-180439_分析报告.md").read_text(encoding="utf-8")
+        assert "报告内容" in content
+        assert "统计注入失败" in content  # 无 stats.csv 时注入占位提示（2026-09-02）
         assert not (d / "分析报告.md").exists()
 
     def test_missing_report_raises(self, tmp_path):
@@ -1422,6 +1546,17 @@ class TestReportStatsInjection:
         text = Path(result).read_text(encoding="utf-8")
         assert text.index("## 数据总览") < text.index("## 一、领域概览")
         assert "数据源总数：182 条" in text
+
+    def test_missing_stats_writes_placeholder(self, tmp_path):
+        """2026-09-02：stats.csv 缺失时注入不静默跳过——往"数据总览"节写占位提示，
+        避免交付空白标题（模型被禁止写数字，占位由脚本负责）。"""
+        d = self._setup(tmp_path,
+            "# 交换机 领域分析报告\n\n## 数据总览\n\n（本段由收尾脚本自动生成）\n\n"
+            "## 一、领域概览\n（定性内容）\n", with_stats=False)
+        result = finalize_report(str(d))
+        text = Path(result).read_text(encoding="utf-8")
+        assert "统计注入失败" in text
+        assert "（本段由收尾脚本自动生成）" not in text
 
     def test_missing_stats_skips_injection(self, tmp_path):
         d = self._setup(tmp_path, "# 标题\n\n## 一、领域概览\n内容\n", with_stats=False)
@@ -1613,6 +1748,19 @@ class TestFinalizeFold:
         assert (outdir / "intermediate" / "manifest_input.json").exists()
         assert not (outdir / "store.jsonl").exists()
         assert not (outdir / "manifest.json").exists()
+
+    def test_sentinel_not_triggered_by_verification_only_run(self, tmp_path):
+        """2026-09-01 钉进测试：哨兵只对增量/扩量轮的提取计数——
+        纯清单验证运行（store 零来源、验证搜索 extracted>0 且清单有验证通过项）
+        是合法结果，不得中止。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)  # 默认含 verified 清单项 K1（url https://k.com/doc）
+        self._write_store(run_dir, [self._search_row(phase="验证搜索", query="K1 官网")])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["kept"] == 1  # 清单项并入
+        assert not run_dir.exists()  # 正常重命名收尾
 
     def test_sentinel_empty_sources_with_extractions_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))

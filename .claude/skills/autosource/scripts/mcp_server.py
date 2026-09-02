@@ -139,9 +139,10 @@ def record_search(run_dir: str, entries: list) -> str:
 def coverage(run_dir: str) -> str:
     """查每节点"已收 vs 提取"的缺口（只读，不改数据）。
 
-    何时调用：阶段 4 扩量判断与收尾前自查——某节点 missing > 0 表示该节点
-    提取过但落库不足，只补该节点即可。只测条数缺失；体裁/来源维度是否单一
-    由模型在会话内判断（依据是它刚提取的内容）。
+    何时调用：阶段 4 扩量判断与收尾前自查。missing 是粗略缺口信号（提取数含
+    去重前与跨节点顺路发现、已收数是幂等去重后的入库数，两口径天然有差），
+    小额 missing 不触发补搜；接近该节点一整批提取量才怀疑漏调 record_sources。
+    只测条数缺失；体裁/来源维度是否单一由模型在会话内判断（依据是它刚提取的内容）。
 
     返回 [{node, recorded, extracted, missing}]（missing = max(0, 提取-已收)）。
     """

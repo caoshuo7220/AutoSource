@@ -6,7 +6,6 @@
 
 ```
 /autosource 交换机
-/autosource 算力服务器 -c "GPU服务器" "CPU服务器"
 
 输出: outputs/{领域词}_{时间戳}/
       ├── {领域词}_{时间戳}_数据源清单.csv   ← 交付物（UTF-8 BOM，Excel 直接打开）
@@ -32,12 +31,12 @@ MCP 服务  .claude/skills/autosource/scripts/mcp_server.py  ← 四工具：rec
 证据链    .claude/skills/autosource/scripts/log_tool.py    ← PostToolUse hook：系统记录搜索留痕，防 URL 编造
 ```
 
-设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**——数据落盘走 MCP 工具入库（单次输出 ≤ 一个节点批次，写入截断机制性消失），元数据走 manifest.json。
+设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**——数据落盘走 MCP 工具入库（单次输出 ≤ 一个节点批次，写入截断在机制上不可能发生），元数据走 manifest.json。
 
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 160 个测试，预期全过
+python -m pytest tests/ -q   # 181 个测试，预期全过
 ```
 
 ## 文档索引

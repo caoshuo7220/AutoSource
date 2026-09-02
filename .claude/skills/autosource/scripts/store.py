@@ -119,6 +119,9 @@ def record_search(store_path: Path, entries: list) -> int:
 def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
     """每节点 已收 vs 提取 的只读计数——只测缺失（missing = max(0, 提取-已收)）。
 
+    missing 是粗略缺口信号（2026-09-02 评审）：提取数含去重前重复与跨节点
+    顺路发现，已收数是幂等去重后的入库数，两口径天然有差——小额 missing 不
+    视为遗漏，接近一整批提取量才值得怀疑漏调 record_sources。
     只测缺失、不测薄弱（体裁/来源维度单一由模型在会话内判断，依据是它刚提取
     的内容）；角度级状态不可恢复（角度多样性脚本校验 2026-08-31 裁决不做，该
     缺口以散文层治理维持，见 docs/02 讨论日志）。

@@ -216,7 +216,10 @@ def finalize_report(outdir: str) -> str:
         text = _insert_stats_section(report.read_text(encoding="utf-8"), block)
         report.write_text(text, encoding="utf-8")
     else:
-        print("注意: 未找到 stats.csv，报告未注入数据总览（模型写的正文原样保留）")
+        text = _insert_stats_section(report.read_text(encoding="utf-8"),
+                                     "（本次统计注入失败：未找到 stats.csv，见 intermediate/）")
+        report.write_text(text, encoding="utf-8")
+        print("注意: 未找到 stats.csv，已往报告数据总览写入占位提示（统计未注入）")
     target = d / f"{d.name}_分析报告.md"
     if target.exists():
         raise FileExistsError(f"目标文件已存在: {target}")
@@ -611,6 +614,39 @@ def compute_stats(kept: list[dict], nodes: list[str]) -> dict:
             "unmatched": unmatched, "total_types": total_types}
 
 
+def _phase_group(phase: str) -> str:
+    """journal phase 归组（前缀容忍）。
+
+    2026-09-01 实测：phase 是模型自由文本——"验证搜索"曾被缩写为"验证"、
+    "增量发现"为"增量"，字面全等匹配导致选题分布 0/0 与 verified 一致性
+    警告误报。按前缀归组为 验证/增量/扩量，无法归组返回空串。
+    """
+    p = str(phase or "")
+    for prefix, group in (("验证", "验证"), ("增量", "增量"), ("扩量", "扩量")):
+        if p.startswith(prefix):
+            return group
+    return ""
+
+
+def classify_query_scope(query: str, domain: str, nodes: list[str]) -> str:
+    """选题分类（后验统计）：查询词含领域词或节点名 → 框架内；否则 → 非框架内。
+
+    2026-09-01 实体选题放开后的验证度量。判定键只有一个——领域词/节点名是否
+    逐字出现，完全确定性（选题意图是语义判断，脚本只做可确定的二分）。
+    已知近似：英文角度词、抽象词查询归非框架内——本度量按趋势读，不按绝对值。
+    空查询归框架内（保守侧，无从判定）。
+    """
+    q = str(query or "")
+    if not q:
+        return "框架内"
+    if domain and domain in q:
+        return "框架内"
+    for n in nodes:
+        if str(n) and str(n) in q:
+            return "框架内"
+    return "非框架内"
+
+
 def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         evidence_log: Optional[str] = None,
         now: Optional[datetime] = None) -> dict:
@@ -680,24 +716,42 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     journal_queries: set[str] = set()
     journal_map: dict[str, tuple] = {}
     verification_claims = 0  # journal 声称的验证通过次数（验证搜索/扩量轮行）
+    # 选题分类统计（2026-09-01 实体选题放开后的验证度量）：只统计增量发现/扩量轮行，
+    # 验证搜索行按定义就是实体查询，已被 verified 字段覆盖、不参与分类
+    scope_framework = {"count": 0, "extracted": 0}
+    scope_other = {"count": 0, "extracted": 0, "by_node": {}}
     for j in journal:
         if not isinstance(j, dict):
             journal_skipped += 1
             continue
         query = str(j.get("query") or "")
+        phase = str(j.get("phase") or "")
         if query:
             journal_queries.add(query)
-            journal_map.setdefault(query, (
-                str(j.get("phase") or ""), str(j.get("node") or ""), j.get("results", "")))
+            journal_map.setdefault(query, (phase, str(j.get("node") or ""), j.get("results", "")))
         missing = "是" if (query and query not in evidence_strings) else "否"
         # verified：一个字段一个事实——验证通过与顺路新源（extracted）分开记账
         # （2026-09-01 两轮口径不一致治理：交换机轮把验证通过计入 extracted）
         raw_verified = j.get("verified", "")
         verified_ok = raw_verified is True or str(raw_verified).strip().lower() in ("true", "1", "是")
-        if verified_ok and str(j.get("phase") or "") in ("验证搜索", "扩量轮"):
+        if verified_ok and _phase_group(phase) in ("验证", "扩量"):
             verification_claims += 1
+        if _phase_group(phase) in ("增量", "扩量"):
+            try:
+                extracted = int(j.get("extracted") or 0)
+            except (TypeError, ValueError):
+                extracted = 0
+            if classify_query_scope(query, domain, nodes) == "框架内":
+                scope_framework["count"] += 1
+                scope_framework["extracted"] += extracted
+            else:
+                scope_other["count"] += 1
+                scope_other["extracted"] += extracted
+                node = str(j.get("node") or "")
+                c, e = scope_other["by_node"].get(node, (0, 0))
+                scope_other["by_node"][node] = (c + 1, e + extracted)
         journal_rows.append([
-            j.get("phase", ""),
+            phase,
             j.get("node", ""),
             query,
             j.get("results", ""),
@@ -745,7 +799,9 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
         "per_node": node_stats["per_node"],
         "outdir": "",
         "list_verified": list_verified,
-        "verification_mismatch": verification_claims != len(merged),
+        "verification_mismatch": verification_claims < len(merged),
+        "scope_framework": scope_framework,
+        "scope_other": scope_other,
         "knowledge_missing": not knowledge,
         "incomplete": incomplete,
         "unverified": unverified,
@@ -845,13 +901,21 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
                for s in searches]
     extracted_total = 0
     for j in journal:
+        # 防截断哨兵只对增量/扩量轮计数（2026-09-02 收窄触发域）：
+        # 验证搜索的提取走 manifest 不进 store.sources，纯清单零增量是合法运行
+        if _phase_group(str(j.get("phase") or "")) not in ("增量", "扩量"):
+            continue
         try:
             extracted_total += int(j["extracted"])
         except (TypeError, ValueError):
             pass
-    if not sources and extracted_total > 0:
+    knowledge_list = manifest.get("knowledge") if isinstance(manifest.get("knowledge"), list) else []
+    knowledge_any_verified = any(
+        isinstance(k, dict) and k.get("verified") and k.get("name") and k.get("url")
+        for k in knowledge_list)
+    if not sources and extracted_total > 0 and not knowledge_any_verified:
         raise ValueError(
-            f"来源未入库：搜索提取合计 {extracted_total} 条，但 store 中来源为 0——"
+            f"来源未入库：增量/扩量搜索提取合计 {extracted_total} 条，但 store 中来源为 0——"
             "疑似未调用 record_sources；修正后重跑 finalize（运行目录未被重命名）")
 
     data = {
@@ -903,6 +967,16 @@ def summary_text(summary: dict) -> str:
     if summary.get("verification_mismatch"):
         lines.append("警告: 搜索日志验证通过标记数与清单验证通过数不一致——"
                      "journal verified 字段记账有误或漏填（复盘时注意）")
+    if summary.get("scope_framework") is not None:
+        f, o = summary["scope_framework"], summary["scope_other"]
+        f_avg = f"{f['extracted'] / f['count']:.1f}" if f["count"] else "0"
+        o_avg = f"{o['extracted'] / o['count']:.1f}" if o["count"] else "0"
+        lines.append(f"选题分布: 含领域词 {f['count']} 次（每搜 {f_avg}）/ "
+                     f"不含领域词 {o['count']} 次（每搜 {o_avg}）"
+                     "（不含领域词含实体选题/英文角度词，按趋势读）")
+        if o["by_node"]:
+            lines.append("不含领域词节点分布: " + "; ".join(
+                f"{n} {c} 次（每搜 {e / c:.1f}）" for n, (c, e) in o["by_node"].items()))
     if summary["knowledge_missing"]:
         lines.append("警告: manifest 无 knowledge 字段（本次无权威源清单，退化为纯增量模式，**本次无底线保证**）")
     if summary["incomplete"]:
