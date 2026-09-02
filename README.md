@@ -25,10 +25,13 @@
 
 ```
 Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流程：拆解 → 知识清单 → 验证搜索 → 增量发现 → 扩量 → 收尾
-后处理    .claude/skills/autosource/scripts/postprocess.py ← 证据校验/去重/CSV/stats/清理 + finalize 折叠（确定性环节全部代码化）
+后处理    .claude/skills/autosource/scripts/postprocess.py ← 流水线编排（证据校验/去重/CSV/stats/清理 + finalize 折叠）
+          ├── evidence.py ← 证据链（留痕定位/边界匹配/切片/锚点清理）
+          ├── lineage.py  ← 数据血缘（溯源.csv 与"来源搜索"归因）
+          └── report.py   ← 分析报告（数据总览注入 + 命名）
 存储层    .claude/skills/autosource/scripts/store.py       ← store.jsonl 追加日志 + 入库即验 + coverage 对账（模型不碰数据文件）
 MCP 服务  .claude/skills/autosource/scripts/mcp_server.py  ← 四工具：record_sources / record_search / coverage / finalize（.mcp.json 注册，会话自动拉起）
-证据链    .claude/skills/autosource/scripts/log_tool.py    ← PostToolUse hook：系统记录搜索留痕，防 URL 编造
+证据链    .claude/skills/autosource/scripts/evidence_hook.py ← PostToolUse hook：系统记录搜索留痕，防 URL 编造（校验逻辑在 evidence.py）
 ```
 
 设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**——数据落盘走 MCP 工具入库（单次输出 ≤ 一个节点批次，写入截断在机制上不可能发生），元数据走 manifest.json。
@@ -36,7 +39,7 @@ MCP 服务  .claude/skills/autosource/scripts/mcp_server.py  ← 四工具：rec
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 181 个测试，预期全过
+python -m pytest tests/ -q   # 184 个测试，预期全过
 ```
 
 ## 文档索引
@@ -46,6 +49,5 @@ python -m pytest tests/ -q   # 181 个测试，预期全过
 | [docs/01-交付手册.md](docs/01-交付手册.md) | 交付接手者必读：项目全景、关键决策、验收标准、使用说明 |
 | [docs/02-日志手册.md](docs/02-日志手册.md) | 每日工作日志（干了什么、每个决策的来龙去脉）、两路方案决策集附录（D1-D11） |
 | [docs/03-待办账本.md](docs/03-待办账本.md) | 挂账/待实施/验收未决项（单一事实源，带触发条件与出处） |
-| [docs/04-根因分析.md](docs/04-根因分析.md) | 重大波动的完整根因解剖（案例：交换机 274→172）与可复现的分析方法 |
-| [docs/05-存储架构改造方案.md](docs/05-存储架构改造方案.md) | 写入截断根治方案（已实施，2026-08-31 验收通过）：MCP 四工具 + manifest 瘦身 + store JSONL |
-| [docs/06-参考方案手册.md](docs/06-参考方案手册.md) | 外部调研：同类方案盘点、可复用组件、社区共识模式对照 |
+| [docs/04-存储架构改造方案.md](docs/04-存储架构改造方案.md) | 写入截断根治方案（已实施，2026-08-31 验收通过）：MCP 四工具 + manifest 瘦身 + store JSONL |
+| [docs/05-参考方案手册.md](docs/05-参考方案手册.md) | 外部调研：同类方案盘点、可复用组件、社区共识模式对照 |

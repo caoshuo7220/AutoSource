@@ -1,4 +1,4 @@
-"""mcp_server.py 协议层测试（docs/05 §7.8：stdio 握手、工具路由、哨兵错误路径）。"""
+"""mcp_server.py 协议层测试（docs/04 §7.8：stdio 握手、工具路由、哨兵错误路径）。"""
 import json
 import subprocess
 import sys
@@ -68,19 +68,20 @@ class TestSelfCheck:
     def test_missing_session_env_flagged(self, monkeypatch):
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         problems = ms.self_check()
-        assert any("CLAUDE_CODE_SESSION_ID" in p for p in problems)
+        assert any(p["code"] == "session_id" for p in problems)
 
     def test_missing_evidence_flagged_with_path(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-selftest-no-evidence")
         run_dir = tmp_path / "run_x"
         run_dir.mkdir()
         problems = ms.self_check(run_dir)
-        assert any("证据留痕不存在" in p and "evidence.jsonl" in p for p in problems)
+        assert any(p["code"] == "evidence_missing" and "evidence.jsonl" in p["message"]
+                   for p in problems)
 
     def test_bad_project_root_flagged(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ms, "PROJECT_ROOT", tmp_path)
         problems = ms.self_check()
-        assert any("项目根解析错误" in p for p in problems)
+        assert any(p["code"] == "project_root" for p in problems)
 
     def test_unhealthy_assembly_fails_first_tool_call(self, tmp_path, monkeypatch):
         """装配层故障时首次工具调用即报错（而不是烧掉几十次搜索后在落库时爆）。"""

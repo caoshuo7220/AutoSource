@@ -1,4 +1,4 @@
-"""store.py 单元测试（docs/05 存储架构改造：store JSONL + 入库即验 + coverage）。"""
+"""store.py 单元测试（docs/04 存储架构改造：store JSONL + 入库即验 + coverage）。"""
 import json
 import sys
 from pathlib import Path

@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/skills/autosource/scripts/log_tool.py"
+            "command": "python .claude/skills/autosource/scripts/evidence_hook.py"
           }
         ]
       }

@@ -1,22 +1,43 @@
-"""AutoSource 存储层：store.jsonl 追加日志 + 入库即验 + coverage 对账（docs/05）。
+"""AutoSource 存储层：store.jsonl 追加日志 + 入库即验 + coverage 对账（docs/04）。
 
 store 只承载两类记录：增量发现条目（type=source）与搜索日志（type=search）；
 知识清单不进 store（在 manifest.json，收尾折叠时由 postprocess.fold 组装）。
 分工原则：LLM 只做语义判断，持久化与校验全部由本模块（脚本）保证。
 
 - record_sources：批次入库即验——name/url 非空、granularity 枚举（缺省/非法
-  归一化为合集级）、URL 走证据链边界校验（复用 postprocess.check_grounded，
+  归一化为合集级）、URL 走证据链边界校验（evidence.check_grounded，
   含 # 豁免与 ? 严格）；裸 URL 精确相等才幂等跳过并计数（不归一化——见
-  docs/05 裁决 8.1）；单条被拒不阻断批次，其余照常入库
+  docs/04 裁决 8.1）；单条被拒不阻断批次，其余照常入库
 - record_search：搜索日志批量追加（查询词的证据比对在收尾折叠时做，现状机制）
 - coverage：每节点"已收 vs 提取"的只读计数（只测缺失，不测薄弱）
+
+条目粒度契约（GRANULARITY_LEVELS）与节点推导（leaf_node）是存储层的契约工具——
+入库校验与收尾统计共用，编排层（postprocess）从这里取（依赖方向：编排 → 存储，
+单向向下；本模块不 import 编排层）。
 
 store.jsonl 由脚本持有，模型不可见；每行一条、追加原子，崩溃最多丢最后一个批次。
 """
 import json
 from pathlib import Path
+from typing import Optional
 
-from postprocess import GRANULARITY_LEVELS, check_grounded, leaf_node
+from evidence import check_grounded
+
+# existing_urls 增量缓存：record_sources 每批全量读 store 建幂等集合，批数×记录数
+# 增长时是 O(n²)；按 (路径, mtime) 缓存——文件被本进程以外改动（mtime 变化）时
+# 自然失效重建（本服务是唯一写入方，正常场景命中缓存）。
+_url_cache: dict[str, tuple[int, set[str]]] = {}
+
+
+def leaf_node(category_path: str, nodes: list[str]) -> Optional[str]:
+    """取 category_path 对应的叶子节点：节点名的最长后缀匹配（节点名本身可含 -）。"""
+    matches = [n for n in nodes if category_path == n or category_path.endswith("-" + n)]
+    return max(matches, key=len) if matches else None
+
+
+# granularity 仅归一化与计数、不拒绝（产量优先，粒度/子站问题由后续
+# "站点与子站合并"功能处理）；站点级已并入合集级，存量按非法值归一化。
+GRANULARITY_LEVELS = ("合集级", "单篇级")
 
 
 def append_records(store_path: Path, records: list[dict]) -> int:
@@ -46,6 +67,21 @@ def load_store(store_path: Path) -> tuple[list[dict], int]:
     return records, bad
 
 
+def _existing_urls(store_path: Path) -> set[str]:
+    """读 store 全部裸 URL（带 mtime 缓存）——幂等跳过的判断集合。"""
+    key = str(store_path)
+    if not store_path.exists():
+        return set()
+    mtime = store_path.stat().st_mtime_ns
+    cached = _url_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    records, _ = load_store(store_path)
+    urls = {r.get("url") for r in records}
+    _url_cache[key] = (mtime, urls)
+    return urls
+
+
 def record_sources(store_path: Path, entries: list, evidence_path: Path,
                    nodes: list[str]) -> dict:
     """批次入库即验：逐条校验后追加进 store。返回 {accepted, skipped, rejected}。
@@ -59,8 +95,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
     rejected: list[dict] = []
     evidence_ok = evidence_path.exists()
     evidence = evidence_path.read_text(encoding="utf-8", errors="replace") if evidence_ok else ""
-    existing_records, _ = load_store(store_path) if store_path.exists() else ([], 0)
-    existing_urls = {r.get("url") for r in existing_records}
+    existing_urls = _existing_urls(store_path)
 
     for i, e in enumerate(entries):
         name = str(e.get("name") or "") if isinstance(e, dict) else ""
@@ -95,6 +130,9 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
         })
         existing_urls.add(url)
     append_records(store_path, accepted)
+    if accepted:
+        # 追加改变了文件 mtime——用新 mtime 更新缓存，保持幂等集合与磁盘一致
+        _url_cache[str(store_path)] = (store_path.stat().st_mtime_ns, existing_urls)
     return {"accepted": len(accepted), "skipped": skipped, "rejected": rejected}
 
 

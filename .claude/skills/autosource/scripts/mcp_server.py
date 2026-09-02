@@ -1,4 +1,4 @@
-"""AutoSource MCP stdio 服务：四工具（docs/05 存储架构改造）。
+"""AutoSource MCP stdio 服务：四工具（docs/04 存储架构改造）。
 
 record_sources(run_dir, entries)  — 批次入库即验（store.py.record_sources）
 record_search(run_dir, entries)   — 搜索日志批量追加（store.py.record_search）
@@ -9,8 +9,8 @@ run_dir 为初始化 --prepare 打印的运行目录（outputs/run_{时间戳}/�
 manifest.json（阶段 0-1 由模型 Write）与 store.jsonl（本服务持有、模型不可见）
 都在 run_dir 内。分工：模型只传语义判断结果，持久化/校验/对账/折叠全部在本服务。
 
-模型最大单次输出 = record 批次（一个节点条目量 15-25KB），离截断边界约 10 倍——
-写入截断在机制上不可能发生（docs/05 §2）。
+模型最大单次输出 = record 批次（一个节点条目量 15-25KB）——写入截断在机制上
+不可能发生（docs/04 §2）。
 """
 import json
 import os
@@ -44,32 +44,39 @@ def _evidence_path(run_dir: str | Path) -> Path:
     return d / "evidence.jsonl"
 
 
-def self_check(run_dir: str | Path | None = None) -> list[str]:
-    """存储机制装配层自检：返回问题列表（空 = 通过）。
+def self_check(run_dir: str | Path | None = None) -> list[dict]:
+    """存储机制装配层自检：返回结构化问题列表 [{"code", "message"}]（空 = 通过）。
 
-    2026-08-31 首轮实测教训：PROJECT_ROOT off-by-one 使 store 与证据留痕全部
-    错位，18 条落库被拒才暴露，且运行模型被 deny 挡住无法看盘、只能推测"hook
-    未生效"。自检把装配层故障提前到首次工具调用，点名报错（自带路径与原因）：
+    code 是契约（调用方按 code 过滤，不按文案）：project_root / session_id /
+    evidence_missing。2026-08-31 首轮实测教训：PROJECT_ROOT off-by-one 使 store 与
+    证据留痕全部错位，18 条落库被拒才暴露，且运行模型被 deny 挡住无法看盘、只能
+    推测"hook 未生效"。自检把装配层故障提前到首次工具调用，点名报错：
     ① 项目根锚定错误；② hook 进程依赖的会话 ID 环境变量缺失（hook 靠它按
     .session_id 标记定位运行目录）；③（传入 run_dir 时）证据文件缺失——
     hook 未生效，或未先执行 --prepare。
     """
-    problems = []
+    problems: list[dict] = []
     anchor = PROJECT_ROOT / ".claude" / "skills" / "autosource" / "scripts" / "mcp_server.py"
     if not anchor.is_file():
-        problems.append(
-            f"项目根解析错误：{PROJECT_ROOT}（应解析到仓库根、含 "
-            ".claude/skills/autosource/scripts/mcp_server.py；请检查 PROJECT_ROOT 推导）")
+        problems.append({
+            "code": "project_root",
+            "message": (f"项目根解析错误：{PROJECT_ROOT}（应解析到仓库根、含 "
+                        ".claude/skills/autosource/scripts/mcp_server.py；请检查 PROJECT_ROOT 推导）"),
+        })
     if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
-        problems.append(
-            "hook 进程依赖的 CLAUDE_CODE_SESSION_ID 环境变量缺失——hook 按会话"
-            "标记定位运行目录写入证据，缺失会回退旧共享路径、证据进不了运行目录")
+        problems.append({
+            "code": "session_id",
+            "message": ("hook 进程依赖的 CLAUDE_CODE_SESSION_ID 环境变量缺失——hook 按会话"
+                        "标记定位运行目录写入证据，缺失会回退旧共享路径、证据进不了运行目录"),
+        })
     if run_dir is not None:
         evidence = _evidence_path(run_dir)
         if not evidence.exists():
-            problems.append(
-                f"证据留痕不存在：{evidence}（PostToolUse hook 未生效，或未先执行"
-                " --prepare——hook 按 .session_id 标记写入运行目录）")
+            problems.append({
+                "code": "evidence_missing",
+                "message": (f"证据留痕不存在：{evidence}（PostToolUse hook 未生效，或未先执行"
+                            " --prepare——hook 按 .session_id 标记写入运行目录）"),
+            })
     return problems
 
 
@@ -79,8 +86,8 @@ def _ensure_healthy(run_dir: str | Path) -> None:
     global _self_check_problems
     if _self_check_problems is None:
         _self_check_problems = self_check()
-    problems = list(_self_check_problems)
-    problems += [p for p in self_check(run_dir) if "证据留痕不存在" in p]
+    problems = [p["message"] for p in _self_check_problems]
+    problems += [p["message"] for p in self_check(run_dir) if p["code"] == "evidence_missing"]
     if problems:
         raise RuntimeError(
             "存储机制自检失败，按失败路径中止本次运行（先修装配层再重跑）：\n"
@@ -103,9 +110,9 @@ def _manifest_nodes(run_dir: Path) -> list[str]:
 def record_sources(run_dir: str, entries: list) -> str:
     """把一批新增数据源条目落库（入库即验）。
 
-    何时调用：每完成一批搜索并提取新条目后调用一次——阶段 3/4 每节点完成时
-    一批（该节点 12 次搜索的全部新增条目），阶段 2 不需要（清单核对结果走
-    manifest，见 SKILL 阶段 5）。条目字段：name/category_path/source_type/
+    何时调用：每完成一批搜索并提取新条目后调用一次——阶段 3 每节点基底 16 次
+    搜索完成后一批、扩充每批 4 次再落一次；阶段 4 每节点收敛后一批；阶段 2 不需要
+    （清单核对结果走 manifest，见 SKILL 阶段 5）。条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
 

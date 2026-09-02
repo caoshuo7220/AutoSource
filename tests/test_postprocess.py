@@ -1,4 +1,4 @@
-"""postprocess.py 与 log_tool.py 的单元测试。"""
+"""postprocess.py 与 evidence_hook.py 的单元测试。"""
 import csv
 import io
 import json
@@ -17,7 +17,7 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity,
                          deduplicate, default_evidence_log, finalize_report, fold,
-                         leaf_node, prepare_run_dir, query_in_evidence, run,
+                         leaf_node, prepare_run_dir, query_in_evidence, run_pipeline,
                          run_evidence_log, sanitize_domain, slice_evidence,
                          strip_citation_anchors)
 
@@ -313,7 +313,7 @@ class TestMultilangAudit:
         from postprocess import _print_summary
         buf = io.StringIO()
         with redirect_stdout(buf):
-            summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+            summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                           evidence_log=str(ev))
             _print_summary(summary)
         assert not any(k.startswith("multilang") for k in summary)
@@ -330,7 +330,7 @@ class TestRun:
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
 
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         outdir = tmp_path / "out" / "算力服务器_2026-08-13-183045"
@@ -377,7 +377,7 @@ class TestRun:
     def test_keep_raw(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
         ev = write_evidence(tmp_path, base_data()["sources"])
-        run(str(raw), out_dir=str(tmp_path / "out"), keep_raw=True, now=FIXED_NOW,
+        run_pipeline(str(raw), out_dir=str(tmp_path / "out"), keep_raw=True, now=FIXED_NOW,
             evidence_log=str(ev))
         assert raw.exists()
         assert ev.exists()
@@ -385,10 +385,10 @@ class TestRun:
     def test_outdir_collision_gets_suffix(self, tmp_path):
         raw1 = write_raw(tmp_path, base_data())
         ev1 = write_evidence(tmp_path, base_data()["sources"])
-        run(str(raw1), out_dir=str(tmp_path / "out"), now=FIXED_NOW, evidence_log=str(ev1))
+        run_pipeline(str(raw1), out_dir=str(tmp_path / "out"), now=FIXED_NOW, evidence_log=str(ev1))
         raw2 = write_raw(tmp_path, base_data())
         ev2 = write_evidence(tmp_path, base_data()["sources"])
-        summary = run(str(raw2), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw2), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev2))
         assert summary["outdir"].endswith("算力服务器_2026-08-13-183045_1")
 
@@ -398,7 +398,7 @@ class TestRun:
         data["sources"][0]["description"] = "多行\n描述"
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
@@ -412,7 +412,7 @@ class TestRun:
         del data["nodes"]
         raw = write_raw(tmp_path, data)
         try:
-            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
+            run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW)
             assert False, "should have raised ValueError"
         except ValueError as e:
             assert "nodes" in str(e)
@@ -424,7 +424,7 @@ class TestRun:
                                 "description": "d"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["unmatched"] == 1
@@ -437,7 +437,7 @@ class TestRun:
         data["sources"] = []
         raw = write_raw(tmp_path, data)
         # 无候选时不要求证据留痕
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(tmp_path / "不存在.jsonl"))
 
         assert summary["kept"] == 0
@@ -454,7 +454,7 @@ class TestRun:
                                 "description": "编造的 URL"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, real_sources)  # 证据只含真实 URL，不含编造的
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["total_found"] == 3
@@ -479,7 +479,7 @@ class TestRun:
                                 "description": "单份 PDF", "reason": "x"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["kept"] == 3
@@ -496,7 +496,7 @@ class TestRun:
                                 "reason": "团体标准文件，无合集可替代"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["kept"] == 3
@@ -515,7 +515,7 @@ class TestRun:
         data["knowledge"] = [kn]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [kn])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["kept"] == 3
@@ -530,7 +530,7 @@ class TestRun:
         data["knowledge"] = [kn]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [kn])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["kept"] == 3
@@ -546,7 +546,7 @@ class TestRun:
                                 "description": "d", "reason": "r"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["ungrounded"] == 0
@@ -558,7 +558,7 @@ class TestRun:
     def test_missing_evidence_log_raises(self, tmp_path):
         raw = write_raw(tmp_path, base_data())
         try:
-            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+            run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                 evidence_log=str(tmp_path / "不存在.jsonl"))
             assert False, "should have raised FileNotFoundError"
         except FileNotFoundError as e:
@@ -587,7 +587,7 @@ class TestKnowledge:
                                   "note": "未找到官方入口"}]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [kn])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["list_verified"] == "1/2"
@@ -607,7 +607,7 @@ class TestKnowledge:
         data["knowledge"] = [kn]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [kn])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -620,7 +620,7 @@ class TestKnowledge:
         data["knowledge"] = [self._knowledge_item(url="")]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["list_verified"] == "0/1"
@@ -632,7 +632,7 @@ class TestKnowledge:
         data["knowledge"] = [self._knowledge_item(name="")]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["incomplete"] == 1
@@ -647,7 +647,7 @@ class TestKnowledge:
         data["knowledge"] = [kn]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [kn])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["list_verified"] == "1/1"
@@ -661,7 +661,7 @@ class TestKnowledge:
         data = base_data()
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["knowledge_missing"] is True
@@ -673,7 +673,7 @@ class TestKnowledge:
         data["knowledge"] = {"name": "不是列表"}
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["list_verified"] == "0/0"
@@ -684,7 +684,7 @@ class TestKnowledge:
         data["knowledge"] = []
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["knowledge_missing"] is True
@@ -695,7 +695,7 @@ class TestKnowledge:
         data["knowledge"] = [self._knowledge_item(), "垃圾条目"]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"] + [data["knowledge"][0]])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["list_verified"] == "1/1"  # 非 dict 不计入分母
@@ -706,7 +706,7 @@ class TestKnowledge:
         data["knowledge"] = [kn]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])  # 证据里没有清单项 URL
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["ungrounded"] == 1
@@ -748,7 +748,7 @@ class TestJournal:
         data["journal"] = self._journal(queries)
         raw = write_raw(tmp_path, data)
         ev = write_evidence_queries(tmp_path, queries + ["test"], data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["journal_count"] == 2
@@ -785,7 +785,7 @@ class TestJournal:
         from postprocess import _print_summary
         buf = io.StringIO()
         with redirect_stdout(buf):
-            summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+            summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                           evidence_log=str(ev))
             _print_summary(summary)
         assert summary["verification_mismatch"] is True
@@ -807,7 +807,7 @@ class TestJournal:
         ]  # claims=2 >= 1
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, ["https://a.com/doc"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
         assert summary["verification_mismatch"] is False
 
@@ -815,7 +815,7 @@ class TestJournal:
         data = base_data()
         raw = write_raw(tmp_path, data)
         ev = write_evidence_queries(tmp_path, [], data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
         assert summary["verification_mismatch"] is False
 
@@ -825,7 +825,7 @@ class TestJournal:
         data["journal"] = self._journal(["不存在的查询词"])
         raw = write_raw(tmp_path, data)
         ev = write_evidence_queries(tmp_path, ["另一个查询"], data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
@@ -836,7 +836,7 @@ class TestJournal:
         data = base_data()
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["journal_count"] == 0
@@ -848,7 +848,7 @@ class TestJournal:
         raw = write_raw(tmp_path, data)
         ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official", "test"],
                                     data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["journal_count"] == 1
@@ -862,7 +862,7 @@ class TestJournal:
         data["journal"] = self._journal(["某查询"])
         raw = write_raw(tmp_path, data)
         try:
-            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+            run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                 evidence_log=str(tmp_path / "不存在.jsonl"))
             assert False, "should have raised FileNotFoundError"
         except FileNotFoundError as e:
@@ -876,7 +876,7 @@ class TestJournal:
         raw = write_raw(tmp_path, data)
         ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"])
         try:
-            run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+            run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                 evidence_log=str(ev))
             assert False, "should have raised ValueError"
         except ValueError as e:
@@ -890,7 +890,7 @@ class TestJournal:
         data["journal"] = self._journal(["IEEE"])
         raw = write_raw(tmp_path, data)
         ev = write_evidence_queries(tmp_path, ["IEEE 802.3 official"], data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
@@ -935,7 +935,7 @@ class TestQueryScope:
         ]
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, ["https://a.com/doc"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
         assert summary["verification_mismatch"] is False  # claims=1 == merged=1，缩写不误报
         assert summary["scope_framework"] == {"count": 1, "extracted": 2}
@@ -975,7 +975,7 @@ class TestQueryScope:
         from postprocess import _print_summary
         buf = io.StringIO()
         with redirect_stdout(buf):
-            summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+            summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                           evidence_log=str(ev))
             _print_summary(summary)
         # 验证搜索行不参与分类
@@ -1054,7 +1054,7 @@ class TestArchives:
             for q in queries]
         raw = write_raw(tmp_path, data)
         ev = self._evidence_mixed(tmp_path, queries, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
@@ -1084,7 +1084,7 @@ class TestArchives:
         data = base_data()
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         outdir = Path(summary["outdir"])
@@ -1099,7 +1099,7 @@ class TestArchives:
                                 "description": "编造的 URL"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, real_sources)
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         # 被拒仍产出完整 bundle（不落被拒文件）；raw/留痕正常清理
@@ -1139,7 +1139,7 @@ class TestLineage:
         raw = write_raw(tmp_path, data)
         ev = self._evidence_results(tmp_path, {"q1": [
             "https://a.com/doc", "https://b.com/data", "https://c.com/other"]})
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["lineage_rows"] == 3
@@ -1176,7 +1176,7 @@ class TestLineage:
                  "tool_response": {"query": "q1",
                                    "summary": "see https://x.com/deep for more"}},
                 ensure_ascii=False) + "\n")
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(p))
 
         assert summary["lineage_rows"] == 1
@@ -1193,7 +1193,7 @@ class TestLineage:
         raw = write_raw(tmp_path, data)
         ev = self._evidence_results(tmp_path, {
             "q1": ["https://a.com/doc"], "q2": ["https://a.com/doc", "https://b.com/data"]})
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -1211,7 +1211,7 @@ class TestLineage:
         raw = write_raw(tmp_path, data)
         ev = self._evidence_results(tmp_path, {
             "q1": ["https://a.com/doc#1", "https://b.com/data"]})
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -1228,7 +1228,7 @@ class TestLineage:
         raw = write_raw(tmp_path, data)
         ev = self._evidence_results(tmp_path, {
             "q1": ["https://a.com/doc#1"], "q2": ["https://a.com/doc#1", "https://b.com/data"]})
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -1258,7 +1258,7 @@ class TestLineage:
                 {"tool_name": "WebSearch", "tool_input": {"query": "q1"},
                  "tool_response": {"query": "q1", "results": []}},
                 ensure_ascii=False) + "\n")
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(p))
 
         assert summary["lineage_rows"] == 0
@@ -1279,7 +1279,7 @@ class TestUrlHygiene:
                                 "reason": "r"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
@@ -1305,7 +1305,7 @@ class TestUrlHygiene:
                     {"tool_name": "WebSearch", "tool_input": {"query": "test"},
                      "tool_response": {"results": [{"url": s["url"]}]}},
                     ensure_ascii=False) + "\n")
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(p))
 
         lineage_csv = next((Path(summary["outdir"]) / "intermediate").glob("*溯源.csv"))
@@ -1320,7 +1320,7 @@ class TestRunResilience:
         data["sources"] = {"不是": "列表"}
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, base_data()["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
 
         assert summary["sources_broken"] is True
@@ -1371,7 +1371,7 @@ class TestEvidenceEncoding:
                            "tool_response": {"results": [{"url": s["url"],
                                                            "title": s.get("name", "")}]}}
                 f.write(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
-        summary = run(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(p))
 
         assert summary["kept"] == 2
@@ -1410,7 +1410,7 @@ class TestPreparedRunDirFlow:
         raw = run_dir / "raw.json"
         raw.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         evidence = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path), evidence_log=str(evidence),
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path), evidence_log=str(evidence),
                       now=FIXED_NOW)
         return summary, run_dir
 
@@ -1443,13 +1443,13 @@ class TestPreparedRunDirFlow:
         data = base_data()
         raw = write_raw(tmp_path, data)
         evidence = write_evidence(tmp_path, data["sources"])
-        summary = run(str(raw), out_dir=str(tmp_path), evidence_log=str(evidence),
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path), evidence_log=str(evidence),
                       now=FIXED_NOW)
         assert summary["outdir"].endswith("算力服务器_2026-08-13-183045")
         assert not (tmp_path / "raw.json").exists()
 
 
-class TestLogTool:
+class TestEvidenceHook:
     def test_appends_hook_payload(self, tmp_path):
         log = tmp_path / "log.jsonl"
         payload = json.dumps(
@@ -1457,7 +1457,7 @@ class TestLogTool:
              "tool_response": {"results": [{"url": "https://a.com", "title": "结果"}]}},
             ensure_ascii=False)
         result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "log_tool.py"), str(log)],
+            [sys.executable, str(SKILL_DIR / "evidence_hook.py"), str(log)],
             input=payload, capture_output=True, encoding="utf-8", timeout=30)
         assert result.returncode == 0
         lines = log.read_text(encoding="utf-8").strip().splitlines()
@@ -1468,7 +1468,7 @@ class TestLogTool:
     def test_malformed_input_silently_passes(self, tmp_path):
         log = tmp_path / "log.jsonl"
         result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "log_tool.py"), str(log)],
+            [sys.executable, str(SKILL_DIR / "evidence_hook.py"), str(log)],
             input="not json", capture_output=True, encoding="utf-8", timeout=30)
         assert result.returncode == 0
         assert not log.exists()
@@ -1573,12 +1573,12 @@ class TestSessionIsolatedEvidenceLog:
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
         assert default_evidence_log() == "outputs/search_log.jsonl"
 
-    def test_log_tool_without_arg_writes_session_file(self, tmp_path):
+    def test_evidence_hook_without_arg_writes_session_file(self, tmp_path):
         payload = json.dumps(
             {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
         env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-1")
         result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "log_tool.py")],
+            [sys.executable, str(SKILL_DIR / "evidence_hook.py")],
             input=payload, capture_output=True, encoding="utf-8", timeout=30,
             cwd=str(tmp_path), env=env)
         assert result.returncode == 0
@@ -1616,7 +1616,7 @@ class TestRunScopedEvidence:
                         "tool_response": {"results": [{"url": "https://x.com/list"}]}},
                        ensure_ascii=False) + "\n",
             encoding="utf-8")
-        summary = run(str(run_dir / "raw.json"), out_dir=str(tmp_path / "outputs"),
+        summary = run_pipeline(str(run_dir / "raw.json"), out_dir=str(tmp_path / "outputs"),
                       now=FIXED_NOW)
         assert summary["kept"] == 2
         outdir = Path(summary["outdir"])
@@ -1633,7 +1633,7 @@ class TestRunScopedEvidence:
         assert run_evidence_log(tmp_path) is None  # 非 run_ 目录不适用
         assert run_evidence_log(run_dir.parent / "run_empty") is None
 
-    def test_log_tool_writes_run_scoped_evidence(self, tmp_path):
+    def test_evidence_hook_writes_run_scoped_evidence(self, tmp_path):
         run_dir = tmp_path / "outputs" / "run_2026-01-01-000000"
         run_dir.mkdir(parents=True)
         (run_dir / ".session_id").write_text("sess-run-ev", encoding="utf-8")
@@ -1641,7 +1641,7 @@ class TestRunScopedEvidence:
             {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
         env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-run-ev")
         result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "log_tool.py")],
+            [sys.executable, str(SKILL_DIR / "evidence_hook.py")],
             input=payload, capture_output=True, encoding="utf-8", timeout=30,
             cwd=str(tmp_path), env=env)
         assert result.returncode == 0
@@ -1650,7 +1650,7 @@ class TestRunScopedEvidence:
 
 
 class TestFinalizeFold:
-    """docs/05 存储改造：finalize 折叠（store+manifest → 等价 raw → 全链路）。"""
+    """docs/04 存储改造：finalize 折叠（store+manifest → 等价 raw → 全链路）。"""
 
     FOLD_NODES = ["AI训练GPU", "图形渲染GPU", "服务器CPU"]
 
@@ -1686,7 +1686,7 @@ class TestFinalizeFold:
         return p
 
     def test_fold_equivalent_to_run(self, tmp_path):
-        """相同输入：fold(store+manifest) 与 run(raw.json) 的交付物逐文件一致。"""
+        """相同输入：fold(store+manifest) 与 run_pipeline(raw.json) 的交付物逐文件一致。"""
         queries = ["GPU 排名 数据库"]
         sources = [{"name": "A", "category_path": "算力服务器-GPU服务器-AI训练GPU",
                     "source_type": "官方文档", "url": "https://a.com/doc",
@@ -1715,15 +1715,15 @@ class TestFinalizeFold:
                          "source_type": "官方文档", "url": "https://a.com/doc",
                          "description": "d", "reason": "r"}],
         })
-        run_summary = run(str(raw), out_dir=str(tmp_path / "outputs"),
+        run_summary = run_pipeline(str(raw), out_dir=str(tmp_path / "outputs"),
                           evidence_log=str(evidence2), now=FIXED_NOW)
 
         assert fold_summary["kept"] == run_summary["kept"]
         # raw_input.json 已取消（2026-08-31）：fold 与 CLI 路径交付物逐字节等价即可
-        for name in [f"算力服务器_2026-08-13-183045_数据源清单.csv",
-                     f"intermediate/算力服务器_2026-08-13-183045_stats.csv",
-                     f"intermediate/算力服务器_2026-08-13-183045_搜索日志.csv",
-                     f"intermediate/算力服务器_2026-08-13-183045_溯源.csv"]:
+        for name in ["算力服务器_2026-08-13-183045_数据源清单.csv",
+                     "intermediate/算力服务器_2026-08-13-183045_stats.csv",
+                     "intermediate/算力服务器_2026-08-13-183045_搜索日志.csv",
+                     "intermediate/算力服务器_2026-08-13-183045_溯源.csv"]:
             fold_file = Path(fold_summary["outdir"]) / name
             run_file = Path(run_summary["outdir"]) / name
             assert fold_file.read_text(encoding="utf-8-sig" if name.endswith(".csv") else "utf-8") \

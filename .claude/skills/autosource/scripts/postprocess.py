@@ -1,32 +1,32 @@
-"""AutoSource 后处理流水线：证据校验 → 清单并入 → 去重 → 导出 CSV → 效果统计 → 清理。
+"""AutoSource 后处理流水线：证据终检 → 清单并入 → 去重 → 导出 CSV → 统计 → 清理。
 
-分工原则：编排层只负责语义环节且不写任何文件；raw.json 由搜索层按契约
-直接写入（唯一 LLM 中间产物），本脚本保证其余所有确定性环节：
+分工原则：LLM 只做语义判断（拆解/清单/搜索/提取），一切确定性环节由脚本保证。
+当前契约（docs/04 存储架构改造，2026-08-31 验收）：
+- 数据落盘走 MCP 四工具（store.jsonl，见 store.py），元数据走 manifest.json
+  （模型 Write 两次：阶段 0-1 声明版、阶段 5 最终核对态）
+- 收尾由 finalize 工具调用本模块 fold()——读 store + manifest 组装等价
+  raw.json 后复用 run_pipeline() 全链路（逻辑一行不改，只换入口）
+- 旧 raw.json CLI 路径保留兼容（历史轮次/排障）
 
-- 证据校验（grounded check）：候选 URL 必须作为完整 URL 出现在证据留痕中（留痕由
-  PostToolUse hook 在每次 WebSearch 时由系统自动记录，记录过程在
-  harness 侧、模型不参与），否则拒绝该条并计数——从结构上杜绝模型**意外**编造
-  URL（转写错误、凭记忆补写；边界匹配，截短为父路径/裸域名不放行）。
-  留痕文件本身无写保护，该机制不防对抗性篡改。
-  被拒条目不进入清单（明细打印在 stdout、计数见 stdout 汇总），
-  不影响其余产出，运行到此结束（无修正重跑环节）
-- 粒度声明归一化与计数（不拒绝）：granularity 缺失或非法视为合集级——
-  产量优先，粒度/子站问题由后续子站合并功能处理
-- 知识清单：verified=true 且字段齐全的清单项自动并入 sources（LLM 不手工复制）；
-  计算清单验证率（自洽性指标），未验证清单进 stdout 报告
-- 搜索日志：journal 的每个查询词必须作为完整 JSON 字符串值精确出现在证据留痕中
-  （截短/改写即标注"证据缺失"），生成 搜索日志.csv 供人工复盘
-- 输出目录与时间戳由脚本生成（模型没有时钟，禁止模型编造）
-- 域名 + 名称联合去重
-- 用 csv 标准库导出数据源清单（UTF-8 BOM，转义交给标准库）；写入时剥离 URL
-  尾部的引用序号锚点（#数字，markdown 引用记号；单词锚点保留）
-- 计算各节点候选数与体裁分布，写 stats CSV（纯清单统计表：每节点一行 + 末尾总计行）
-- 数据血缘：从切片留痕与最终收录 join 生成 溯源.csv（每行一条搜索结果，
-  正查"返回了什么、收录了哪几条"、反查"出自哪个搜索词"），数据源清单加
-  "来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
-- 按 run bundle 结构归档：交付物在运行目录根（数据源清单；分析报告.md 由
-  模型收尾时写入），`intermediate/` 子目录放排障材料与对比材料（stats、
-  本运行切片后的证据留痕、搜索日志、溯源）；随后删除会话临时文件
+run_pipeline() 全链路：
+- 证据终检（evidence.check_grounded）：候选 URL 必须作为完整 URL 出现在证据
+  留痕中（PostToolUse hook 系统记录，边界匹配，截短不放行）——结构上杜绝
+  意外编造（转写错误/凭记忆补 URL）；留痕无写保护，不防对抗性篡改。
+  入库即验由 store.record_sources 承担（当场拒绝、可修正重传）；收尾终检兜底
+- 粒度声明归一化与计数（不拒绝——产量优先，粒度/子站问题由后续子站合并处理）
+- 知识清单：verified=true 且字段齐全的清单项并入 sources（LLM 不手工复制）；
+  清单验证率（自洽性指标）与未验证清单进 stdout
+- 域名 + 名称联合去重；CSV 用标准库导出（UTF-8 BOM，转义交给标准库），
+  写入时剥离 URL 尾部的引用序号锚点（#数字，markdown 引用记号）
+- 各节点候选数与体裁分布写 stats CSV（纯清单统计表：每节点一行 + 总计行）
+- 数据血缘（lineage.py）：从切片留痕与最终收录 join 生成溯源.csv，数据源清单
+  加"来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
+- 按 run bundle 结构归档：交付物在运行目录根（数据源清单；分析报告由模型
+  收尾时写入），intermediate/ 放排障与对比材料；随后删除会话临时文件
+
+模块结构（2026-09-02 拆分）：evidence.py（证据链与留痕）、lineage.py（血缘与
+归因）、report.py（报告注入与命名）、本模块（流水线编排 fold/run + CLI）；
+store.py 与 mcp_server.py 按需引用，导入面经本模块重导出保持兼容。
 
 用法:
     python postprocess.py --prepare                    # 流程开始：预留唯一运行目录并打印路径
@@ -35,12 +35,7 @@
     python postprocess.py outputs/raw.json ...         # 兼容旧固定路径（父目录非 run_ 时走原逻辑）
     可选参数: [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
 
-新契约（docs/05 存储架构改造）：数据落盘走 MCP 工具 record_sources / record_search
-（store.jsonl，见 store.py），元数据走 manifest.json（模型 Write 两次），收尾由
-finalize 工具调用本模块的 fold()——读 store + manifest 组装等价 raw.json 后复用
-run() 全链路（逻辑一行不改，只换入口）。
-
-raw.json 结构:
+raw.json 结构（fold 组装等价结构；CLI 兼容路径由调用方提供）:
     {
       "domain": "领域词（用于目录命名）",
       "nodes": ["全部叶子节点"],
@@ -74,40 +69,40 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+from evidence import (RUN_DIR_RE, check_grounded, default_evidence_log,
+                      extract_strings, query_in_evidence, run_evidence_log,
+                      slice_evidence, strip_citation_anchors)
+from lineage import build_lineage, first_query_by_source, write_lineage_csv
+from report import finalize_report
+# 条目粒度契约与节点推导归存储层（store），编排层从这里取——依赖方向单向向下
+# （mcp_server → store/postprocess → evidence/lineage/report，无环）。
+from store import GRANULARITY_LEVELS, leaf_node, load_store
+
+# 重导出（test_postprocess 的导入面）：query_in_evidence 本模块未用，仅作兼容出口。
+__all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicate",
+           "default_evidence_log", "finalize_report", "fold", "leaf_node",
+           "prepare_run_dir", "query_in_evidence", "run_pipeline", "run_evidence_log",
+           "sanitize_domain", "slice_evidence", "strip_citation_anchors"]
+
+
+class AutoSourceError(ValueError):
+    """业务规则失败（区别于输入损坏的 ValueError）：搜索过却零候选、防截断哨兵等。
+
+    继承 ValueError 保持既有调用方（CLI 捕获、测试断言）兼容；需要区分业务失败
+    与输入错误时可按本类型精确捕获。
+    """
+
 SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明", "来源搜索"]
-LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
-                      "收录条目名称", "收录理由", "备注"]
 STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失"]
-
-DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
-
-
-def default_evidence_log() -> str:
-    """默认证据留痕路径：按会话隔离（并行运行互不删除对方留痕）。
-
-    与 log_tool.py 的命名规则一致：hook 按 CLAUDE_CODE_SESSION_ID 写
-    会话文件，postprocess 读同一会话文件、也只删同一会话文件——并行
-    运行的证据链互不干扰（2026-08-26 实证：共享文件被并行运行的
-    postprocess 删除，另一运行证据链断裂）。
-    """
-    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if session_id:
-        return f"outputs/search_log_{session_id}.jsonl"
-    return DEFAULT_EVIDENCE_LOG
-
-# prepare 预留的运行目录：run_{时间戳}（收尾时由脚本重命名为 {领域词}_{时间戳}）。
-# 路径由脚本生成、每次运行唯一——连续/并发运行的 raw.json 不会互相覆盖
-# （旧固定路径 outputs/raw.json 仍兼容，父目录不匹配本模式时走原逻辑）。
-RUN_DIR_RE = re.compile(r"^run_(\d{4}-\d{2}-\d{2}-\d{6})(_\d+)?$")
 
 
 def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
     """预留本次运行目录（run_{时间戳}/，同秒加 _N 后缀）并返回路径字符串。
 
-    流程开始时调用（--prepare）：目录在流程开头即存在，阶段 5 把 raw.json
-    写入其中，收尾时脚本读 raw.json 的领域词把目录重命名为最终交付目录。
-    同时写入 .session_id 会话标记——hook 按标记把证据留痕写进本目录的
+    流程开始时调用（--prepare）：目录在流程开头即存在，阶段 0-1 把 manifest.json
+    写入其中，收尾时 fold 组装等价 raw.json、脚本读领域词把目录重命名为最终交付
+    目录。同时写入 .session_id 会话标记——hook 按标记把证据留痕写进本目录的
     evidence.jsonl（运行级归属，outputs/ 顶层零平铺文件）；收尾时随目录
     清理。无会话 ID 环境变量（手动调用）则不写标记、留痕走旧共享路径。
     """
@@ -123,108 +118,6 @@ def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
     if session_id:
         (run_dir / ".session_id").write_text(session_id, encoding="utf-8")
     return str(run_dir)
-
-
-def run_evidence_log(run_dir: Path) -> Optional[Path]:
-    """运行目录内的证据留痕（运行级归属，2026-08-31 分层原则修订）。
-
-    hook 按 .session_id 标记写入 run_*/evidence.jsonl；存在则收尾优先用它，
-    否则回退会话级共享路径（旧流程/未 prepare 场景）。仅对 run_ 前缀目录
-    生效——旧固定路径（outputs/raw.json）不受影响。
-    """
-    if not RUN_DIR_RE.match(run_dir.name):
-        return None
-    p = run_dir / "evidence.jsonl"
-    return p if p.exists() else None
-
-
-def _report_stats_block(outdir: Path):
-    """从交付物 CSV 生成"数据总览"段——报告统计数字由脚本生成、模型不写数字。
-
-    数字口径以 stats.csv（脚本统计）与数据源清单.csv 为准；模型运行记忆中的
-    提取数是去重前口径，与最终清单不一致（2026-08-28 实证：报告体裁数与
-    stats 对不上）。stats.csv 缺失时返回 None（跳过注入，不阻断重命名）。
-    """
-    inter = outdir / "intermediate"
-    stats_csv = next((f for f in inter.iterdir() if f.name.endswith("_stats.csv")), None) \
-        if inter.is_dir() else None
-    if stats_csv is None:
-        return None
-    node_rows = []
-    total_row = None
-    for r in list(csv.reader(open(stats_csv, encoding="utf-8-sig")))[1:]:
-        if not r or not r[0]:
-            continue
-        if r[0] == "总计":
-            total_row = r
-        else:
-            node_rows.append(r)
-    if total_row is None:
-        return None
-    total = total_row[1] if len(total_row) > 1 else "0"
-    type_dist = total_row[2] if len(total_row) > 2 else ""
-    coll = single = 0
-    list_csv = next((f for f in outdir.iterdir() if f.name.endswith("数据源清单.csv")), None)
-    if list_csv:
-        for r in csv.DictReader(open(list_csv, encoding="utf-8-sig")):
-            g = r.get("粒度") or ""
-            if g == "单篇级":
-                single += 1
-            elif g == "合集级":
-                coll += 1
-    return "\n".join([
-        "## 数据总览",
-        "",
-        f"- 数据源总数：{total} 条（合集级 {coll} / 单篇级 {single}）",
-        f"- 分类节点：{len(node_rows)} 个",
-        "- 节点分布：" + "; ".join(f"{r[0]}: {r[1]}" for r in node_rows),
-        "- 体裁分布：" + type_dist,
-        "",
-    ])
-
-
-def _insert_stats_section(text: str, block: str) -> str:
-    """已存在"## 数据总览"标题则替换其内容（到下一个 ## 标题为止），
-    否则在标题行（第一行）之后插入完整段落——两种形态均确定性落地。"""
-    heading = "## 数据总览"
-    idx = text.find(heading)
-    if idx != -1:
-        nxt = text.find("\n## ", idx + len(heading))
-        if nxt == -1:
-            nxt = len(text)
-        return text[:idx] + block + text[nxt:]
-    first_nl = text.find("\n")
-    if first_nl == -1:
-        return text + "\n\n" + block
-    return text[:first_nl + 1] + "\n" + block + text[first_nl + 1:]
-
-
-def finalize_report(outdir: str) -> str:
-    """把模型写入的 分析报告.md 重命名为 {目录名}_分析报告.md，并注入"数据总览"段。
-
-    报告内容由模型生成（语义环节），文件名与统计数字是确定性环节——文件名按
-    目录名派生（与数据源清单/stats 同前缀，模型没有时钟、禁止模型自行命名）；
-    统计数字由本函数从交付物 CSV 生成注入（模型不写数字，见 _report_stats_block）。
-    报告缺失或目标已存在时报错——错误显式化，不让命名漂移静默发生。
-    """
-    d = Path(outdir)
-    report = d / "分析报告.md"
-    if not report.exists():
-        raise FileNotFoundError(f"未找到 分析报告.md: {report}（报告需先由模型写入该文件）")
-    block = _report_stats_block(d)
-    if block:
-        text = _insert_stats_section(report.read_text(encoding="utf-8"), block)
-        report.write_text(text, encoding="utf-8")
-    else:
-        text = _insert_stats_section(report.read_text(encoding="utf-8"),
-                                     "（本次统计注入失败：未找到 stats.csv，见 intermediate/）")
-        report.write_text(text, encoding="utf-8")
-        print("注意: 未找到 stats.csv，已往报告数据总览写入占位提示（统计未注入）")
-    target = d / f"{d.name}_分析报告.md"
-    if target.exists():
-        raise FileExistsError(f"目标文件已存在: {target}")
-    report.rename(target)
-    return str(target)
 
 
 def _domain(url: str) -> str:
@@ -247,246 +140,6 @@ def sanitize_domain(domain: str) -> str:
     """领域词 → 目录名安全前缀：去掉路径非法字符与空白，限长。"""
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", str(domain)).strip("_")
     return cleaned[:30] or "未命名领域"
-
-
-def leaf_node(category_path: str, nodes: list[str]) -> Optional[str]:
-    """取 category_path 对应的叶子节点：节点名的最长后缀匹配（节点名本身可含 -）。"""
-    matches = [n for n in nodes if category_path == n or category_path.endswith("-" + n)]
-    return max(matches, key=len) if matches else None
-
-
-# 证据边界匹配的字符集：RFC 3986 的 unreserved + reserved + "%"。
-# 候选 URL 必须作为完整 URL 出现在留痕中——匹配的前后相邻字符若属于该集合，
-# 说明该匹配只是更长 URL 的前缀（截短为父路径/裸域名），拒绝。
-# 例外：`#` 是 fragment 分隔符（fragment 不发给服务器、不改变资源主体），
-# 候选以 `#` 结尾视为完整资源 URL 放行；`?` 是 query 分隔符（会改变内容），不豁免。
-URL_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%"
-)
-
-
-def _contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
-    """needle 在 haystack 中的出现必须前后不与 boundary_chars 相邻（完整边界匹配）。
-
-    `#` 是 fragment 分隔符（fragment 不改变资源主体）：needle 以 `#` 结尾视为
-    完整资源 URL 而非"更长 URL 的前缀"，放行；`?` 是 query 分隔符（会改变内容），
-    仍按 boundary_chars 严格拒绝。before 侧不豁免。
-    """
-    if not needle:
-        return False
-    start = haystack.find(needle)
-    while start != -1:
-        end = start + len(needle)
-        before = haystack[start - 1] if start > 0 else ""
-        after = haystack[end] if end < len(haystack) else ""
-        after_ok = after not in boundary_chars or after == "#"
-        if before not in boundary_chars and after_ok:
-            return True
-        start = haystack.find(needle, end)
-    return False
-
-
-def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list[dict]]:
-    """证据校验：URL 必须作为完整 URL 出现在证据留痕中。返回 (通过, 被拒)。
-
-    按 RFC 3986 字符集做边界匹配，截短为父路径/裸域名不放行。防的是意外
-    编造（转写错误/凭记忆补 URL）；留痕文件本身无写保护，不防对抗性篡改。
-    """
-    kept: list[dict] = []
-    rejected: list[dict] = []
-    for s in sources:
-        if _contains_bounded(str(s.get("url") or ""), evidence, URL_CHARS):
-            kept.append(s)
-        else:
-            rejected.append(s)
-    return kept, rejected
-
-
-def _collect_strings(node, out: set) -> None:
-    """递归收集 JSON 载荷里的全部字符串值。"""
-    if isinstance(node, str):
-        out.add(node)
-    elif isinstance(node, dict):
-        for value in node.values():
-            _collect_strings(value, out)
-    elif isinstance(node, list):
-        for value in node:
-            _collect_strings(value, out)
-
-
-def extract_strings(evidence: str) -> set:
-    """解析证据留痕 JSONL，收集全部字符串值（供查询词精确比对）。"""
-    strings: set = set()
-    for line in evidence.splitlines():
-        try:
-            _collect_strings(json.loads(line), strings)
-        except ValueError:
-            continue  # 留痕应逐行有效 JSON，容错跳过损坏行
-    return strings
-
-
-def query_in_evidence(query: str, evidence: str) -> bool:
-    """查询词必须作为完整 JSON 字符串值出现在留痕中（精确相等，截短/改写不算）。"""
-    return bool(query) and query in extract_strings(evidence)
-
-
-def _line_query(payload: dict) -> str:
-    """取留痕行的查询词：tool_input.query，缺省时取 tool_response.query。"""
-    tool_input = payload.get("tool_input")
-    if isinstance(tool_input, dict) and tool_input.get("query"):
-        return str(tool_input["query"])
-    tool_response = payload.get("tool_response")
-    if isinstance(tool_response, dict) and tool_response.get("query"):
-        return str(tool_response["query"])
-    return ""
-
-
-def _result_urls(payload: dict) -> list[str]:
-    """提取一次搜索的结构化结果 URL（兼容 results[].url 与 results[].content[].url）。"""
-    urls: list[str] = []
-    results = payload.get("tool_response", {}).get("results")
-    if not isinstance(results, list):
-        return urls
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        if item.get("url"):
-            urls.append(str(item["url"]))
-        content = item.get("content")
-        if isinstance(content, list):
-            for entry in content:
-                if isinstance(entry, dict) and entry.get("url"):
-                    urls.append(str(entry["url"]))
-    return urls
-
-
-def slice_evidence(evidence: str, queries: set[str]) -> tuple[str, int, int]:
-    """按本运行查询词集合切片证据留痕（会话级 → 运行级）。
-
-    只保留 tool_input.query（缺省时取 tool_response.query）命中本运行查询词
-    集合的行；损坏行跳过计数。返回 (切片文本, 保留行数, 跳过行数)。
-    journal 缺行则对应搜索不进切片（如实标注，见 04 手册）。
-    """
-    kept: list[str] = []
-    skipped = 0
-    for line in evidence.splitlines():
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            skipped += 1
-            continue
-        query = _line_query(payload)
-        if query and query in queries:
-            kept.append(line)
-    return ("\n".join(kept) + "\n" if kept else ""), len(kept), skipped
-
-
-def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, str]:
-    """每个收录源 URL（剥引用锚点后）→ 在切片留痕中首次出现行的查询词。
-
-    首次出现 ≈ 发现时刻：验证搜索的首次出现即其定向验证查询，
-    增量发现的首次出现即撞见它的那次搜索。多出处完整真相见溯源表。
-
-    匹配优先走结构化结果解析（与 build_lineage 同路径）：留痕里结果 URL
-    常带 #数字 引用锚点，剥锚点后的子串在原文中会被边界匹配判为"更长 URL
-    的前缀"而丢失归因；结构化路径先剥锚点再比对，与溯源表口径一致。
-    结构化结果中没有的 URL（仅摘要文本提及）走原文边界匹配兜底：
-    先试未剥锚点原形，再试剥锚点形态。
-    """
-    originals = {strip_citation_anchors(str(s.get("url") or "")): str(s.get("url") or "")
-                 for s in kept}
-    wanted = set(originals) - {""}
-    result: dict[str, str] = {}
-    for line in sliced_evidence.splitlines():
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            continue
-        query = _line_query(payload)
-        for url in _result_urls(payload):
-            stripped = strip_citation_anchors(url)
-            if stripped and stripped in wanted and stripped not in result:
-                result[stripped] = query
-        for stripped in wanted - result.keys():
-            if (_contains_bounded(originals[stripped], line, URL_CHARS)
-                    or _contains_bounded(stripped, line, URL_CHARS)):
-                result[stripped] = query
-    return result
-
-
-def build_lineage(kept: list[dict], sliced_evidence: str,
-                  journal_map: dict[str, tuple]) -> list[list]:
-    """生成数据血缘行：每行 = 一次搜索的一条结构化结果。
-
-    journal_map: query → (阶段, 节点, 返回结果数)（journal 首次匹配）。
-    正查（按查询词过滤看"返回了什么、收录了哪几条"）与反查（按条目名称
-    过滤看"出自哪个搜索词"）都由本表承载；收录理由从 kept 源带入；
-    仅出现在摘要文本的收录 URL 走回退行（备注"摘要文本提取"）。
-    未收录结果无排除理由（提取时未记录，已知边界）。
-    """
-    collected: dict[str, tuple[str, str]] = {}
-    for s in kept:
-        stripped = strip_citation_anchors(str(s.get("url") or ""))
-        if stripped and stripped not in collected:
-            collected[stripped] = (str(s.get("name") or ""), str(s.get("reason") or ""))
-
-    rows: list[list] = []
-    covered: set[str] = set()
-    for line in sliced_evidence.splitlines():
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            continue
-        query = _line_query(payload)
-        phase, node, results_count = journal_map.get(query, ("", "", ""))
-        for url in _result_urls(payload):
-            stripped = strip_citation_anchors(url)
-            name, reason = collected.get(stripped, ("", ""))
-            rows.append([phase, node, query, results_count, stripped,
-                         "是" if name else "否", name, reason, ""])
-            if name:
-                covered.add(stripped)
-    # 回退：收录了但不在任何结构化结果数组中的 URL（仅出现在摘要文本）
-    for stripped, (name, reason) in collected.items():
-        if stripped in covered:
-            continue
-        for line in sliced_evidence.splitlines():
-            if not _contains_bounded(stripped, line, URL_CHARS):
-                continue
-            try:
-                payload = json.loads(line)
-            except ValueError:
-                continue
-            query = _line_query(payload)
-            phase, node, results_count = journal_map.get(query, ("", "", ""))
-            rows.append([phase, node, query, "", stripped, "是", name, reason,
-                         "摘要文本提取"])
-            break
-    return rows
-
-
-def write_lineage_csv(path: Path, rows: list[list]) -> None:
-    """写数据血缘 CSV：搜索结果与收录的对应关系（正查/反查）。"""
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(LINEAGE_CSV_HEADER)
-        writer.writerows(rows)
-
-
-# granularity 仅归一化与计数、不拒绝（产量优先，粒度/子站问题由后续
-# "站点与子站合并"功能处理）；站点级已并入合集级，存量按非法值归一化。
-GRANULARITY_LEVELS = ("合集级", "单篇级")
-
-
-# 引用序号锚点：#N（纯数字 fragment），WebSearch 结果以 markdown 引用格式渲染
-# （[标题](url#N)）时带入的记号。fragment 不发给服务器、不改变资源指向，
-# 纯数字锚点是引用记号而非页面锚点——输出前剥离；单词锚点（#content）保留。
-CITATION_ANCHOR_RE = re.compile(r"(#\d+)+$")
-
-
-def strip_citation_anchors(url: str) -> str:
-    """去掉 URL 尾部的引用序号锚点（如 ...pdf#3#1 → ...pdf）。"""
-    return CITATION_ANCHOR_RE.sub("", url)
 
 
 def check_granularity(sources: list[dict]) -> tuple[int, int]:
@@ -647,9 +300,9 @@ def classify_query_scope(query: str, domain: str, nodes: list[str]) -> str:
     return "非框架内"
 
 
-def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
-        evidence_log: Optional[str] = None,
-        now: Optional[datetime] = None) -> dict:
+def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
+                 evidence_log: Optional[str] = None,
+                 now: Optional[datetime] = None) -> dict:
     """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。"""
     raw = Path(raw_path)
     if not raw.exists():
@@ -772,7 +425,7 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
     # 失败路径：搜索过（journal 非空）却 0 候选 → 疑似搜索工具异常，
     # 中止并保留 raw.json 供人工检查（两路方案失败路径，见 docs/02 附录决策集）
     if len(all_candidates) == 0 and journal_rows:
-        raise ValueError(
+        raise AutoSourceError(
             "搜索过（journal 非空）但候选为 0——疑似搜索工具异常，"
             "按方案中止处理；raw.json 已保留供人工检查")
 
@@ -862,11 +515,11 @@ def run(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
 
 def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] = None,
          now: Optional[datetime] = None) -> dict:
-    """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/05）。
+    """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/04）。
 
     store.jsonl 只承载增量条目与搜索日志；manifest.json 承载 domain/nodes/model/
-    knowledge（清单声明与最终核对态）。组装是确定性环节，由脚本完成——复用 run()
-    全链路，逻辑一行不改，只换入口。
+    knowledge（清单声明与最终核对态）。组装是确定性环节，由脚本完成——复用
+    run_pipeline() 全链路，逻辑一行不改，只换入口。
 
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
     违约未调用 record_sources 时失败响亮，不再静默丢数据）。
@@ -884,8 +537,6 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
         raise ValueError(f"manifest.json 损坏: {e}")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("nodes"), list):
         raise ValueError('manifest.json 结构错误：应为 {"domain", "nodes", ...} 对象')
-
-    from store import load_store  # 延迟导入避免循环依赖（store 反向 import postprocess）
 
     store_path = run_dir_path / "store.jsonl"
     records, bad_lines = load_store(store_path) if store_path.exists() else ([], 0)
@@ -914,7 +565,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
         isinstance(k, dict) and k.get("verified") and k.get("name") and k.get("url")
         for k in knowledge_list)
     if not sources and extracted_total > 0 and not knowledge_any_verified:
-        raise ValueError(
+        raise AutoSourceError(
             f"来源未入库：增量/扩量搜索提取合计 {extracted_total} 条，但 store 中来源为 0——"
             "疑似未调用 record_sources；修正后重跑 finalize（运行目录未被重命名）")
 
@@ -929,7 +580,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     raw_path = run_dir_path / "raw.json"
     raw_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    summary = run(str(raw_path), out_dir=out_dir, evidence_log=evidence_log, now=now)
+    summary = run_pipeline(str(raw_path), out_dir=out_dir, evidence_log=evidence_log, now=now)
 
     # run() 成功时目录已整体重命名——store/manifest 随目录移动，路径重新指向
     # 新目录后归档进 intermediate/ 并删除原件（2026-09-01 修复：此前 store 漏归档，
@@ -938,10 +589,8 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     intermediate = outdir / "intermediate"
     store_path = outdir / "store.jsonl"
     manifest_path = outdir / "manifest.json"
-    shutil.copy(store_path, intermediate / "store_input.jsonl")
-    store_path.unlink()
-    shutil.copy(manifest_path, intermediate / "manifest_input.json")
-    manifest_path.unlink()
+    shutil.move(str(store_path), intermediate / "store_input.jsonl")
+    shutil.move(str(manifest_path), intermediate / "manifest_input.json")
     summary["store_bad_lines"] = bad_lines
     return summary
 
@@ -1051,8 +700,8 @@ def main() -> None:
         parser.error("需要 raw.json 路径（或使用 --prepare 预留运行目录）")
 
     try:
-        summary = run(args.raw_json, out_dir=args.out_dir, keep_raw=args.keep_raw,
-                      evidence_log=args.evidence_log)
+        summary = run_pipeline(args.raw_json, out_dir=args.out_dir, keep_raw=args.keep_raw,
+                               evidence_log=args.evidence_log)
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)

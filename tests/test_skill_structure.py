@@ -12,7 +12,8 @@ def test_skill_anatomy_single_skill_with_scripts():
     """标准 skill 目录：SKILL.md 在根、脚本在 scripts/（不散在根目录）。"""
     assert (SKILL_DIR / "SKILL.md").is_file()
     assert (SCRIPTS_DIR / "postprocess.py").is_file()
-    assert (SCRIPTS_DIR / "log_tool.py").is_file()
+    assert (SCRIPTS_DIR / "evidence_hook.py").is_file()
+    assert not (SCRIPTS_DIR / "log_tool.py").exists()  # 2026-09-02 改名 evidence_hook（与 evidence.py 读写分工一眼可见）
 
 
 def test_no_stale_autosource_search_skill():
@@ -102,24 +103,24 @@ def test_incremental_search_count_per_node():
     assert "**自由 10 次**" in SKILL_MD
     assert "**角度池**" in SKILL_MD
     assert "**易失效角度（必须带领域词 + 入口词）**" in SKILL_MD
-    assert "**英文裸后缀同样易失效**" in SKILL_MD  # 2026-08-27：英文 X list 模式返回垃圾页，扩展易失效规则
+    assert "**英文未组合后缀同样易失效**" in SKILL_MD  # 2026-08-27：英文 X list 模式返回垃圾页，扩展易失效规则；09-02 "裸后缀"俚语改为"未组合后缀"
     assert "directory / registry / collection 这类泛化目录词" in SKILL_MD  # 2026-08-27：directory 实证命中率低，降级为泛化目录词
 
 
 def test_prepare_run_dir_contract():
     """运行目录契约：--prepare 预留唯一目录，阶段 1/5 写其中 manifest.json，阶段 6 同一路径收尾。
     预留步骤命名"初始化"（2026-08-25 起）——旧名"阶段 0 前"易误读为阶段序列的一部分。
-    raw.json 契约已取消（docs/05 存储改造：sources/journal 走 store，元数据走 manifest）。"""
+    raw.json 契约已取消（docs/04 存储改造：sources/journal 走 store，元数据走 manifest）。"""
     assert "postprocess.py --prepare" in SKILL_MD
     assert "运行目录 + `/manifest.json`" in SKILL_MD
     assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
-    assert "raw.json" not in SKILL_MD  # raw.json 契约整体取消（docs/05）
+    assert "raw.json" not in SKILL_MD  # raw.json 契约整体取消（docs/04）
     assert "## 初始化 · 预留运行目录" in SKILL_MD
     assert "阶段 0 前" not in SKILL_MD
 
 
 def test_storage_contract_mcp_tools():
-    """存储架构契约（docs/05 定案）：四工具 + manifest 两段式 Write + 禁 Edit + 记录时机 + 哨兵。
+    """存储架构契约（docs/04 定案）：四工具 + manifest 两段式 Write + 禁 Edit + 记录时机 + 哨兵。
     数据落盘只走 MCP 工具——模型不 Write 数据文件、不自创脚本组装。"""
     for tool in ["record_sources", "record_search", "coverage", "finalize"]:
         assert tool in SKILL_MD
@@ -132,7 +133,7 @@ def test_storage_contract_mcp_tools():
 
 
 def test_scripts_include_store_and_mcp_server():
-    """docs/05 实现落地：store.py（存储层）与 mcp_server.py（四工具服务）归位 scripts/。"""
+    """docs/04 实现落地：store.py（存储层）与 mcp_server.py（四工具服务）归位 scripts/。"""
     assert (SCRIPTS_DIR / "store.py").is_file()
     assert (SCRIPTS_DIR / "mcp_server.py").is_file()
     assert (ROOT / ".mcp.json").is_file()
@@ -146,7 +147,7 @@ def test_termination_condition_aligned_with_finalization():
     assert "清单项全部了结（验证通过或已定案）" in SKILL_MD
     assert "非薄弱或已收敛" in SKILL_MD
     assert "扩量轮按节点独立判断，不再全局共享轮数" in SKILL_MD
-    assert "某节点连续一轮无任何新增有效来源时，该节点视为收敛并停止" in SKILL_MD
+    assert "某节点在一轮扩量中无任何新增有效来源时，该节点视为收敛并停止" in SKILL_MD
     assert "连续两轮无进展" not in SKILL_MD
     assert "仍薄弱且未收敛的节点继续扩量" in SKILL_MD  # 2026-09-02 消歧：收敛优先于薄弱
     assert "仍薄弱的节点继续扩量" not in SKILL_MD
@@ -320,7 +321,8 @@ def test_contradiction_and_wording_cleanup():
     # 厂商/产品名规则单一归属：并入通用纪律词类清单第 4 条，阶段 3 改指针，图标移除
     assert "**厂商 / 产品名**（按意图区分）" in SKILL_MD
     assert '厂商 / 产品名的用法见通用纪律"搜索词构造"' in SKILL_MD
-    assert SKILL_MD.count("裸搜产品名") == 1
+    assert SKILL_MD.count("单独搜产品名") == 1
+    assert "裸搜" not in SKILL_MD  # 2026-09-02："裸"俚语前缀清除（裸搜/裸后缀→单独搜/未组合）
     assert "禁止裸搜产品名" not in SKILL_MD
     assert "❌" not in SKILL_MD and "✅" not in SKILL_MD
     # 数据源类型标签治理（2026-08-26 起）：从词类词汇中选，不自创同义新词；
@@ -340,6 +342,20 @@ def test_conciseness_review_cleanup():
     assert "写入截断在机制上不可能发生" in SKILL_MD
     assert "越界命令会被权限白名单拦截弹窗" not in SKILL_MD
     assert "执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗" in SKILL_MD
+
+
+def test_skill_no_multilang_audit_promise():
+    """2026-09-01 多语言审计下线（两轮实测全假阳性、修不如删）后，SKILL 语言版本偏好节
+    仍残留"脚本会对最终清单做确定性审计（同域名剥语言码路径段…）"的悬空承诺——脚本已无
+    此实现，模型会期待一个永不出现的 stdout 提示（2026-09-02 审查发现）。钉死承诺句不再出现。"""
+    assert "同域名剥语言码路径段后相同的组计数" not in SKILL_MD
+
+
+def test_docs_01_skill_layer_quota_sync():
+    """docs/01 分层表的增量发现组合与 SKILL 当前配额一致——2026-09-02 实体 4→2、
+    自由 8→10 后该行未同步（文档人工同步反复漂移的又一例），钉进测试强制下次配额调整一并改。"""
+    docs01 = (ROOT / "docs" / "01-交付手册.md").read_text(encoding="utf-8")
+    assert "固定 4 + 自由 10 + 实体 2 = 基底 16 次/节点，之后按产出扩充" in docs01
 
 
 def test_quote_style_unified_straight():
@@ -376,8 +392,25 @@ def test_settings_reference_existing_scripts():
     for rule in settings["hooks"]["PostToolUse"]:
         for hook in rule["hooks"]:
             cmd = hook["command"]
-            if "log_tool.py" in cmd:
-                assert "scripts/log_tool.py" in cmd
-                assert "log_tool.py outputs/" not in cmd  # 2026-08-26 起按会话隔离命名，不留固定共享路径
-                log_tool = cmd.split("python ", 1)[1].split(" outputs/", 1)[0]
-                assert (ROOT / log_tool).is_file()
+            if "evidence_hook.py" in cmd:
+                assert "scripts/evidence_hook.py" in cmd
+                assert "evidence_hook.py outputs/" not in cmd  # 2026-08-26 起按会话隔离命名，不留固定共享路径
+                hook_script = cmd.split("python ", 1)[1].split(" outputs/", 1)[0]
+                assert (ROOT / hook_script).is_file()
+            assert "log_tool.py" not in cmd  # 2026-09-02 改名 evidence_hook，旧名不残留
+
+
+def test_script_dependency_direction():
+    """2026-09-02 依赖方向修正钉桩：存储层不反向依赖编排层（store 曾 from postprocess
+    import GRANULARITY_LEVELS/check_grounded/leaf_node——import store 会把整个流水线拖进来，
+    且 postprocess 内曾以延迟导入 store 绕循环）。契约归属：GRANULARITY_LEVELS（条目粒度）
+    与 leaf_node（路径→节点推导）是存储层契约；依赖单向向下：mcp_server→store/postprocess
+    →evidence/lineage/report。"""
+    store_src = (SCRIPTS_DIR / "store.py").read_text(encoding="utf-8")
+    assert "from postprocess" not in store_src
+    assert "from evidence import" in store_src
+    assert "GRANULARITY_LEVELS =" in store_src
+    assert "def leaf_node" in store_src
+    pp_src = (SCRIPTS_DIR / "postprocess.py").read_text(encoding="utf-8")
+    assert "from store import" in pp_src
+    assert "延迟导入避免循环依赖" not in pp_src

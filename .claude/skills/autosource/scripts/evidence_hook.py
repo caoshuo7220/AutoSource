@@ -8,11 +8,11 @@
   但落盘文件本身无写保护，该机制防的是意外编造（转写错误/凭记忆补 URL），
   不防对抗性篡改。
 - 本脚本任何失败都不阻断工具调用（日志失败静默放行），hook 始终退出 0。
-- postprocess.py 的 grounded 校验依赖本留痕：候选 URL 必须能在留痕中
-  作为完整 URL 找到（边界匹配）。
+- 证据校验（evidence.py）依赖本留痕：候选 URL 必须能在留痕中
+  作为完整 URL 找到（边界匹配）——本脚本写、evidence.py 读。
 
 用法（hook 配置中）:
-    python .claude/skills/autosource/scripts/log_tool.py
+    python .claude/skills/autosource/scripts/evidence_hook.py
     留痕按运行目录归属（2026-08-31 分层原则修订）：--prepare 预留运行目录时
     写入 .session_id 会话标记，本脚本按标记找到本会话的运行目录、写
     run_*/evidence.jsonl（outputs/ 顶层不再平铺会话级留痕文件）；
@@ -24,24 +24,14 @@ import os
 import sys
 from pathlib import Path
 
-
-def default_log_path() -> Path:
-    """回退留痕路径：按会话隔离命名（旧流程/未 prepare 场景）。
-
-    hook 子进程继承 CLAUDE_CODE_SESSION_ID 环境变量；无该变量时回退到
-    共享旧路径（兼容手动调用/测试）。
-    """
-    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if session_id:
-        return Path("outputs") / f"search_log_{session_id}.jsonl"
-    return Path("outputs/search_log.jsonl")
+from evidence import default_evidence_log  # 会话级留痕路径单一事实源（读写两端共用）
 
 
 def run_scoped_log_path() -> Path | None:
     """按会话标记定位本会话运行目录内的留痕：outputs/run_*/.session_id == 会话 ID。
 
     多个匹配时取最新目录（同会话多轮的边角，取最近一次 --prepare）；
-    无匹配返回 None（调用方回退 default_log_path）。
+    无匹配返回 None（调用方回退 default_evidence_log）。
     """
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not session_id:
@@ -69,7 +59,7 @@ def main() -> None:
     if len(sys.argv) > 1:
         log_path = Path(sys.argv[1])
     else:
-        log_path = run_scoped_log_path() or default_log_path()
+        log_path = run_scoped_log_path() or Path(default_evidence_log())
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
