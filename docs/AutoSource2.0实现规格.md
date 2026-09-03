@@ -179,7 +179,9 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 - `--commit` 只处理 status=done 的 query 结果；failed 的 query 计入 exploration.loop\_stats.failed\_queries 与 search\_history.failed；
 
-- 批次处理完成（含 failed 判定）后清空 pending\_batch；连续 2 批失败率 ≥ 50% 触发失败中止。
+- 批次处理完成（含 failed 判定）后清空 pending\_batch；连续 2 批失败率 ≥ 50% 触发失败中止；
+
+- "连续 K 批无新增"只基于 status=done 的 query 统计——failed 的 query 不参与无新增判断（它未搜成功，不能作为"领域已挖完"的证据），只累计进失败率。
 
 ### 搜索结果文件格式（宿主写、脚本读）
 
@@ -227,6 +229,23 @@ SearchBatch = [{query, results: [{title, url, snippet}], failed, attempts}]
 - state / converge / evidence / prompts / deliver 等业务模块不得感知搜索来源；
 
 - 迁移独立程序时，仅新增 ApiSearchProvider 并替换编排外壳，业务模块零改动。
+
+### 去重规则
+
+两级去重，口径不同：
+
+- 入库幂等（--commit 内）：URL 精确相等（剥离引用序号锚点后）即跳过，不重复入库；
+
+- 交付去重（--finalize 内）：同一"域名 + 名称"只保留一条，优先合集级，其次取 first\_seen\_batch 最早者。
+
+### 收敛判定结合逻辑（--review 内部）
+
+`--review` 内部按以下顺序执行：
+
+1. 脚本校验客观覆盖三条件：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增；
+2. 任一条件未达成 → 直接返回 converged=false（客观覆盖一票否决，不调 LLM）；
+3. 三条件全部达成 → 调 LLM review，取 LLM 返回的 converged；
+4. 最终返回 converged = 客观覆盖达成 且 LLM 确认。
 
 ### 宿主循环（写入 SKILL.md 的机械步骤）
 
@@ -358,6 +377,24 @@ new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 必须�
  "converged":true或false,
  "reason":"..."}
 gaps 是"当前全部开放缺口"——脚本用它整体替换 state.exploration.gaps。
+```
+
+### report：分析报告生成（--finalize 内调用）
+
+```
+你是数据源发现系统的分析报告撰写器。基于领域结构、已收录数据源清单与搜索历史，按六板块撰写分析报告正文。
+
+领域结构：{{structure}}
+已收录数据源清单：{{sources}}
+搜索历史：{{search_history}}
+
+六板块：概览 / 技术格局 / 产业生态 / 标准体系 / 中外对比 / 趋势观察。
+
+写作要求：
+- 依据锚定已收录的数据源，不空谈、不编造；
+- 统计数字一律不写（"数据总览"节由脚本注入）。
+
+输出 Markdown 正文（六板块，不含"数据总览"节）。
 ```
 
 ## 七、交付物格式
