@@ -90,16 +90,16 @@
 | 字段                          | 类型        | 维护方    | 说明                                                                                              |
 | --------------------------- | --------- | ------ | ----------------------------------------------------------------------------------------------- |
 | domain                      | string    | 脚本     | 领域词（由 init 从领域描述提炼）                                                                             |
-| phase                       | string    | 脚本     | 运行状态：`init` / `running` / `converged` / `failed`；中间态由 pending\_batch 承载                         |
+| phase                       | string    | 脚本     | 运行状态：init / running / converged / failed；中间态由 pending\_batch 承载                                 |
 | structure.nodes\[].name     | string    | LLM    | 节点名（唯一）                                                                                         |
 | structure.nodes\[].parent   | string    | LLM    | 父节点名（根节点为空字符串）                                                                                  |
 | structure.nodes\[].terms    | string\[] | LLM+脚本 | 核心搜索词；extract 的 new\_terms 由脚本写回对应节点                                                            |
-| structure.nodes\[].entities | object\[] | LLM+脚本 | 实体 `{name, kind}`，kind ∈ {机构, 厂商, 产品, 项目, 规范}；extract 的 new\_entities 由脚本写回对应节点                 |
-| structure.nodes\[].dims     | string\[] | LLM+脚本 | 适用探索维度；plan 使用新 angle 时脚本同步加入                                                                   |
-| structure.nodes\[].angles   | string\[] | 脚本     | 已搜索角度（每次搜索后把 query 的 angle 并入）                                                                  |
+| structure.nodes\[].entities | object\[] | LLM+脚本 | 实体 {name, kind}，kind ∈ {机构, 厂商, 产品, 项目, 规范}；extract 的 new\_entities 由脚本写回对应节点                   |
+| structure.nodes\[].dims     | string\[] | LLM+脚本 | 适用探索维度；plan 使用新 angle 时脚本加入 dims                                                                |
+| structure.nodes\[].angles   | string\[] | 脚本     | 已搜索角度；--commit 时 status=done 的 query 其 angle 才加入                                                |
 | sources\[]                  | object\[] | 脚本     | 源集合条目（name/url/source\_type/granularity/node/description/first\_seen\_batch/first\_seen\_query） |
 | pending\_batch              | object    | 脚本     | 当前已规划待搜索的批次（--plan 写入，--commit 处理完清空）                                                           |
-| pending\_batch.queries\[]   | object\[] | 脚本     | `{query_id, query, node, angle, reason, status, attempts}`，status ∈ {pending, done, failed}     |
+| pending\_batch.queries\[]   | object\[] | 脚本     | {query\_id, query, node, angle, reason, status, attempts}，status ∈ {pending, done, failed}      |
 | exploration.search\_history | object\[] | 脚本     | 搜索历史（batch/query/node/结果数/去重后新增数/失败数）                                                           |
 | exploration.gaps            | object\[] | 脚本     | 开放缺口清单（description/node）；每轮 review 后整体替换，无 status                                               |
 | exploration.loop\_stats     | object    | 脚本     | 循环统计（批次计数/连续无新增计数/失败查询数）                                                                        |
@@ -147,7 +147,7 @@ extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 str
 │   ├── search_provider.py    # 搜索源接口（SearchProvider.fetch）+ HostSearchProvider 实现
 │   ├── evidence.py           # 证据链校验（边界匹配算法）
 │   ├── llm_client.py         # 公司 OpenAI 兼容网关调用
-│   ├── prompts.py            # 4 个 LLM 节点的 prompt 模板
+│   ├── prompts.py            # 5 个 LLM 节点的 prompt 模板
 │   └── deliver.py            # 交付物生成（CSV / stats / 报告）
 ├── references/
 │   └── 分析报告模板.md        # 分析报告六板块模板
@@ -177,14 +177,14 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 | 子命令                                        | 输入           | 输出                                          | 职责                                                                                                            |
 | ------------------------------------------ | ------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `--init "<领域描述>"`                          | 领域描述         | 创建运行目录并打印路径                                 | 调 LLM init 生成领域结构，初始化 state.json（phase=running）                                                               |
-| `--plan <run_dir>`                         | 读 state.json | stdout 输出 `{"queries":[...]}`               | 调 LLM plan 生成查询词，**写入 state.pending\_batch（status=pending）**，再输出                                              |
+| `--plan <run_dir>`                         | 读 state.json | stdout 输出 `{"queries":[...]}`               | 调 LLM plan 生成查询词，写入 state.pending\_batch（status=pending），再输出                                                  |
 | `--commit <run_dir> <search_results.json>` | 结果文件路径       | 打印入库统计                                      | 读 pending\_batch，经 SearchProvider 取 SearchBatch，校验各 query 状态，extract + 证据校验 + 去重 + 更新 state，清空 pending\_batch |
-| `--review <run_dir>`                       | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review + 脚本客观覆盖校验，判定收敛                                                                                  |
+| `--review <run_dir>`                       | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review、整体替换 state.gaps、脚本客观覆盖校验，判定收敛                                                                    |
 | `--finalize <run_dir>`                     | 读 state.json | 生成交付物，重命名运行目录                               | 生成 CSV/stats/报告，state.phase 置 converged                                                                       |
 
 ### 批次生命周期与失败处理
 
-- `--plan` 把查询词**持久化**到 `state.pending_batch`（status=pending，attempts=0）后才输出——即使宿主后续中断，state 仍记录"本批计划了什么"；
+- `--plan` 把查询词持久化到 `state.pending_batch`（status=pending，attempts=0）后才输出——即使宿主后续中断，state 仍记录"本批计划了什么"；
 
 - 宿主对每个 query 调 websearch（首次 + 最多 2 次重试，即总共最多 3 次尝试），把每个 query 的结果或失败标记写入 search\_results.json；
 
@@ -237,7 +237,7 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 ```text
 SearchProvider.fetch(queries) -> SearchBatch
-SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attempts}]
+SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attempts, error?}]
 ```
 
 两个实现：
@@ -272,6 +272,14 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 3. 脚本校验客观覆盖三条件（用更新后的 gaps）：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增；
 4. 客观覆盖未达成 → 返回 converged=false（客观覆盖一票否决，LLM 的 converged 无效）；
 5. 客观覆盖达成 → 返回 converged = LLM 的 converged（LLM 确认是最后一关）。
+
+### 循环统计计数规则
+
+- batch\_count：每批 --commit 处理完成后 +1（存活熔断以此计数）；
+
+- consecutive\_no\_new：每批 --commit 后，若本批 status=done 的 query 去重后新增 0 条来源，则 +1；否则清零（仅统计 done 的 query，failed 不影响）；
+
+- failed\_queries：累计所有 status=failed 的 query 数。
 
 ### 宿主循环（写入 SKILL.md 的机械步骤）
 
@@ -313,7 +321,7 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 ## 六、LLM 节点 prompt 模板
 
-4 个 LLM 节点（init / plan / extract / review）通过公司 OpenAI 兼容网关调用（见"LLM 参数注入"）。每个 prompt 要求输出合法 JSON，脚本解析。以下为各节点 prompt 模板，`{{...}}` 为注入的运行时数据。
+5 个 LLM 节点（init / plan / extract / review / report）通过公司 OpenAI 兼容网关调用（见"LLM 参数注入"）。每个 prompt 要求输出合法 JSON，脚本解析。以下为各节点 prompt 模板，`{{...}}` 为注入的运行时数据。
 
 ### init：领域拆解
 
@@ -453,7 +461,7 @@ outputs/{领域词}_{时间戳}/
 
 ### 分析报告（六板块）
 
-概览 / 技术格局 / 产业生态 / 标准体系 / 中外对比 / 趋势观察。模板见 `references/分析报告模板.md`。"数据总览"节由脚本从 state 生成（统计数字由脚本注入，LLM 不写统计数字）；报告六板块正文由 `--finalize` 内的一次额外 LLM 调用生成（输入 state 摘要与已收录源清单，输出六板块正文）。
+概览 / 技术格局 / 产业生态 / 标准体系 / 中外对比 / 趋势观察。模板见 `references/分析报告模板.md`。"数据总览"节由脚本从 state 生成（统计数字由脚本注入，LLM 不写统计数字）；报告六板块正文由 `--finalize` 内的一次额外 LLM 调用（report 节点）生成。
 
 ### stats.csv
 
@@ -473,12 +481,12 @@ outputs/{领域词}_{时间戳}/
 
 phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（已规划待搜索 / 部分搜索完成）由 `pending_batch` 承载——pending\_batch 非空表示存在待处理批次。
 
-| 迁移                        | 触发                           |
-| ------------------------- | ---------------------------- |
-| init → running            | --init 完成领域拆解后               |
-| running → converged       | --review 判定收敛（客观覆盖 + LLM 确认） |
-| running → failed          | 失败率超阈值、熔断触发、或 LLM 异常无法恢复     |
-| converged / failed → 重新运行 | --init 需用户确认重置（避免覆盖历史产物）     |
+| 迁移                        | 触发                       |
+| ------------------------- | ------------------------ |
+| init → running            | --init 完成领域拆解后           |
+| running → converged       | --finalize 完成交付          |
+| running → failed          | 失败率超阈值、熔断触发、或 LLM 异常无法恢复 |
+| converged / failed → 重新运行 | --init 需用户确认重置（避免覆盖历史产物） |
 
 ### 运行目录与隔离
 
