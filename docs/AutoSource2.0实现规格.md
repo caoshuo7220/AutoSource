@@ -8,13 +8,13 @@
 
 以下参数集中在配置文件 `config.json` 中，脚本读取，不硬编码。
 
-| 参数           | 默认值 | 说明                                             |
-| ------------ | --- | ---------------------------------------------- |
-| K（连续无新增批次阈值） | 4   | 连续 K 批无任何新增来源时触发收敛判断（沿用 1.0"连续 4 次无新增饱和"的实测经验） |
-| 每批查询词数       | 3-5 | plan 节点每次生成的查询词数量                              |
-| 单次查询重试次数     | 2   | 首次 + 2 次重试（最多 3 次尝试）；仍异常则标记该查询 failed          |
-| 失败率阈值        | 50% | 连续 2 批失败率 ≥ 50% 判定搜索服务异常，中止循环                  |
-| 熔断批次上限       | 100 | 存活熔断：总批次数达到上限判定收敛判据失效，异常中止（保留状态、声明失败），非成功终止    |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| K（连续无新增批次阈值） | 4 | 连续 K 批无任何新增来源时触发收敛判断（沿用 1.0"连续 4 次无新增饱和"的实测经验） |
+| 每批查询词数 | 3-5 | plan 节点每次生成的查询词数量 |
+| 单次查询重试次数 | 2 | 首次 + 2 次重试（最多 3 次尝试）；仍异常则标记该查询 failed |
+| 失败率阈值 | 50% | 连续 2 批失败率 ≥ 50% 判定搜索服务异常，中止循环 |
+| 熔断批次上限 | 100 | 存活熔断：总批次数达到上限判定收敛判据失效，异常中止（保留状态、声明失败），非成功终止 |
 
 收敛判据（引用设计文档）：`dims - angles` 为空 且 缺口清单为空 且 连续 K 批无新增，再由 LLM 确认覆盖充分，即正常终止。
 
@@ -87,47 +87,40 @@
 
 字段类型与维护方：
 
-| 字段                          | 类型        | 维护方    | 说明                                                                                              |
-| --------------------------- | --------- | ------ | ----------------------------------------------------------------------------------------------- |
-| domain                      | string    | 脚本     | 领域词（由 init 从领域描述提炼）                                                                             |
-| phase                       | string    | 脚本     | 运行状态：init / running / converged / failed；中间态由 pending\_batch 承载                                 |
-| structure.nodes\[].name     | string    | LLM    | 节点名（唯一）                                                                                         |
-| structure.nodes\[].parent   | string    | LLM    | 父节点名（根节点为空字符串）                                                                                  |
-| structure.nodes\[].terms    | string\[] | LLM+脚本 | 核心搜索词；extract 的 new\_terms 由脚本写回对应节点                                                            |
-| structure.nodes\[].entities | object\[] | LLM+脚本 | 实体 {name, kind}，kind ∈ {机构, 厂商, 产品, 项目, 规范}；extract 的 new\_entities 由脚本写回对应节点                   |
-| structure.nodes\[].dims     | string\[] | LLM+脚本 | 适用探索维度；plan 使用新 angle 时脚本加入 dims                                                                |
-| structure.nodes\[].angles   | string\[] | 脚本     | 已搜索角度；--commit 时 status=done 的 query 其 angle 才加入                                                |
-| sources\[]                  | object\[] | 脚本     | 源集合条目（name/url/source\_type/granularity/node/description/first\_seen\_batch/first\_seen\_query） |
-| pending\_batch              | object    | 脚本     | 当前已规划待搜索的批次（--plan 写入，--commit 处理完清空）                                                           |
-| pending\_batch.queries\[]   | object\[] | 脚本     | {query\_id, query, node, angle, reason, status, attempts}，status ∈ {pending, done, failed}      |
-| exploration.search\_history | object\[] | 脚本     | 搜索历史（batch/query/node/结果数/去重后新增数/失败数）                                                           |
-| exploration.gaps            | object\[] | 脚本     | 开放缺口清单（description/node）；每轮 review 后整体替换，无 status                                               |
-| exploration.loop\_stats     | object    | 脚本     | 循环统计（批次计数/连续无新增计数/失败查询数）                                                                        |
+| 字段 | 类型 | 维护方 | 说明 |
+|------|------|--------|------|
+| domain | string | 脚本 | 领域词（由 init 从领域描述提炼） |
+| phase | string | 脚本 | 运行状态：init / running / converged / failed；中间态由 pending_batch 承载 |
+| structure.nodes[].name | string | LLM | 节点名（唯一） |
+| structure.nodes[].parent | string | LLM | 父节点名（根节点为空字符串） |
+| structure.nodes[].terms | string[] | LLM+脚本 | 核心搜索词；extract 的 new_terms 由脚本写回对应节点 |
+| structure.nodes[].entities | object[] | LLM+脚本 | 实体 {name, kind}，kind ∈ {机构, 厂商, 产品, 项目, 规范}；extract 的 new_entities 由脚本写回对应节点 |
+| structure.nodes[].dims | string[] | LLM+脚本 | 适用探索维度；plan 使用新 angle 时脚本加入 dims |
+| structure.nodes[].angles | string[] | 脚本 | 已搜索角度；--commit 时 status=done 的 query 其 angle 才加入 |
+| sources[] | object[] | 脚本 | 源集合条目（name/url/source_type/granularity/node/description/first_seen_batch/first_seen_query） |
+| pending_batch | object | 脚本 | 当前已规划待搜索的批次（--plan 写入，--commit 处理完清空） |
+| pending_batch.queries[] | object[] | 脚本 | {query_id, query, node, angle, reason, status, attempts}，status ∈ {pending, done, failed} |
+| exploration.search_history | object[] | 脚本 | 搜索历史（batch/query/node/结果数/去重后新增数/失败数） |
+| exploration.gaps | object[] | 脚本 | 开放缺口清单（description/node）；每轮 review 后整体替换，无 status |
+| exploration.loop_stats | object | 脚本 | 循环统计（批次计数/连续无新增计数/失败查询数） |
 
-设计原则（引用设计文档）：状态仅记录事实，不记录判断。`converged` 与理由不在 state 中持久化，只作为 `--review` 子命令的即时输出。
+设计原则（引用设计文档）：状态仅记录事实，不记录判断。`converged` 布尔与理由不持久化，只作为 `--review` 即时输出；但 phase 在 --review 判定收敛时置为 converged（作为运行状态持久化，供 --finalize 与断点续跑识别）。
 
 ### 领域结构增量写回
 
 extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 structure，规则：
 
-- new\_entities 的每个 `{name, kind, node}` → 追加到 name 匹配节点的 entities（去重）；
-
-- new\_terms 的每个 `{term, node}` → 追加到 name 匹配节点的 terms（去重）；
-
-- new\_nodes 的每个 `{name, parent, terms, dims}` → 作为完整节点加入 structure.nodes（含可搜索字段，保证新节点可被后续 plan 搜索）；
-
+- new_entities 的每个 `{name, kind, node}` → 追加到 name 匹配节点的 entities（去重）；
+- new_terms 的每个 `{term, node}` → 追加到 name 匹配节点的 terms（去重）；
+- new_nodes 的每个 `{name, parent, terms, dims}` → 作为完整节点加入 structure.nodes（含可搜索字段，保证新节点可被后续 plan 搜索）；
 - plan 输出中某 query 的 angle 不在其节点 dims 中时，脚本将该 angle 加入 dims（声明该维度需要搜索）；
-
-- \--commit 时，仅当 query status=done 才把其 angle 加入该节点的 angles（表示已搜索）；failed 时 angle 保持在 dims - angles，后续 plan 可继续补搜，不视为已覆盖。
+- --commit 时，仅当 query status=done 才把其 angle 加入该节点的 angles（表示已搜索）；failed 时 angle 保持在 dims - angles，后续 plan 可继续补搜，不视为已覆盖。
 
 ### 树校验规则
 
 - 根节点 parent 为空字符串；其余节点 parent 必须指向已存在的节点名；
-
 - source 的 node 必须是叶子节点（无子节点的节点）；
-
 - 完整分类路径 = 从根到该节点的路径，各节点名用 `-` 连接，末段与 node 一致（供 CSV"分类路径"列）；
-
 - 脚本在 --init 与每次增量写回后校验：无孤儿节点、无重复节点名、parent 可解析、source 的 node 均在叶子节点集合内。
 
 ## 三、项目目录结构
@@ -174,31 +167,26 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 所有子命令均携带运行目录参数 `<run_dir>`（`--init` 创建并打印，后续命令照抄）。
 
-| 子命令                                        | 输入           | 输出                                          | 职责                                                                                                            |
-| ------------------------------------------ | ------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `--init "<领域描述>"`                          | 领域描述         | 创建运行目录并打印路径                                 | 调 LLM init 生成领域结构，初始化 state.json（phase=running）                                                               |
-| `--plan <run_dir>`                         | 读 state.json | stdout 输出 `{"queries":[...]}`               | 调 LLM plan 生成查询词，写入 state.pending\_batch（status=pending），再输出                                                  |
-| `--commit <run_dir> <search_results.json>` | 结果文件路径       | 打印入库统计                                      | 读 pending\_batch，经 SearchProvider 取 SearchBatch，校验各 query 状态，extract + 证据校验 + 去重 + 更新 state，清空 pending\_batch |
-| `--review <run_dir>`                       | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review、整体替换 state.gaps、脚本客观覆盖校验，判定收敛                                                                    |
-| `--finalize <run_dir>`                     | 读 state.json | 生成交付物，重命名运行目录                               | 生成 CSV/stats/报告，state.phase 置 converged                                                                       |
+| 子命令 | 输入 | 输出 | 职责 |
+|--------|------|------|------|
+| `--init "<领域描述>"` | 领域描述 | 创建运行目录并打印路径 | 调 LLM init 生成领域结构，初始化 state.json（phase=running） |
+| `--plan <run_dir>` | 读 state.json | stdout 输出 `{"queries":[...]}` | 调 LLM plan 生成查询词，写入 state.pending_batch（status=pending），再输出 |
+| `--commit <run_dir> <search_results.json>` | 结果文件路径 | 打印入库统计 | 读 pending_batch，经 SearchProvider 取 SearchBatch，校验各 query 状态，extract + 证据校验 + 去重 + 更新 state，清空 pending_batch |
+| `--review <run_dir>` | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review、整体替换 state.gaps、脚本客观覆盖校验，判定收敛（收敛时置 phase=converged） |
+| `--finalize <run_dir>` | 读 state.json | 生成交付物，重命名运行目录 | 前置条件 phase=converged；生成 CSV/stats/报告并重命名目录 |
 
 ### 批次生命周期与失败处理
 
 - `--plan` 把查询词持久化到 `state.pending_batch`（status=pending，attempts=0）后才输出——即使宿主后续中断，state 仍记录"本批计划了什么"；
-
-- 宿主对每个 query 调 websearch（首次 + 最多 2 次重试，即总共最多 3 次尝试），把每个 query 的结果或失败标记写入 search\_results.json；
-
-- `--commit` 读取 pending\_batch 与 search\_results.json，逐 query 判定：搜索执行成功 → status=done（results 允许为空数组，表示成功但 0 条结果）；执行异常（超时/网关错误）且重试耗尽 → status=failed（attempts 记录实际尝试次数）；
-
-- `--commit` 只处理 status=done 的 query 结果；failed 的 query 计入 exploration.loop\_stats.failed\_queries 与 search\_history.failed；
-
-- 批次处理完成（含 failed 判定）后清空 pending\_batch；连续 2 批失败率 ≥ 50% 触发失败中止；
-
+- 宿主对每个 query 调 websearch（首次 + 最多 2 次重试，即总共最多 3 次尝试），把每个 query 的结果或失败标记写入 search_results.json；
+- `--commit` 读取 pending_batch 与 search_results.json，逐 query 判定：搜索执行成功 → status=done（results 允许为空数组，表示成功但 0 条结果）；执行异常（超时/网关错误）且重试耗尽 → status=failed（attempts 记录实际尝试次数）；
+- `--commit` 只处理 status=done 的 query 结果；failed 的 query 计入 exploration.loop_stats.failed_queries 与 search_history.failed；
+- 批次处理完成（含 failed 判定）后清空 pending_batch；连续 2 批失败率 ≥ 50% 触发失败中止；
 - "连续 K 批无新增"只基于 status=done 的 query 统计——failed 的 query 不参与无新增判断（它未搜成功，不能作为"领域已挖完"的证据），只累计进失败率。
 
 ### 搜索结果文件格式（宿主写、脚本读）
 
-宿主对 `--plan` 输出的每个 query 调 websearch（首次 + 最多 2 次重试），把结果或失败标记写入文件。每个结果项必填 query\_id / query / results / failed / attempts；`failed=false` 表示执行成功（results 可为空数组，即 0 条结果），`failed=true` 表示执行异常（可附加 error 说明原因）：
+宿主对 `--plan` 输出的每个 query 调 websearch（首次 + 最多 2 次重试），把结果或失败标记写入文件。每个结果项必填 query_id / query / results / failed / attempts；`failed=false` 表示执行成功（results 可为空数组，即 0 条结果），`failed=true` 表示执行异常（可附加 error 说明原因）：
 
 ```json
 [
@@ -242,17 +230,15 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 两个实现：
 
-| Provider           | 形态        | 实现                                                                                          |
-| ------------------ | --------- | ------------------------------------------------------------------------------------------- |
-| HostSearchProvider | Skill（当前） | 构造时接收 search\_results.json 路径（来自 --commit 参数），按 query\_id 匹配并校验完整性（不按 query 文本匹配，避免重复查询词歧义） |
-| ApiSearchProvider  | 独立程序（将来）  | 逐个 query 调搜索 API，产出同样的 SearchBatch                                                          |
+| Provider | 形态 | 实现 |
+|----------|------|------|
+| HostSearchProvider | Skill（当前） | 构造时接收 search_results.json 路径（来自 --commit 参数），按 query_id 匹配并校验完整性（不按 query 文本匹配，避免重复查询词歧义） |
+| ApiSearchProvider | 独立程序（将来） | 逐个 query 调搜索 API，产出同样的 SearchBatch |
 
 约束：
 
 - orchestrator 只经 SearchProvider 接口获取结果，不直接读取搜索文件；
-
 - state / converge / evidence / prompts / deliver 等业务模块不得感知搜索来源；
-
 - 迁移独立程序时，仅新增 ApiSearchProvider 并替换编排外壳，业务模块零改动。
 
 ### 去重规则
@@ -260,8 +246,7 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 两级去重，口径不同：
 
 - 入库幂等（--commit 内）：URL 精确相等（剥离引用序号锚点后）即跳过，不重复入库；
-
-- 交付去重（--finalize 内）：同一"域名 + 名称"只保留一条，优先合集级，其次取 first\_seen\_batch 最早者。
+- 交付去重（--finalize 内）：同一"域名 + 名称"只保留一条，优先合集级，其次取 first_seen_batch 最早者。
 
 ### 收敛判定结合逻辑（--review 内部）
 
@@ -271,15 +256,13 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 2. 脚本用 review 的 gaps 整体替换 state.exploration.gaps（开放缺口每批更新，反馈闭环生效）；
 3. 脚本校验客观覆盖三条件（用更新后的 gaps）：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增；
 4. 客观覆盖未达成 → 返回 converged=false（客观覆盖一票否决，LLM 的 converged 无效）；
-5. 客观覆盖达成 → 返回 converged = LLM 的 converged（LLM 确认是最后一关）。
+5. 客观覆盖达成 → 返回 converged = LLM 的 converged（LLM 确认是最后一关），并原子写入 phase=converged。
 
 ### 循环统计计数规则
 
-- batch\_count：每批 --commit 处理完成后 +1（存活熔断以此计数）；
-
-- consecutive\_no\_new：每批 --commit 后，若本批 status=done 的 query 去重后新增 0 条来源，则 +1；否则清零（仅统计 done 的 query，failed 不影响）；
-
-- failed\_queries：累计所有 status=failed 的 query 数。
+- batch_count：每批 --commit 处理完成后 +1（存活熔断以此计数）；
+- consecutive_no_new：每批 --commit 后，若本批 status=done 的 query 去重后新增 0 条来源，则 +1；否则清零；整批 query 全部 failed（无任何 done）时重置为 0（无搜索证据的批次不作收敛证据）；
+- failed_queries：累计所有 status=failed 的 query 数。
 
 ### 宿主循环（写入 SKILL.md 的机械步骤）
 
@@ -298,20 +281,16 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 ## 五、证据链校验算法
 
-校验目标：候选 URL 必须逐字出现在搜索结果的原始记录（search\_results.json，归档于 raw/batch\_\*.json）中，杜绝凭先验知识补 URL、URL 转写错误、URL 截短。
+校验目标：候选 URL 必须逐字出现在搜索结果的原始记录（search_results.json，归档于 raw/batch_*.json）中，杜绝凭先验知识补 URL、URL 转写错误、URL 截短。
 
 算法（边界匹配，逐条对候选 source 执行）：
 
 1. 将搜索结果文件的全部文本拼成单一字符串 `haystack`（包含 title/url/snippet 等全部字段值）；
 2. 对候选 URL `needle`，在 `haystack` 中查找其全部出现位置；
 3. 对每个出现位置，检查其前一个字符 `before` 与后一个字符 `after`：
-
    - URL 字符集 `URL_CHARS` = 字母数字 + `-._~:/?#[]@!$&'()*+,;=%`（RFC 3986）；
-
-   - 若 `before` 属于 URL\_CHARS，或 `after` 属于 URL\_CHARS，说明该匹配只是更长 URL 的前缀/片段（截短），此位置不通过；
-
+   - 若 `before` 属于 URL_CHARS，或 `after` 属于 URL_CHARS，说明该匹配只是更长 URL 的前缀/片段（截短），此位置不通过；
    - 例外一：`after` 为 `#` 时放行（fragment 不改变资源主体）；
-
    - 例外二：`?` 不豁免（query 改变内容，仍严格拒绝）；
 4. 存在任意一个位置通过，则该 URL 校验通过；否则拒绝并返回原因"URL 不在证据留痕中"。
 
@@ -321,7 +300,7 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 ## 六、LLM 节点 prompt 模板
 
-5 个 LLM 节点（init / plan / extract / review / report）通过公司 OpenAI 兼容网关调用（见"LLM 参数注入"）。每个 prompt 要求输出合法 JSON，脚本解析。以下为各节点 prompt 模板，`{{...}}` 为注入的运行时数据。
+5 个 LLM 节点（init / plan / extract / review / report）通过公司 OpenAI 兼容网关调用（见"LLM 参数注入"）。其中 init / plan / extract / review 输出合法 JSON（脚本解析），report 输出 Markdown 正文。以下为各节点 prompt 模板，`{{...}}` 为注入的运行时数据。
 
 ### init：领域拆解
 
@@ -449,15 +428,15 @@ outputs/{领域词}_{时间戳}/
 
 ### 数据源清单 CSV（7 列）
 
-| 列     | 说明                                           |
-| ----- | -------------------------------------------- |
-| 数据源名称 | 条目名称                                         |
-| 分类路径  | 完整层级路径，用 `-` 连接，末段与 node 一致                  |
-| 数据源类型 | source\_type（内容体裁）                           |
-| 粒度    | 合集级 / 单篇级                                    |
-| 访问地址  | URL（已剥离引用序号锚点）                               |
-| 简要说明  | description                                  |
-| 来源搜索  | 该 URL 首次出现的查询词（取自 source.first\_seen\_query） |
+| 列 | 说明 |
+|----|------|
+| 数据源名称 | 条目名称 |
+| 分类路径 | 完整层级路径，用 `-` 连接，末段与 node 一致 |
+| 数据源类型 | source_type（内容体裁） |
+| 粒度 | 合集级 / 单篇级 |
+| 访问地址 | URL（已剥离引用序号锚点） |
+| 简要说明 | description |
+| 来源搜索 | 该 URL 首次出现的查询词（取自 source.first_seen_query） |
 
 ### 分析报告（六板块）
 
@@ -473,41 +452,43 @@ outputs/{领域词}_{时间戳}/
 
 ### 溯源.csv
 
-数据血缘：结果 URL ↔ 收录条目 ↔ 查询词的正查/反查对应关系。依据为 state 中每条 source 的 first\_seen\_batch / first\_seen\_query，结合 intermediate/raw/ 归档的原始结果反查。同一 URL 多次命中时取最早成功查询（first\_seen 语义）。
+数据血缘：结果 URL ↔ 收录条目 ↔ 查询词的正查/反查对应关系。依据为 state 中每条 source 的 first_seen_batch / first_seen_query，结合 intermediate/raw/ 归档的原始结果反查。同一 URL 多次命中时取最早成功查询（first_seen 语义）。
 
 ## 八、状态机、断点续跑与隔离
 
 ### 状态机
 
-phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（已规划待搜索 / 部分搜索完成）由 `pending_batch` 承载——pending\_batch 非空表示存在待处理批次。
+phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（已规划待搜索 / 部分搜索完成）由 `pending_batch` 承载——pending_batch 非空表示存在待处理批次。
 
-| 迁移                        | 触发                       |
-| ------------------------- | ------------------------ |
-| init → running            | --init 完成领域拆解后           |
-| running → converged       | --finalize 完成交付          |
-| running → failed          | 失败率超阈值、熔断触发、或 LLM 异常无法恢复 |
+| 迁移 | 触发 |
+|------|------|
+| init → running | --init 完成领域拆解后 |
+| running → converged | --review 判定收敛（原子写入 phase） |
+| running → failed | 失败率超阈值、熔断触发、或 LLM 异常无法恢复 |
 | converged / failed → 重新运行 | --init 需用户确认重置（避免覆盖历史产物） |
+
+--finalize 前置条件为 phase=converged，负责生成交付物与目录重命名。
 
 ### 运行目录与隔离
 
-每次运行一个独立运行目录 `outputs/run_{时间戳}/`（--init 创建并打印路径，后续命令均携带该路径）。state.json、search\_results.json、raw/ 归档均在运行目录内，多次运行、并发运行互不干扰。finalize 时重命名为 `outputs/{领域词}_{时间戳}/`。
+每次运行一个独立运行目录 `outputs/run_{时间戳}/`（--init 创建并打印路径，后续命令均携带该路径）。state.json、search_results.json、raw/ 归档均在运行目录内，多次运行、并发运行互不干扰。finalize 时重命名为 `outputs/{领域词}_{时间戳}/`。
 
 ### 原子写入与幂等
 
 - state.json 写入采用"写临时文件 + 原子替换"（崩溃不损坏状态）；
-
-- `--commit` 幂等：处理完 pending\_batch 即清空；重跑时 pending\_batch 为空则无操作；URL 幂等去重保证不重复入库。
+- `--commit` 幂等：处理完 pending_batch 即清空；重跑时 pending_batch 为空则无操作；URL 幂等去重保证不重复入库。
 
 ### 中断恢复
 
-| 中断位置                            | 恢复方式                                                |
-| ------------------------------- | --------------------------------------------------- |
-| --plan 后（pending\_batch 已写、未搜索） | 续跑时宿主先搜索 pending\_batch 的 queries，再 --commit        |
-| 搜索中（部分 query 已搜）                | 宿主按 search\_results.json 已有的 query 补齐缺失项，再 --commit |
-| --commit 中                      | 重跑 --commit 安全（幂等）                                  |
-| --review 后                      | state 已更新，续跑时 --plan 继续下一批                          |
+| 中断位置 | 恢复方式 |
+|---------|---------|
+| --plan 后（pending_batch 已写、未搜索） | 续跑时宿主先搜索 pending_batch 的 queries，再 --commit |
+| 搜索中（部分 query 已搜） | 宿主按 search_results.json 已有的 query 补齐缺失项，再 --commit |
+| --commit 中 | 重跑 --commit 安全（幂等） |
+| --review 已收敛、--finalize 前中断 | 直接重跑 --finalize |
+| --review 后（未收敛） | state 已更新，续跑时 --plan 继续下一批 |
 
-续跑入口：`--init` 发现运行目录已存在 state.json 且 phase=running 时，跳过领域拆解，直接按上表从 pending\_batch 状态恢复。
+续跑入口：`--init` 发现运行目录已存在 state.json 且 phase 为 running 或 converged 时，跳过领域拆解，直接按上表从当前状态恢复。
 
 ## 九、LLM 参数注入
 
@@ -539,10 +520,8 @@ LLM 通过公司 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，�
 
 ### LLM 异常策略
 
-- 返回 JSON 非法或字段缺失：重试（最多 `llm.retry` 次），仍失败则该节点调用失败；
-
+- 返回 JSON 非法或字段缺失（仅适用于 init / plan / extract / review 四个节点，report 输出 Markdown 不适用）：重试（最多 `llm.retry` 次），仍失败则该节点调用失败；
 - 超时 / 网关错误：重试（最多 `llm.retry` 次）；
-
 - 连续 LLM 调用失败无法恢复：state.phase 置 failed，保留已收录数据源，显式声明失败。
 
 ## 十、验收测试清单
@@ -550,19 +529,14 @@ LLM 通过公司 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，�
 开发完成后的自动化测试至少覆盖：
 
 - 空成功结果：搜索成功但 0 条结果 → 计入 done + 无新增，不计 failed；
-
 - 部分失败：一批中部分 query failed → 失败率统计正确、failed 不影响无新增判断；
-
+- 整批失败：整批 query 全 failed → consecutive_no_new 重置为 0，不当作收敛证据；
 - review 产生新 gaps：review 每批更新 gaps，plan 能按新 gaps 补搜（反馈闭环）；
-
-- 重复 query：两个 query 文本相同 → 靠 query\_id 区分，互不混淆；
-
-- commit 中断恢复：pending\_batch 未清空时重跑 --commit 幂等、不重复入库；
-
-- 溯源首见归因：同一 URL 多次命中，first\_seen 取最早成功查询；
-
+- 重复 query：两个 query 文本相同 → 靠 query_id 区分，互不混淆；
+- commit 中断恢复：pending_batch 未清空时重跑 --commit 幂等、不重复入库；
+- review 后 finalize 前中断恢复：phase 已 converged → 直接重跑 --finalize；
+- 溯源首见归因：同一 URL 多次命中，first_seen 取最早成功查询；
 - 熔断：批次数达 100 → 异常中止 + 保留状态 + 声明失败；
-
 - 报告 LLM 失败：--finalize 内报告生成 LLM 失败 → 重试后仍失败则报告降级（正文缺失但 CSV/stats 正常产出）。
 
 测试命令：`python -m pytest tests/ -q`。
