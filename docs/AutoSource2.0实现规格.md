@@ -170,7 +170,7 @@ run_{时间戳}/
 
 本分支从 master 拉出，仍包含 1.0 的全部文件；1.0 已封盘于 master（tag v1.0），本分支可自由处置：
 
-- 删除：`scripts/mcp_server.py`、`scripts/evidence_hook.py`（MCP 架构整体废弃：2.0 不用 MCP 工具入库，也不用 hook 留痕）；
+- 删除：`.mcp.json`、`scripts/mcp_server.py`、`scripts/evidence_hook.py`、`tests/test_mcp_server.py`（MCP 架构整体废弃：2.0 不用 MCP 工具入库，也不用 hook 留痕）；
 
 - 复用（保留不改）：`scripts/evidence.py`（证据链边界匹配算法）、`references/分析报告模板.md`（报告六板块模板）；
 
