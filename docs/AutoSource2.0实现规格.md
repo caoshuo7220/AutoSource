@@ -12,7 +12,7 @@
 | ------------ | --- | ---------------------------------------------- |
 | K（连续无新增批次阈值） | 4   | 连续 K 批无任何新增来源时触发收敛判断（沿用 1.0"连续 4 次无新增饱和"的实测经验） |
 | 每批查询词数       | 3-5 | plan 节点每次生成的查询词数量                              |
-| 单次查询重试次数     | 2   | 仍失败则跳过该查询并在探索记录标记失败                            |
+| 单次查询重试次数     | 2   | 由宿主重试；仍失败则标记该查询 failed                         |
 | 失败率阈值        | 50% | 连续 2 批失败率 ≥ 50% 判定搜索服务异常，中止循环                  |
 | 熔断批次上限       | 100 | 存活熔断：总批次数达到上限判定收敛判据失效，异常中止（保留状态、声明失败），非成功终止    |
 
@@ -22,7 +22,7 @@
 
 ## 二、State 完整 JSON schema
 
-状态以单个 `state.json` 文件保存，结构如下：
+状态以单个 `state.json` 文件保存于运行目录，结构如下：
 
 ```json
 {
@@ -50,15 +50,31 @@
       "source_type": "官方文档",
       "granularity": "合集级",
       "node": "数据中心交换机",
-      "description": "SONiC 开源网络操作系统官方文档站"
+      "description": "SONiC 开源网络操作系统官方文档站",
+      "first_seen_batch": 3,
+      "first_seen_query": "SONiC documentation"
     }
   ],
+  "pending_batch": {
+    "batch_id": 6,
+    "queries": [
+      {
+        "query_id": 1,
+        "query": "SONiC documentation",
+        "node": "数据中心交换机",
+        "angle": "开源社区",
+        "reason": "补 SONiC 官方文档入口",
+        "status": "pending",
+        "attempts": 0
+      }
+    ]
+  },
   "exploration": {
     "search_history": [
-      {"batch": 3, "query": "SONiC documentation", "node": "数据中心交换机", "result_count": 10, "new_count": 2}
+      {"batch": 3, "query": "SONiC documentation", "node": "数据中心交换机", "result_count": 10, "new_count": 2, "failed": 0}
     ],
     "gaps": [
-      {"description": "缺少国内交换机厂商的配置指南", "node": "数据中心交换机", "status": "未补"}
+      {"description": "缺少国内交换机厂商的配置指南", "node": "数据中心交换机"}
     ],
     "loop_stats": {
       "batch_count": 5,
@@ -71,22 +87,36 @@
 
 字段类型与维护方：
 
-| 字段                                                                      | 类型        | 维护方 | 说明                                               |
-| ----------------------------------------------------------------------- | --------- | --- | ------------------------------------------------ |
-| domain                                                                  | string    | 脚本  | 领域词（由 init 从领域描述提炼）                              |
-| phase                                                                   | string    | 脚本  | 运行状态：`init` / `running` / `converged` / `failed` |
-| structure.nodes\[].name                                                 | string    | LLM | 节点名（唯一）                                          |
-| structure.nodes\[].parent                                               | string    | LLM | 父节点名（根节点为空字符串）                                   |
-| structure.nodes\[].terms                                                | string\[] | LLM | 核心搜索词：中英文名、缩写、行业术语、细分场景词                         |
-| structure.nodes\[].entities                                             | object\[] | LLM | 实体：`{name, kind}`，kind ∈ {机构, 厂商, 产品, 项目, 规范}    |
-| structure.nodes\[].dims                                                 | string\[] | LLM | 适用探索维度（来源类型/来源角色）                                |
-| structure.nodes\[].angles                                               | string\[] | 脚本  | 已搜索角度（每次搜索后把 query 的 angle 并入）                   |
-| sources\[].name / url / source\_type / granularity / node / description | —         | 脚本  | 源集合条目（见设计文档状态字段）                                 |
-| exploration.search\_history                                             | object\[] | 脚本  | 搜索历史（query / node / 结果数 / 去重后新增数）                |
-| exploration.gaps                                                        | object\[] | 脚本  | 缺口清单（description / node / status ∈ {未补, 已补}）     |
-| exploration.loop\_stats                                                 | object    | 脚本  | 循环统计（批次计数 / 连续无新增计数 / 失败查询数）                     |
+| 字段                          | 类型        | 维护方    | 说明                                                                                              |
+| --------------------------- | --------- | ------ | ----------------------------------------------------------------------------------------------- |
+| domain                      | string    | 脚本     | 领域词（由 init 从领域描述提炼）                                                                             |
+| phase                       | string    | 脚本     | 运行状态：`init` / `running` / `converged` / `failed`；中间态由 pending\_batch 承载                         |
+| structure.nodes\[].name     | string    | LLM    | 节点名（唯一）                                                                                         |
+| structure.nodes\[].parent   | string    | LLM    | 父节点名（根节点为空字符串）                                                                                  |
+| structure.nodes\[].terms    | string\[] | LLM+脚本 | 核心搜索词；extract 的 new\_terms 由脚本写回对应节点                                                            |
+| structure.nodes\[].entities | object\[] | LLM+脚本 | 实体 `{name, kind}`，kind ∈ {机构, 厂商, 产品, 项目, 规范}；extract 的 new\_entities 由脚本写回对应节点                 |
+| structure.nodes\[].dims     | string\[] | LLM+脚本 | 适用探索维度；plan 使用新 angle 时脚本同步加入                                                                   |
+| structure.nodes\[].angles   | string\[] | 脚本     | 已搜索角度（每次搜索后把 query 的 angle 并入）                                                                  |
+| sources\[]                  | object\[] | 脚本     | 源集合条目（name/url/source\_type/granularity/node/description/first\_seen\_batch/first\_seen\_query） |
+| pending\_batch              | object    | 脚本     | 当前已规划待搜索的批次（--plan 写入，--commit 处理完清空）                                                           |
+| pending\_batch.queries\[]   | object\[] | 脚本     | `{query_id, query, node, angle, reason, status, attempts}`，status ∈ {pending, done, failed}     |
+| exploration.search\_history | object\[] | 脚本     | 搜索历史（batch/query/node/结果数/去重后新增数/失败数）                                                           |
+| exploration.gaps            | object\[] | 脚本     | 开放缺口清单（description/node）；每轮 review 后整体替换，无 status                                               |
+| exploration.loop\_stats     | object    | 脚本     | 循环统计（批次计数/连续无新增计数/失败查询数）                                                                        |
 
 设计原则（引用设计文档）：状态仅记录事实，不记录判断。`converged` 与理由不在 state 中持久化，只作为 `--review` 子命令的即时输出。
+
+### 领域结构增量写回
+
+extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 structure，规则：
+
+- new\_entities 的每个 `{name, kind, node}` → 追加到 name 匹配节点的 entities（去重）；
+
+- new\_terms 的每个 `{term, node}` → 追加到 name 匹配节点的 terms（去重）；
+
+- new\_nodes 的每个 `{name, parent, terms, dims}` → 作为完整节点加入 structure.nodes（含可搜索字段，保证新节点可被后续 plan 搜索）；
+
+- plan 输出中某 query 的 angle 不在其节点 dims 中时，脚本将该 angle 同时加入该节点的 dims 与 angles（保持 angles ⊆ dims，收敛判据 `dims - angles` 才有意义）。
 
 ## 三、项目目录结构
 
@@ -96,11 +126,12 @@
 .claude/skills/autosource/
 ├── SKILL.md                  # 循环编排指令（宿主机械执行循环，见"交接接口"）
 ├── config.json               # LLM 与收敛参数配置（gitignore，含密钥）
+├── config.example.json       # 配置样例（不含密钥，git 跟踪）
 ├── scripts/
 │   ├── orchestrator.py       # 命令入口：--init / --plan / --commit / --review / --finalize
-│   ├── state.py              # state.json 读写与 schema 校验
+│   ├── state.py              # state.json 读写、schema 校验、原子写入
 │   ├── converge.py           # 收敛判据（客观覆盖校验 + 存活熔断）
-│   ├── search_provider.py    # 搜索源接口（SearchProvider.fetch） + HostSearchProvider 实现
+│   ├── search_provider.py    # 搜索源接口（SearchProvider.fetch）+ HostSearchProvider 实现
 │   ├── evidence.py           # 证据链校验（边界匹配算法）
 │   ├── llm_client.py         # 公司 OpenAI 兼容网关调用
 │   ├── prompts.py            # 4 个 LLM 节点的 prompt 模板
@@ -108,10 +139,19 @@
 ├── references/
 │   └── 分析报告模板.md        # 分析报告六板块模板
 └── outputs/                  # 运行产物（gitignore）
-    └── {领域词}_{时间戳}/
+    ├── run_{时间戳}/          # 运行目录（--init 创建，运行中状态与原始结果归档于此）
+    └── {领域词}_{时间戳}/     # finalize 后重命名的最终产物目录
 ```
 
-`outputs/` 结构见"交付物格式"。
+运行目录 `outputs/run_{时间戳}/` 内容：
+
+```
+run_{时间戳}/
+├── state.json              # 状态（含 pending_batch）
+├── search_results.json     # 当前批次宿主搜索结果（宿主写）
+└── raw/                    # 每批原始结果归档（溯源用）
+    └── batch_{batch_id}.json
+```
 
 ## 四、宿主↔脚本交接接口（循环协议）
 
@@ -119,17 +159,31 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 ### 脚本子命令
 
-| 子命令               | 输入           | 输出                                                       | 职责                                                          |
-| ----------------- | ------------ | -------------------------------------------------------- | ----------------------------------------------------------- |
-| `--init "<领域描述>"` | 领域描述         | 打印 state 摘要                                              | 调 LLM init 生成领域结构，初始化 state.json                            |
-| `--plan`          | 读 state.json | stdout 输出 JSON `{"queries":[{query,node,angle,reason}]}` | 调 LLM plan 生成下一批查询词                                         |
-| `--commit <结果文件>` | 搜索结果文件路径     | 打印入库统计                                                   | 经 SearchProvider 读取搜索结果，调 LLM extract，证据校验+去重+更新 state.json |
-| `--review`        | 读 state.json | stdout 输出 JSON `{"converged":bool,"reason":str}`         | 调 LLM review + 脚本客观覆盖校验，判定收敛                                |
-| `--finalize`      | 读 state.json | 生成交付物并打印输出目录                                             | 生成 CSV/stats/报告，state.phase 置 converged                     |
+所有子命令均携带运行目录参数 `<run_dir>`（`--init` 创建并打印，后续命令照抄）。
+
+| 子命令                                        | 输入           | 输出                                          | 职责                                                                                                            |
+| ------------------------------------------ | ------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `--init "<领域描述>"`                          | 领域描述         | 创建运行目录并打印路径                                 | 调 LLM init 生成领域结构，初始化 state.json（phase=running）                                                               |
+| `--plan <run_dir>`                         | 读 state.json | stdout 输出 `{"queries":[...]}`               | 调 LLM plan 生成查询词，**写入 state.pending\_batch（status=pending）**，再输出                                              |
+| `--commit <run_dir> <search_results.json>` | 结果文件路径       | 打印入库统计                                      | 读 pending\_batch，经 SearchProvider 取 SearchBatch，校验各 query 状态，extract + 证据校验 + 去重 + 更新 state，清空 pending\_batch |
+| `--review <run_dir>`                       | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review + 脚本客观覆盖校验，判定收敛                                                                                  |
+| `--finalize <run_dir>`                     | 读 state.json | 生成交付物，重命名运行目录                               | 生成 CSV/stats/报告，state.phase 置 converged                                                                       |
+
+### 批次生命周期与失败处理
+
+- `--plan` 把查询词**持久化**到 `state.pending_batch`（status=pending，attempts=0）后才输出——即使宿主后续中断，state 仍记录"本批计划了什么"；
+
+- 宿主对每个 query 调 websearch，失败重试（最多 2 次），把每个 query 的结果或失败标记写入 search\_results.json；
+
+- `--commit` 读取 pending\_batch 与 search\_results.json，逐 query 判定：有结果 → status=done；重试后仍无结果 → status=failed（attempts 记录实际次数）；
+
+- `--commit` 只处理 status=done 的 query 结果；failed 的 query 计入 exploration.loop\_stats.failed\_queries 与 search\_history.failed；
+
+- 批次处理完成（含 failed 判定）后清空 pending\_batch；连续 2 批失败率 ≥ 50% 触发失败中止。
 
 ### 搜索结果文件格式（宿主写、脚本读）
 
-宿主对 `--plan` 输出的每个 query 调 websearch，把原始结果（title/url/snippet）写入文件，格式：
+宿主对 `--plan` 输出的每个 query 调 websearch（失败重试 ≤2 次），把结果或失败标记写入文件：
 
 ```json
 [
@@ -138,6 +192,12 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
     "results": [
       {"title": "SONiC - Software for Open Networking", "url": "https://sonic-net.github.io/SONiC/", "snippet": "..."}
     ]
+  },
+  {
+    "query": "某个失败的查询",
+    "results": [],
+    "failed": true,
+    "attempts": 2
   }
 ]
 ```
@@ -149,15 +209,16 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 脚本通过 `SearchProvider` 接口获取搜索结果，将"从哪拿结果"与"怎么处理结果"解耦。接口契约：
 
 ```text
-SearchProvider.fetch(queries) -> 该批查询词的搜索结果（title / url / snippet）
+SearchProvider.fetch(queries) -> SearchBatch
+SearchBatch = [{query, results: [{title, url, snippet}], failed, attempts}]
 ```
 
 两个实现：
 
-| Provider           | 形态        | 实现                                        |
-| ------------------ | --------- | ----------------------------------------- |
-| HostSearchProvider | Skill（当前） | 从宿主写入的 search\_results.json 读取并匹配 queries |
-| ApiSearchProvider  | 独立程序（将来）  | 逐个 query 调搜索 API                          |
+| Provider           | 形态        | 实现                                                |
+| ------------------ | --------- | ------------------------------------------------- |
+| HostSearchProvider | Skill（当前） | 从宿主写入的 search\_results.json 读取，按 queries 匹配并校验完整性 |
+| ApiSearchProvider  | 独立程序（将来）  | 逐个 query 调搜索 API，产出同样的 SearchBatch                |
 
 约束：
 
@@ -170,21 +231,21 @@ SearchProvider.fetch(queries) -> 该批查询词的搜索结果（title / url / 
 ### 宿主循环（写入 SKILL.md 的机械步骤）
 
 ```
-1. 运行 --init "<领域描述>"
+1. run_dir = 运行 --init "<领域描述>"，解析打印的路径
 2. 循环：
-   a. 运行 --plan，解析 stdout 的 queries
-   b. 对每个 query 调 websearch，把全部结果按上述格式写入 search_results.json
-   c. 运行 --commit search_results.json
-   d. 运行 --review，解析 stdout 的 converged
+   a. 运行 --plan <run_dir>，解析 stdout 的 queries
+   b. 对每个 query 调 websearch（失败重试 ≤2 次），把结果或失败标记写入 <run_dir>/search_results.json
+   c. 运行 --commit <run_dir> <run_dir>/search_results.json
+   d. 运行 --review <run_dir>，解析 stdout 的 converged
    e. 若 converged 为 true，退出循环
-3. 运行 --finalize
+3. 运行 --finalize <run_dir>
 ```
 
-宿主在循环中不自行判断是否继续——一切以 `--review` 返回的 converged 为准。
+宿主在循环中不自行判断是否继续——一切以 `--review` 返回的 converged 为准。搜索重试由宿主执行（脚本不主动调搜索）。
 
 ## 五、证据链校验算法
 
-校验目标：候选 URL 必须逐字出现在搜索结果的原始记录（search\_results.json）中，杜绝凭先验知识补 URL、URL 转写错误、URL 截短。
+校验目标：候选 URL 必须逐字出现在搜索结果的原始记录（search\_results.json，归档于 raw/batch\_\*.json）中，杜绝凭先验知识补 URL、URL 转写错误、URL 截短。
 
 算法（边界匹配，逐条对候选 source 执行）：
 
@@ -241,7 +302,7 @@ SearchProvider.fetch(queries) -> 该批查询词的搜索结果（title / url / 
 搜索历史（最近几批）：{{recent_search_history}}
 
 规划规则：
-- 优先针对缺口清单中"未补"的缺口定向搜索；
+- 优先针对缺口清单中的开放缺口定向搜索；
 - 查询词角度取自对应节点的 dims（优先搜索尚未覆盖的角度），允许使用搜索中新发现的维度；
 - 查询词构造词类：
   1. 组织形式词：数据库、排名、列表、标准、仓库、数据集、文献库、合集等；
@@ -272,29 +333,31 @@ SearchProvider.fetch(queries) -> 该批查询词的搜索结果（title / url / 
 
 只输出 JSON，不要其他文字：
 {"sources":[{"name":"...","url":"...","source_type":"...","granularity":"...","node":"...","description":"..."}],
- "new_entities":[{"name":"...","kind":"机构|厂商|产品|项目|规范"}],
- "new_terms":["..."],
- "new_nodes":[{"name":"...","parent":"..."}]}
+ "new_entities":[{"name":"...","kind":"机构|厂商|产品|项目|规范","node":"..."}],
+ "new_terms":[{"term":"...","node":"..."}],
+ "new_nodes":[{"name":"...","parent":"...","terms":["..."],"dims":["..."]}]}
+new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 必须给完整可搜索字段（terms/dims）。
 ```
 
 ### review：评审
 
 ```
-你是数据源发现系统的评审器。基于当前状态，生成缺口清单与覆盖充分性判断。
+你是数据源发现系统的评审器。基于当前状态，生成开放缺口清单与覆盖充分性判断。
 
 领域结构：{{structure}}
 源集合统计：{{source_summary}}
 搜索历史：{{search_history}}
 
 评审规则：
-- 缺口清单：指出该领域尚未覆盖的方向/维度/实体，每条标注归属节点，状态填"未补"；
+- 开放缺口清单：只列出当前仍未覆盖的方向/维度/实体，每条标注归属节点（已覆盖的不再列出，缺口被补齐后自然消失）；
 - 覆盖充分性判断：领域的主要子方向是否都已有数据源覆盖、是否还有明显未探索的维度；
 - 客观覆盖条件（脚本另行校验，此处只做语义判断）：各节点适用维度是否都已搜索、是否有明显遗漏。
 
 只输出 JSON，不要其他文字：
-{"gaps":[{"description":"...","node":"...","status":"未补"}],
+{"gaps":[{"description":"...","node":"..."}],
  "converged":true或false,
  "reason":"..."}
+gaps 是"当前全部开放缺口"——脚本用它整体替换 state.exploration.gaps。
 ```
 
 ## 七、交付物格式
@@ -308,24 +371,26 @@ outputs/{领域词}_{时间戳}/
 └── intermediate/
     ├── {领域词}_{时间戳}_stats.csv     # 清单统计（每节点条数/体裁分布 + 总计行）
     ├── {领域词}_{时间戳}_搜索日志.csv  # 搜索复盘（每次搜索的查询词/提取数）
-    └── {领域词}_{时间戳}_溯源.csv      # 数据血缘（结果 URL ↔ 收录条目 ↔ 查询词）
+    ├── {领域词}_{时间戳}_溯源.csv      # 数据血缘（结果 URL ↔ 收录条目 ↔ 查询词）
+    ├── state.json                     # 状态快照归档
+    └── raw/                           # 每批原始搜索结果归档（溯源依据）
 ```
 
 ### 数据源清单 CSV（7 列）
 
-| 列     | 说明                          |
-| ----- | --------------------------- |
-| 数据源名称 | 条目名称                        |
-| 分类路径  | 完整层级路径，用 `-` 连接，末段与 node 一致 |
-| 数据源类型 | source\_type（内容体裁）          |
-| 粒度    | 合集级 / 单篇级                   |
-| 访问地址  | URL（已剥离引用序号锚点）              |
-| 简要说明  | description                 |
-| 来源搜索  | 该 URL 首次出现的查询词              |
+| 列     | 说明                                           |
+| ----- | -------------------------------------------- |
+| 数据源名称 | 条目名称                                         |
+| 分类路径  | 完整层级路径，用 `-` 连接，末段与 node 一致                  |
+| 数据源类型 | source\_type（内容体裁）                           |
+| 粒度    | 合集级 / 单篇级                                    |
+| 访问地址  | URL（已剥离引用序号锚点）                               |
+| 简要说明  | description                                  |
+| 来源搜索  | 该 URL 首次出现的查询词（取自 source.first\_seen\_query） |
 
 ### 分析报告（六板块）
 
-概览 / 技术格局 / 产业生态 / 标准体系 / 中外对比 / 趋势观察。模板见 `references/分析报告模板.md`。报告由脚本从 state 生成"数据总览"节（统计数字由脚本注入，LLM 不写统计数字）。
+概览 / 技术格局 / 产业生态 / 标准体系 / 中外对比 / 趋势观察。模板见 `references/分析报告模板.md`。"数据总览"节由脚本从 state 生成（统计数字由脚本注入，LLM 不写统计数字）；报告六板块正文由 `--finalize` 内的一次额外 LLM 调用生成（输入 state 摘要与已收录源清单，输出六板块正文）。
 
 ### stats.csv
 
@@ -333,36 +398,60 @@ outputs/{领域词}_{时间戳}/
 
 ### 搜索日志.csv
 
-每次搜索一行：phase（规划搜索）、node、query、结果数、提取数、去重后新增数。
+每次搜索一行：batch、node、query、结果数、提取数、去重后新增数、失败数。
 
 ### 溯源.csv
 
-数据血缘：结果 URL ↔ 收录条目 ↔ 查询词的正查/反查对应关系。
+数据血缘：结果 URL ↔ 收录条目 ↔ 查询词的正查/反查对应关系。依据为 state 中每条 source 的 first\_seen\_batch / first\_seen\_query，结合 intermediate/raw/ 归档的原始结果反查。同一 URL 多次命中时取最早成功查询（first\_seen 语义）。
 
-## 八、断点续跑流程
+## 八、状态机、断点续跑与隔离
 
-状态序列化文件 `state.json` 是断点续跑的唯一依据。
+### 状态机
 
-- 运行开始：`--init` 若发现 state.json 存在且 `phase` 为 `running`，则跳过初始化、从当前状态续跑（不重新拆解领域）；
+phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（已规划待搜索 / 部分搜索完成）由 `pending_batch` 承载——pending\_batch 非空表示存在待处理批次。
 
-- 续跑起点：直接进入 `--plan`，基于已有 state 继续规划下一批查询词；
+| 迁移                        | 触发                           |
+| ------------------------- | ---------------------------- |
+| init → running            | --init 完成领域拆解后               |
+| running → converged       | --review 判定收敛（客观覆盖 + LLM 确认） |
+| running → failed          | 失败率超阈值、熔断触发、或 LLM 异常无法恢复     |
+| converged / failed → 重新运行 | --init 需用户确认重置（避免覆盖历史产物）     |
 
-- 运行结束：`--finalize` 将 `phase` 置为 `converged`；失败中止时置为 `failed`（保留已收录数据源）；
+### 运行目录与隔离
 
-- 重新运行：`phase` 为 `converged` 或 `failed` 时，`--init` 提示用户是否重置（避免覆盖历史运行产物）。
+每次运行一个独立运行目录 `outputs/run_{时间戳}/`（--init 创建并打印路径，后续命令均携带该路径）。state.json、search\_results.json、raw/ 归档均在运行目录内，多次运行、并发运行互不干扰。finalize 时重命名为 `outputs/{领域词}_{时间戳}/`。
+
+### 原子写入与幂等
+
+- state.json 写入采用"写临时文件 + 原子替换"（崩溃不损坏状态）；
+
+- `--commit` 幂等：处理完 pending\_batch 即清空；重跑时 pending\_batch 为空则无操作；URL 幂等去重保证不重复入库。
+
+### 中断恢复
+
+| 中断位置                            | 恢复方式                                         |
+| ------------------------------- | -------------------------------------------- |
+| --plan 后（pending\_batch 已写、未搜索） | 续跑时宿主先搜索 pending\_batch 的 queries，再 --commit |
+| 搜索中（部分 query 已搜）                | 宿主对 status=pending 的 query 补搜，再 --commit     |
+| --commit 中                      | 重跑 --commit 安全（幂等）                           |
+| --review 后                      | state 已更新，续跑时 --plan 继续下一批                   |
+
+续跑入口：`--init` 发现运行目录已存在 state.json 且 phase=running 时，跳过领域拆解，直接按上表从 pending\_batch 状态恢复。
 
 ## 九、LLM 参数注入
 
 LLM 通过公司 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，支持 function calling，无内置搜索服务）。
 
-`config.json`（gitignore，不提交密钥）字段：
+`config.json`（gitignore，不提交密钥）字段，`config.example.json` 提供不含密钥的样例：
 
 ```json
 {
   "llm": {
     "base_url": "公司网关地址",
     "api_key": "由部署环境提供",
-    "model": "deepseek-v4-flash"
+    "model": "deepseek-v4-flash",
+    "timeout": 60,
+    "retry": 2
   },
   "converge": {
     "k": 4,
@@ -376,3 +465,12 @@ LLM 通过公司 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，�
 ```
 
 脚本通过环境变量或 config.json 读取，密钥不写入代码、不写入文档。搜索不接入外部搜索 API（宿主内置 websearch，免费且国内可用）。
+
+### LLM 异常策略
+
+- 返回 JSON 非法或字段缺失：重试（最多 `llm.retry` 次），仍失败则该节点调用失败；
+
+- 超时 / 网关错误：重试（最多 `llm.retry` 次）；
+
+- 连续 LLM 调用失败无法恢复：state.phase 置 failed，保留已收录数据源，显式声明失败。
+
