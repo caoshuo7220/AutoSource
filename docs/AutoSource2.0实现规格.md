@@ -12,7 +12,7 @@
 | ------------ | --- | ---------------------------------------------- |
 | K（连续无新增批次阈值） | 4   | 连续 K 批无任何新增来源时触发收敛判断（沿用 1.0"连续 4 次无新增饱和"的实测经验） |
 | 每批查询词数       | 3-5 | plan 节点每次生成的查询词数量                              |
-| 单次查询重试次数     | 2   | 由宿主重试；仍失败则标记该查询 failed                         |
+| 单次查询重试次数     | 2   | 首次 + 2 次重试（最多 3 次尝试）；仍异常则标记该查询 failed          |
 | 失败率阈值        | 50% | 连续 2 批失败率 ≥ 50% 判定搜索服务异常，中止循环                  |
 | 熔断批次上限       | 100 | 存活熔断：总批次数达到上限判定收敛判据失效，异常中止（保留状态、声明失败），非成功终止    |
 
@@ -118,6 +118,16 @@ extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 str
 
 - plan 输出中某 query 的 angle 不在其节点 dims 中时，脚本将该 angle 同时加入该节点的 dims 与 angles（保持 angles ⊆ dims，收敛判据 `dims - angles` 才有意义）。
 
+### 树校验规则
+
+- 根节点 parent 为空字符串；其余节点 parent 必须指向已存在的节点名；
+
+- source 的 node 必须是叶子节点（无子节点的节点）；
+
+- 完整分类路径 = 从根到该节点的路径，各节点名用 `-` 连接，末段与 node 一致（供 CSV"分类路径"列）；
+
+- 脚本在 --init 与每次增量写回后校验：无孤儿节点、无重复节点名、parent 可解析、source 的 node 均在叶子节点集合内。
+
 ## 三、项目目录结构
 
 2.0 代码位于现有仓库的 `autosource-2.0` 分支，目录如下：
@@ -127,6 +137,7 @@ extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 str
 ├── SKILL.md                  # 循环编排指令（宿主机械执行循环，见"交接接口"）
 ├── config.json               # LLM 与收敛参数配置（gitignore，含密钥）
 ├── config.example.json       # 配置样例（不含密钥，git 跟踪）
+├── requirements.txt          # 依赖清单（Python 依赖）
 ├── scripts/
 │   ├── orchestrator.py       # 命令入口：--init / --plan / --commit / --review / --finalize
 │   ├── state.py              # state.json 读写、schema 校验、原子写入
@@ -173,9 +184,9 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 - `--plan` 把查询词**持久化**到 `state.pending_batch`（status=pending，attempts=0）后才输出——即使宿主后续中断，state 仍记录"本批计划了什么"；
 
-- 宿主对每个 query 调 websearch，失败重试（最多 2 次），把每个 query 的结果或失败标记写入 search\_results.json；
+- 宿主对每个 query 调 websearch（首次 + 最多 2 次重试，即总共最多 3 次尝试），把每个 query 的结果或失败标记写入 search\_results.json；
 
-- `--commit` 读取 pending\_batch 与 search\_results.json，逐 query 判定：有结果 → status=done；重试后仍无结果 → status=failed（attempts 记录实际次数）；
+- `--commit` 读取 pending\_batch 与 search\_results.json，逐 query 判定：搜索执行成功 → status=done（results 允许为空数组，表示成功但 0 条结果）；执行异常（超时/网关错误）且重试耗尽 → status=failed（attempts 记录实际尝试次数）；
 
 - `--commit` 只处理 status=done 的 query 结果；failed 的 query 计入 exploration.loop\_stats.failed\_queries 与 search\_history.failed；
 
@@ -185,7 +196,7 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 ### 搜索结果文件格式（宿主写、脚本读）
 
-宿主对 `--plan` 输出的每个 query 调 websearch（失败重试 ≤2 次），把结果或失败标记写入文件：
+宿主对 `--plan` 输出的每个 query 调 websearch（首次 + 最多 2 次重试），把结果或失败标记写入文件；`failed` 仅表示执行异常，`results` 为空数组且 `failed=false` 表示成功但 0 条结果：
 
 ```json
 [
@@ -196,10 +207,16 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
     ]
   },
   {
+    "query": "某个成功但无结果的查询",
+    "results": [],
+    "failed": false,
+    "attempts": 1
+  },
+  {
     "query": "某个失败的查询",
     "results": [],
     "failed": true,
-    "attempts": 2
+    "attempts": 3
   }
 ]
 ```
@@ -212,15 +229,15 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 ```text
 SearchProvider.fetch(queries) -> SearchBatch
-SearchBatch = [{query, results: [{title, url, snippet}], failed, attempts}]
+SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attempts}]
 ```
 
 两个实现：
 
-| Provider           | 形态        | 实现                                                |
-| ------------------ | --------- | ------------------------------------------------- |
-| HostSearchProvider | Skill（当前） | 从宿主写入的 search\_results.json 读取，按 queries 匹配并校验完整性 |
-| ApiSearchProvider  | 独立程序（将来）  | 逐个 query 调搜索 API，产出同样的 SearchBatch                |
+| Provider           | 形态        | 实现                                                                                          |
+| ------------------ | --------- | ------------------------------------------------------------------------------------------- |
+| HostSearchProvider | Skill（当前） | 构造时接收 search\_results.json 路径（来自 --commit 参数），按 query\_id 匹配并校验完整性（不按 query 文本匹配，避免重复查询词歧义） |
+| ApiSearchProvider  | 独立程序（将来）  | 逐个 query 调搜索 API，产出同样的 SearchBatch                                                          |
 
 约束：
 
@@ -242,10 +259,11 @@ SearchBatch = [{query, results: [{title, url, snippet}], failed, attempts}]
 
 `--review` 内部按以下顺序执行：
 
-1. 脚本校验客观覆盖三条件：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增；
-2. 任一条件未达成 → 直接返回 converged=false（客观覆盖一票否决，不调 LLM）；
-3. 三条件全部达成 → 调 LLM review，取 LLM 返回的 converged；
-4. 最终返回 converged = 客观覆盖达成 且 LLM 确认。
+1. 调 LLM review，输出 gaps + converged + reason；
+2. 脚本用 review 的 gaps 整体替换 state.exploration.gaps（开放缺口每批更新，反馈闭环生效）；
+3. 脚本校验客观覆盖三条件（用更新后的 gaps）：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增；
+4. 客观覆盖未达成 → 返回 converged=false（客观覆盖一票否决，LLM 的 converged 无效）；
+5. 客观覆盖达成 → 返回 converged = LLM 的 converged（LLM 确认是最后一关）。
 
 ### 宿主循环（写入 SKILL.md 的机械步骤）
 
@@ -466,12 +484,12 @@ phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（�
 
 ### 中断恢复
 
-| 中断位置                            | 恢复方式                                         |
-| ------------------------------- | -------------------------------------------- |
-| --plan 后（pending\_batch 已写、未搜索） | 续跑时宿主先搜索 pending\_batch 的 queries，再 --commit |
-| 搜索中（部分 query 已搜）                | 宿主对 status=pending 的 query 补搜，再 --commit     |
-| --commit 中                      | 重跑 --commit 安全（幂等）                           |
-| --review 后                      | state 已更新，续跑时 --plan 继续下一批                   |
+| 中断位置                            | 恢复方式                                                |
+| ------------------------------- | --------------------------------------------------- |
+| --plan 后（pending\_batch 已写、未搜索） | 续跑时宿主先搜索 pending\_batch 的 queries，再 --commit        |
+| 搜索中（部分 query 已搜）                | 宿主按 search\_results.json 已有的 query 补齐缺失项，再 --commit |
+| --commit 中                      | 重跑 --commit 安全（幂等）                                  |
+| --review 后                      | state 已更新，续跑时 --plan 继续下一批                          |
 
 续跑入口：`--init` 发现运行目录已存在 state.json 且 phase=running 时，跳过领域拆解，直接按上表从 pending\_batch 状态恢复。
 
@@ -511,3 +529,24 @@ LLM 通过公司 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，�
 
 - 连续 LLM 调用失败无法恢复：state.phase 置 failed，保留已收录数据源，显式声明失败。
 
+## 十、验收测试清单
+
+开发完成后的自动化测试至少覆盖：
+
+- 空成功结果：搜索成功但 0 条结果 → 计入 done + 无新增，不计 failed；
+
+- 部分失败：一批中部分 query failed → 失败率统计正确、failed 不影响无新增判断；
+
+- review 产生新 gaps：review 每批更新 gaps，plan 能按新 gaps 补搜（反馈闭环）；
+
+- 重复 query：两个 query 文本相同 → 靠 query\_id 区分，互不混淆；
+
+- commit 中断恢复：pending\_batch 未清空时重跑 --commit 幂等、不重复入库；
+
+- 溯源首见归因：同一 URL 多次命中，first\_seen 取最早成功查询；
+
+- 熔断：批次数达 100 → 异常中止 + 保留状态 + 声明失败；
+
+- 报告 LLM 失败：--finalize 内报告生成 LLM 失败 → 重试后仍失败则报告降级（正文缺失但 CSV/stats 正常产出）。
+
+测试命令：`python -m pytest tests/ -q`。
