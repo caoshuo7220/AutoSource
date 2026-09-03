@@ -116,7 +116,9 @@ extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 str
 
 - new\_nodes 的每个 `{name, parent, terms, dims}` → 作为完整节点加入 structure.nodes（含可搜索字段，保证新节点可被后续 plan 搜索）；
 
-- plan 输出中某 query 的 angle 不在其节点 dims 中时，脚本将该 angle 同时加入该节点的 dims 与 angles（保持 angles ⊆ dims，收敛判据 `dims - angles` 才有意义）。
+- plan 输出中某 query 的 angle 不在其节点 dims 中时，脚本将该 angle 加入 dims（声明该维度需要搜索）；
+
+- \--commit 时，仅当 query status=done 才把其 angle 加入该节点的 angles（表示已搜索）；failed 时 angle 保持在 dims - angles，后续 plan 可继续补搜，不视为已覆盖。
 
 ### 树校验规则
 
@@ -196,27 +198,33 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 
 ### 搜索结果文件格式（宿主写、脚本读）
 
-宿主对 `--plan` 输出的每个 query 调 websearch（首次 + 最多 2 次重试），把结果或失败标记写入文件；`failed` 仅表示执行异常，`results` 为空数组且 `failed=false` 表示成功但 0 条结果：
+宿主对 `--plan` 输出的每个 query 调 websearch（首次 + 最多 2 次重试），把结果或失败标记写入文件。每个结果项必填 query\_id / query / results / failed / attempts；`failed=false` 表示执行成功（results 可为空数组，即 0 条结果），`failed=true` 表示执行异常（可附加 error 说明原因）：
 
 ```json
 [
   {
+    "query_id": 1,
     "query": "SONiC documentation",
     "results": [
       {"title": "SONiC - Software for Open Networking", "url": "https://sonic-net.github.io/SONiC/", "snippet": "..."}
-    ]
+    ],
+    "failed": false,
+    "attempts": 1
   },
   {
+    "query_id": 2,
     "query": "某个成功但无结果的查询",
     "results": [],
     "failed": false,
     "attempts": 1
   },
   {
+    "query_id": 3,
     "query": "某个失败的查询",
     "results": [],
     "failed": true,
-    "attempts": 3
+    "attempts": 3,
+    "error": "timeout"
   }
 ]
 ```
