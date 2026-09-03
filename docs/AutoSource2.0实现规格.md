@@ -166,6 +166,22 @@ run_{时间戳}/
     └── batch_{batch_id}.json
 ```
 
+### 1.0 文件处置清单
+
+本分支从 master 拉出，仍包含 1.0 的全部文件；1.0 已封盘于 master（tag v1.0），本分支可自由处置：
+
+- 删除：`scripts/mcp_server.py`、`scripts/evidence_hook.py`（MCP 架构整体废弃：2.0 不用 MCP 工具入库，也不用 hook 留痕）；
+
+- 复用（保留不改）：`scripts/evidence.py`（证据链边界匹配算法）、`references/分析报告模板.md`（报告六板块模板）；
+
+- 重写：`SKILL.md`（线性流程 → 循环编排指令）、`.claude/settings.json`（去掉 MCP 工具与 hook，改 2.0 权限白名单）、`tests/`（按第十章验收清单重写）；
+
+- 拆分迁移：`postprocess.py` → `orchestrator.py` + `deliver.py`（编排与交付分离，CSV/去重/stats/溯源逻辑迁入 deliver.py）；`store.py` → `state.py`（状态读写与 schema 校验）；`lineage.py`、`report.py` → 溯源与报告注入逻辑迁入 deliver.py；
+
+- 保留不动：`docs/01-05`（1.0 历史文档）、`README.md`（索引稍后更新）、`outputs/`（gitignore 运行产物）。
+
+处理原则：旧模块名（postprocess / store / lineage / report / mcp\_server / evidence\_hook）不再作为独立文件存在；仅 evidence.py 与报告模板跨版本复用。
+
 ## 四、宿主↔脚本交接接口（循环协议）
 
 Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的主体，脚本是宿主的子进程。因此循环由"宿主机械执行、脚本做确定性判定"协作完成。循环控制权在脚本（脚本判断收敛、决定继续或停），宿主不承担判断职责，只机械执行"反复循环直到脚本返回收敛"。
