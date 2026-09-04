@@ -1,0 +1,17 @@
+{
+  "llm": {
+    "base_url": "网关地址",
+    "api_key": "由部署环境提供",
+    "model": "<模型名，由部署环境提供>",
+    "timeout": 60,
+    "retry": 2
+  },
+  "converge": {
+    "k": 4,
+    "queries_per_batch_min": 3,
+    "queries_per_batch_max": 5,
+    "fuse_batch_limit": 100,
+    "retry": 2,
+    "fail_rate_threshold": 0.5
+  }
+}

@@ -7,10 +7,14 @@ CLAUDE.md
 # 其他 AI 工具的本地配置（Codex 等，不入库）
 .agents/
 .codex/
-# autosource outputs
+# autosource 运行产物（2.0 起在仓库根 outputs/）
 outputs/
+# autosource 1.0 历史运行产物
+outputs_1/
+# autosource 2.0 本地配置（含密钥，不入库）
+.claude/skills/autosource/config.json
 # 日报（个人记录，不入库）
 docs/日报/
 # local overrides (not committed)
 .claude/settings.local.json
-evals/
+

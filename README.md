@@ -1,6 +1,6 @@
 # AutoSource
 
-数据源自动发现 Skill（Claude Code）——输入 `/autosource <领域描述>`，自动完成**领域拆解 → 数据源搜索 → 去重整理 → 导出 CSV**全流程，产出该领域的公开数据源清单。
+数据源自动发现 Skill（收敛式循环）——输入 `/autosource <领域描述>`，系统性地发现该领域的公开数据源（官方文档、知识库、数据集、标准、社区等成体系载体），导出结构化清单。
 
 ## 快速开始
 
@@ -9,45 +9,45 @@
 
 输出: outputs/{领域词}_{时间戳}/
       ├── {领域词}_{时间戳}_数据源清单.csv   ← 交付物（UTF-8 BOM，Excel 直接打开）
-      ├── {领域词}_{时间戳}_分析报告.md      ← 交付物（领域分析：概览/技术格局/产业生态/标准体系/中外对比/趋势观察）
-      └── intermediate/                      ← 排障与对比材料（发现问题时才查）
-          ├── {领域词}_{时间戳}_stats.csv    ← 清单统计（每节点条数/体裁分布 + 总计行；跨轮对比）
+      ├── {领域词}_{时间戳}_分析报告.md      ← 交付物（六板块正文 + 脚本注入数据总览）
+      └── intermediate/                      ← 排障与溯源材料
+          ├── {领域词}_{时间戳}_stats.csv    ← 清单统计（每节点条数/体裁分布 + 总计行）
           ├── {领域词}_{时间戳}_搜索日志.csv  ← 搜索复盘（每次搜索的查询词/提取数）
-          ├── {领域词}_{时间戳}_溯源.csv      ← 数据血缘（正查/反查：结果与收录对应）
-          ├── store_input.jsonl             ← 存储快照（record 工具落库的原始 store）
-          ├── manifest_input.json           ← 清单快照（声明版/最终核对态归档）
-          └── evidence_log.jsonl            ← 证据留痕（本运行切片，调试/复盘）
+          ├── {领域词}_{时间戳}_溯源.csv      ← 数据血缘（结果 URL ↔ 收录条目 ↔ 查询词）
+          ├── state.json                     ← 状态快照归档
+          └── raw/                           ← 每批原始搜索结果归档
 ```
 
-首次使用需信任项目（确认一次 settings.json 的权限与 hook 分发）。
+## 运行前提
+
+复制 `.claude/skills/autosource/config.example.json` 为 `.claude/skills/autosource/config.json`，填入 LLM 网关的 `base_url` / `api_key` / `model`（含密钥，不入库）。收敛与失败参数（K、每批查询词数、单次查询重试、失败率阈值、熔断批次上限）也集中在此文件，脚本读取、不硬编码。
 
 ## 架构
 
 ```
-Skill     .claude/skills/autosource/SKILL.md               ← 单条线性流程：拆解 → 知识清单 → 验证搜索 → 增量发现 → 扩量 → 收尾
-后处理    .claude/skills/autosource/scripts/postprocess.py ← 流水线编排（证据校验/去重/CSV/stats/清理 + finalize 折叠）
-          ├── evidence.py ← 证据链（留痕定位/边界匹配/切片/锚点清理）
-          ├── lineage.py  ← 数据血缘（溯源.csv 与"来源搜索"归因）
-          └── report.py   ← 分析报告（数据总览注入 + 命名）
-存储层    .claude/skills/autosource/scripts/store.py       ← store.jsonl 追加日志 + 入库即验 + coverage 对账（模型不碰数据文件）
-MCP 服务  .claude/skills/autosource/scripts/mcp_server.py  ← 四工具：record_sources / record_search / coverage / finalize（.mcp.json 注册，会话自动拉起）
-证据链    .claude/skills/autosource/scripts/evidence_hook.py ← PostToolUse hook：系统记录搜索留痕，防 URL 编造（校验逻辑在 evidence.py）
+Skill     .claude/skills/autosource/SKILL.md          ← 循环编排指令（固定步骤循环，脚本判定收敛）
+脚本      .claude/skills/autosource/scripts/
+          ├── orchestrator.py   命令入口：--init / --plan / --commit / --review / --finalize
+          ├── state.py          状态读写 / schema 校验 / 原子写入 / 树校验 / 增量写回
+          ├── converge.py       收敛判据（客观覆盖三条件 + 存活熔断 + 失败率）
+          ├── search_provider.py 搜索源接口（SearchProvider.fetch）+ HostSearchProvider
+          ├── evidence.py       证据链校验（边界匹配算法）
+          ├── llm_client.py     OpenAI 兼容网关调用
+          ├── prompts.py        5 个 LLM 节点 prompt 模板（init / plan / extract / review / report）
+          └── deliver.py        交付物生成（CSV / stats / 搜索日志 / 溯源 / 报告）
 ```
 
-设计原则：**LLM 只负责语义（拆解、判断），确定性环节全部脚本化**——数据落盘走 MCP 工具入库（单次输出 ≤ 一个节点批次，写入截断在机制上不可能发生），元数据走 manifest.json。
+循环由脚本驱动、按固定步骤执行：「--init → 循环（--plan → websearch → --commit → --review）→ --finalize」；收敛判定、证据校验、去重、状态管理全部由脚本保证，LLM 只承担语义环节（拆解 / 规划 / 提取 / 评审 / 报告）。
 
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 184 个测试，预期全过
+python -m pytest tests/ -q
 ```
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [docs/01-交付手册.md](docs/01-交付手册.md) | 交付接手者必读：项目全景、关键决策、验收标准、使用说明 |
-| [docs/02-日志手册.md](docs/02-日志手册.md) | 每日工作日志（干了什么、每个决策的来龙去脉）、两路方案决策集附录（D1-D11） |
-| [docs/03-待办账本.md](docs/03-待办账本.md) | 挂账/待实施/验收未决项（单一事实源，带触发条件与出处） |
-| [docs/04-存储架构改造方案.md](docs/04-存储架构改造方案.md) | 写入截断根治方案（已实施，2026-08-31 验收通过）：MCP 四工具 + manifest 瘦身 + store JSONL |
-| [docs/05-参考方案手册.md](docs/05-参考方案手册.md) | 外部调研：同类方案盘点、可复用组件、社区共识模式对照 |
+| [docs/AutoSource2.0设计.md](docs/AutoSource2.0设计.md) | 设计决策：收敛式循环（领域理解 / 反馈闭环 / 收敛判据）、职责分工、复用边界与领域知识沉淀 |
+| [docs/AutoSource2.0实现规格.md](docs/AutoSource2.0实现规格.md) | 实现规格：收敛与失败参数、状态 schema、宿主↔脚本交接接口、证据链算法、prompt 模板、交付物格式、验收测试清单 |

@@ -1,0 +1,2 @@
+# AutoSource 2.0 依赖清单
+# 仅依赖 Python 3.10+ 标准库（json / pathlib / csv / urllib / argparse），无第三方依赖。

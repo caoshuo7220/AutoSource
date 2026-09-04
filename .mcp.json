@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "autosource-store": {
-      "command": "python",
-      "args": [".claude/skills/autosource/scripts/mcp_server.py"]
-    }
-  }
-}

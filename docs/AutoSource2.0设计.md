@@ -121,9 +121,9 @@ AutoSource 2.0 的目标：系统性地发现指定领域的公开数据源，�
 
 ## 三、技术栈与环境
 
-- LLM：公司 OpenAI 兼容网关（OpenAI Chat Completions 协议），支持 function calling；模型与 base\_url 由部署配置注入（实测模型为 deepseek-v4-flash）；无内置搜索服务。
+- LLM：OpenAI 兼容网关（OpenAI Chat Completions 协议），支持 function calling；模型与 base_url 由部署配置注入（实测模型名由部署配置注入）；无内置搜索服务。
 
-- 搜索：宿主内置 websearch（TRAE / Claude Code 提供），免费且国内可用。不接入外部搜索 API（Tavily / SerpAPI / Brave 等收费且受国内网络限制，公司内部亦无搜索服务）。
+- 搜索：宿主内置 websearch（TRAE / Claude Code 提供），免费且国内可用。不接入外部搜索 API（Tavily / SerpAPI / Brave 等收费且受国内网络限制，亦无内部搜索服务）。
 
 - 编排：宿主内 Skill（SKILL.md + Python 脚本），无独立进程、无图状态机。
 
@@ -184,7 +184,7 @@ AutoSource 2.0 的目标：系统性地发现指定领域的公开数据源，�
 
 #### 易失效角度规则
 
-- 论文 / 专利 / 标准三类角度必须组合"领域词 + 入口词"（检索 / 列表 / 分类 / 目录 / 合集），否则命中通用平台首页被拒收；
+- 论文 / 专利 / 标准三类角度必须组合"领域词 + 入口词"（检索 / 列表 / 分类 / 目录 / 合集），否则命中通用平台首页将不予收录；
 
 - 英文查询避免未组合泛化后缀（list / standard list / directory / registry / collection），优先"领域词 + 厂商内容入口词"（documentation / official docs / datasheet / support / products）。
 
@@ -206,7 +206,7 @@ AutoSource 2.0 的目标：系统性地发现指定领域的公开数据源，�
 
 #### 证据链规则（脚本强制校验）
 
-- 候选 URL 逐字照抄搜索结果；
+- 候选 URL 从搜索结果中逐字复制；
 
 - 禁止凭先验知识补 URL（须先搜索使 URL 出现在结果中再收录）；
 

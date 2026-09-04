@@ -5,37 +5,16 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebSearch(*",
       "Read(**",
+      "Read(outputs/**)",
       "Write(outputs/**)",
       "Edit(outputs/**)",
-      "Bash(python .claude/skills/autosource/scripts/postprocess.py *)",
-      "mcp__autosource-store__record_sources",
-      "mcp__autosource-store__record_search",
-      "mcp__autosource-store__coverage",
-      "mcp__autosource-store__finalize",
+      "Bash(python .claude/skills/autosource/scripts/orchestrator.py *)",
       "Skill(autosource)",
       "Skill(autosource:*)"
     ],
-    "deny": [
-      "Read(outputs/**)",
-      "Glob(outputs*)"
-    ],
     "additionalDirectories": [
       ".claude/skills"
-    ]
-  },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "WebSearch|WebFetch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python .claude/skills/autosource/scripts/evidence_hook.py"
-          }
-        ]
-      }
     ]
   }
 }

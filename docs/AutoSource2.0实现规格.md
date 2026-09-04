@@ -136,7 +136,7 @@ extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 str
 
 ```
 .claude/skills/autosource/
-├── SKILL.md                  # 循环编排指令（宿主机械执行循环，见"交接接口"）
+├── SKILL.md                  # 循环编排指令（宿主按固定步骤执行循环，见"交接接口"）
 ├── config.json               # LLM 与收敛参数配置（gitignore，含密钥）
 ├── config.example.json       # 配置样例（不含密钥，git 跟踪）
 ├── requirements.txt          # 依赖清单（Python 依赖）
@@ -146,15 +146,14 @@ extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 str
 │   ├── converge.py           # 收敛判据（客观覆盖校验 + 存活熔断）
 │   ├── search_provider.py    # 搜索源接口（SearchProvider.fetch）+ HostSearchProvider 实现
 │   ├── evidence.py           # 证据链校验（边界匹配算法）
-│   ├── llm_client.py         # 公司 OpenAI 兼容网关调用
+│   ├── llm_client.py         # OpenAI 兼容网关调用
 │   ├── prompts.py            # 5 个 LLM 节点的 prompt 模板
 │   └── deliver.py            # 交付物生成（CSV / stats / 报告）
 ├── references/
 │   └── 分析报告模板.md        # 分析报告六板块模板
-└── outputs/                  # 运行产物（gitignore）
-    ├── run_{时间戳}/          # 运行目录（--init 创建，运行中状态与原始结果归档于此）
-    └── {领域词}_{时间戳}/     # finalize 后重命名的最终产物目录
 ```
+
+运行产物目录位于仓库根 `outputs/`（gitignore；1.0 历史产物已改名为 `outputs_1/`），skill 目录内不放置运行产物：
 
 运行目录 `outputs/run_{时间戳}/` 内容：
 
@@ -178,17 +177,17 @@ run_{时间戳}/
 
 - 拆分迁移：`postprocess.py` → `orchestrator.py` + `deliver.py`（编排与交付分离，CSV/去重/stats/溯源逻辑迁入 deliver.py）；`store.py` → `state.py`（状态读写与 schema 校验）；`lineage.py`、`report.py` → 溯源与报告注入逻辑迁入 deliver.py；
 
-- 保留不动：`docs/01-05`（1.0 历史文档）、`README.md`（索引稍后更新）、`outputs/`（gitignore 运行产物）。
+- 删除：`docs/01-05`（1.0 历史文档，已封盘于 master/tag v1.0）；`README.md` 重写为 2.0 索引；`outputs/` 保留（gitignore 运行产物）。
 
 处理原则：旧模块名（postprocess / store / lineage / report / mcp\_server / evidence\_hook）不再作为独立文件存在；仅 evidence.py 与报告模板跨版本复用。
 
 ## 四、宿主↔脚本交接接口（循环协议）
 
-Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的主体，脚本是宿主的子进程。因此循环由"宿主机械执行、脚本做确定性判定"协作完成。循环控制权在脚本（脚本判断收敛、决定继续或停），宿主不承担判断职责，只机械执行"反复循环直到脚本返回收敛"。
+Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的主体，脚本是宿主的子进程。因此循环由"宿主按固定步骤执行、脚本做确定性判定"协作完成。循环控制权在脚本（脚本判断收敛、决定继续或停），宿主不承担判断职责，只按固定步骤执行"反复循环直到脚本返回收敛"。
 
 ### 脚本子命令
 
-所有子命令均携带运行目录参数 `<run_dir>`（`--init` 创建并打印，后续命令照抄）。
+所有子命令均携带运行目录参数 `<run_dir>`（`--init` 创建并打印，后续命令原样沿用）。
 
 | 子命令                                        | 输入           | 输出                                          | 职责                                                                                                            |
 | ------------------------------------------ | ------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
@@ -297,7 +296,7 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 - failed\_queries：累计所有 status=failed 的 query 数。
 
-### 宿主循环（写入 SKILL.md 的机械步骤）
+### 宿主循环（写入 SKILL.md 的固定步骤）
 
 ```
 1. run_dir = 运行 --init "<领域描述>"，解析打印的路径
@@ -326,7 +325,7 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
    - 若 `before` 属于 URL\_CHARS，或 `after` 属于 URL\_CHARS，说明该匹配只是更长 URL 的前缀/片段（截短），此位置不通过；
 
-   - 例外一：`after` 为 `#` 时放行（fragment 不改变资源主体）；
+   - 例外一：`after` 为 `#` 时通过（fragment 不改变资源主体）；
 
    - 例外二：`?` 不豁免（query 改变内容，仍严格拒绝）；
 4. 存在任意一个位置通过，则该 URL 校验通过；否则拒绝并返回原因"URL 不在证据留痕中"。
@@ -337,7 +336,7 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 ## 六、LLM 节点 prompt 模板
 
-5 个 LLM 节点（init / plan / extract / review / report）通过公司 OpenAI 兼容网关调用（见"LLM 参数注入"）。其中 init / plan / extract / review 输出合法 JSON（脚本解析），report 输出 Markdown 正文。以下为各节点 prompt 模板，`{{...}}` 为注入的运行时数据。
+5 个 LLM 节点（init / plan / extract / review / report）通过 OpenAI 兼容网关调用（见"LLM 参数注入"）。其中 init / plan / extract / review 输出合法 JSON（脚本解析），report 输出 Markdown 正文。以下为各节点 prompt 模板，`{{...}}` 为注入的运行时数据。
 
 ### init：领域拆解
 
@@ -392,13 +391,13 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 搜索结果：{{search_results}}
 
-逐条判断（禁止整行拒收）：
+逐条判断（禁止整行拒绝）：
 - 每条结果独立判断收或不收；
 - 标注 granularity：合集级 / 单篇级；同一来源同时有合集入口与单篇时，优先收合集入口；
 - 语言版本偏好：同一内容多语言版本只收一个，优先级 中文 > 英文 > 其他；
 - 平台准入：知网、专利库、百科、标准平台首页等跨领域通用平台不收录；平台的领域专属入口可收；
 - source_type 从词类词汇（组织形式词/体裁词/来源角色词）中选取，不另造同义新词；
-- URL 必须逐字照抄搜索结果，禁止规范化、截短、凭先验知识补 URL。
+- URL 必须从搜索结果中逐字复制，禁止规范化、截短、凭先验知识补 URL。
 
 只输出 JSON，不要其他文字：
 {"sources":[{"name":"...","url":"...","source_type":"...","granularity":"...","node":"...","description":"..."}],
@@ -530,16 +529,16 @@ phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（�
 
 ## 九、LLM 参数注入
 
-LLM 通过公司 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，支持 function calling，无内置搜索服务）。
+LLM 通过 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，支持 function calling，无内置搜索服务）。
 
 `config.json`（gitignore，不提交密钥）字段，`config.example.json` 提供不含密钥的样例：
 
 ```json
 {
   "llm": {
-    "base_url": "公司网关地址",
+    "base_url": "网关地址",
     "api_key": "由部署环境提供",
-    "model": "deepseek-v4-flash",
+    "model": "<模型名，由部署环境提供>",
     "timeout": 60,
     "retry": 2
   },
