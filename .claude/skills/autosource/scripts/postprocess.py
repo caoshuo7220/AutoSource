@@ -214,6 +214,14 @@ def write_source_csv(path: Path, sources: list[dict],
             ])
 
 
+def _format_type_dist(types: dict[str, int]) -> str:
+    """体裁分布格式化：数量降序（同数按体裁名升序）拼成 "体裁:数" 串。"""
+    return "; ".join(
+        f"{t}:{c}"
+        for t, c in sorted(types.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+
+
 def write_stats_csv(path: Path, summary: dict) -> None:
     """写清单统计 CSV：每行一个分类节点（候选数/体裁分布），末尾一行总计。
 
@@ -225,16 +233,8 @@ def write_stats_csv(path: Path, summary: dict) -> None:
         writer = csv.writer(f)
         writer.writerow(STATS_CSV_HEADER)
         for node, info in summary["per_node"].items():
-            dist = "; ".join(
-                f"{t}:{c}"
-                for t, c in sorted(info["types"].items(), key=lambda kv: (-kv[1], kv[0]))
-            )
-            writer.writerow([node, info["count"], dist])
-        total_dist = "; ".join(
-            f"{t}:{c}"
-            for t, c in sorted(summary["total_types"].items(), key=lambda kv: (-kv[1], kv[0]))
-        )
-        writer.writerow(["总计", summary["kept"], total_dist])
+            writer.writerow([node, info["count"], _format_type_dist(info["types"])])
+        writer.writerow(["总计", summary["kept"], _format_type_dist(summary["total_types"])])
 
 
 def write_journal_csv(path: Path, journal_rows: list[list]) -> None:
@@ -371,8 +371,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     verification_claims = 0  # journal 声称的验证通过次数（验证搜索/扩量轮行）
     # 选题分类统计（2026-09-01 实体选题放开后的验证度量）：只统计增量发现/扩量轮行，
     # 验证搜索行按定义就是实体查询，已被 verified 字段覆盖、不参与分类
-    scope_framework = {"count": 0, "extracted": 0}
-    scope_other = {"count": 0, "extracted": 0, "by_node": {}}
+    in_framework = {"count": 0, "extracted": 0}
+    out_framework = {"count": 0, "extracted": 0, "by_node": {}}
     for j in journal:
         if not isinstance(j, dict):
             journal_skipped += 1
@@ -395,14 +395,14 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
             except (TypeError, ValueError):
                 extracted = 0
             if classify_query_scope(query, domain, nodes) == "框架内":
-                scope_framework["count"] += 1
-                scope_framework["extracted"] += extracted
+                in_framework["count"] += 1
+                in_framework["extracted"] += extracted
             else:
-                scope_other["count"] += 1
-                scope_other["extracted"] += extracted
+                out_framework["count"] += 1
+                out_framework["extracted"] += extracted
                 node = str(j.get("node") or "")
-                c, e = scope_other["by_node"].get(node, (0, 0))
-                scope_other["by_node"][node] = (c + 1, e + extracted)
+                c, e = out_framework["by_node"].get(node, (0, 0))
+                out_framework["by_node"][node] = (c + 1, e + extracted)
         journal_rows.append([
             phase,
             j.get("node", ""),
@@ -454,8 +454,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "list_verified": list_verified,
         "verification_mismatch": (verification_claims, len(merged))
                                  if verification_claims < len(merged) else None,
-        "scope_framework": scope_framework,
-        "scope_other": scope_other,
+        "in_framework": in_framework,
+        "out_framework": out_framework,
         "knowledge_missing": not knowledge,
         "incomplete": incomplete,
         "unverified": unverified,
@@ -542,7 +542,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     store_path = run_dir_path / "store.jsonl"
     records, bad_lines = load_store(store_path) if store_path.exists() else ([], 0)
 
-    # store 行含内部字段（type/node）——组装等价 raw 时剥离；
+    # store 行含内部字段（type/node/ts）——组装等价 raw 时剥离；
     # store 原件由 intermediate/store_input.jsonl 保留
     sources = [{k: v for k, v in r.items() if k not in ("type", "node", "ts")}
                for r in records if r.get("type") == "source"]
@@ -620,8 +620,8 @@ def summary_text(summary: dict) -> str:
         lines.append("警告: 搜索日志验证通过标记数与清单验证通过数不一致——"
                      f"journal 声称 {claims} 次 < 清单实际并入 {merged} 项"
                      f"（差 {merged - claims}）：verified 记账漏填（复盘时注意）")
-    if summary.get("scope_framework") is not None:
-        f, o = summary["scope_framework"], summary["scope_other"]
+    if summary.get("in_framework") is not None:
+        f, o = summary["in_framework"], summary["out_framework"]
         f_avg = f"{f['extracted'] / f['count']:.1f}" if f["count"] else "0"
         o_avg = f"{o['extracted'] / o['count']:.1f}" if o["count"] else "0"
         lines.append(f"选题分布: 含领域词 {f['count']} 次（每搜 {f_avg}）/ "
@@ -655,10 +655,7 @@ def summary_text(summary: dict) -> str:
                      f"（见 intermediate/）")
     lines.append("各节点:")
     for node, info in summary["per_node"].items():
-        dist = "; ".join(
-            f"{t}:{c}"
-            for t, c in sorted(info["types"].items(), key=lambda kv: (-kv[1], kv[0]))
-        )
+        dist = _format_type_dist(info["types"])
         suffix = f" ({dist})" if dist else ""
         lines.append(f"  {node}: {info['count']} 条{suffix}")
     empty = summary["empty_nodes"]

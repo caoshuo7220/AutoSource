@@ -61,7 +61,7 @@ URL_CHARS = frozenset(
 )
 
 
-def _contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
+def contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
     """needle 在 haystack 中的出现必须前后不与 boundary_chars 相邻（完整边界匹配）。
 
     `#` 是 fragment 分隔符（fragment 不改变资源主体）：needle 以 `#` 结尾视为
@@ -91,7 +91,7 @@ def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list
     kept: list[dict] = []
     rejected: list[dict] = []
     for s in sources:
-        if _contains_bounded(str(s.get("url") or ""), evidence, URL_CHARS):
+        if contains_bounded(str(s.get("url") or ""), evidence, URL_CHARS):
             kept.append(s)
         else:
             rejected.append(s)
@@ -126,7 +126,7 @@ def query_in_evidence(query: str, evidence: str) -> bool:
     return bool(query) and query in extract_strings(evidence)
 
 
-def _line_query(payload: dict) -> str:
+def line_query(payload: dict) -> str:
     """取留痕行的查询词：tool_input.query，缺省时取 tool_response.query。"""
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, dict) and tool_input.get("query"):
@@ -137,7 +137,7 @@ def _line_query(payload: dict) -> str:
     return ""
 
 
-def _result_urls(payload: dict) -> list[str]:
+def result_urls(payload: dict) -> list[str]:
     """提取一次搜索的结构化结果 URL（兼容 results[].url 与 results[].content[].url）。"""
     urls: list[str] = []
     results = payload.get("tool_response", {}).get("results")
@@ -171,7 +171,7 @@ def slice_evidence(evidence: str, queries: set[str]) -> tuple[str, int, int]:
         except ValueError:
             skipped += 1
             continue
-        query = _line_query(payload)
+        query = line_query(payload)
         if query and query in queries:
             kept.append(line)
     return ("\n".join(kept) + "\n" if kept else ""), len(kept), skipped

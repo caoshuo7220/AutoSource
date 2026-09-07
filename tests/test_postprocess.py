@@ -940,9 +940,9 @@ class TestQueryScope:
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
         assert summary["verification_mismatch"] is None  # claims=1 == merged=1，缩写不误报
-        assert summary["scope_framework"] == {"count": 1, "extracted": 2}
-        assert summary["scope_other"]["count"] == 1
-        assert summary["scope_other"]["extracted"] == 8
+        assert summary["in_framework"] == {"count": 1, "extracted": 2}
+        assert summary["out_framework"]["count"] == 1
+        assert summary["out_framework"]["extracted"] == 8
 
     def test_domain_or_node_word_is_framework(self):
         from postprocess import classify_query_scope
@@ -981,10 +981,10 @@ class TestQueryScope:
                           evidence_log=str(ev))
             _print_summary(summary)
         # 验证搜索行不参与分类
-        assert summary["scope_framework"] == {"count": 1, "extracted": 2}
-        assert summary["scope_other"]["count"] == 1
-        assert summary["scope_other"]["extracted"] == 8
-        assert summary["scope_other"]["by_node"] == {"AI训练GPU": (1, 8)}
+        assert summary["in_framework"] == {"count": 1, "extracted": 2}
+        assert summary["out_framework"]["count"] == 1
+        assert summary["out_framework"]["extracted"] == 8
+        assert summary["out_framework"]["by_node"] == {"AI训练GPU": (1, 8)}
         out = buf.getvalue()
         assert "选题分布" in out
         assert "不含领域词 1 次" in out

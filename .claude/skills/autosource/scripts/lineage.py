@@ -7,7 +7,7 @@ import csv
 import json
 from pathlib import Path
 
-from evidence import (_contains_bounded, _line_query, _result_urls,
+from evidence import (contains_bounded, line_query, result_urls,
                       strip_citation_anchors, URL_CHARS)
 
 LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
@@ -35,14 +35,14 @@ def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, s
             payload = json.loads(line)
         except ValueError:
             continue
-        query = _line_query(payload)
-        for url in _result_urls(payload):
+        query = line_query(payload)
+        for url in result_urls(payload):
             stripped = strip_citation_anchors(url)
             if stripped and stripped in wanted and stripped not in result:
                 result[stripped] = query
         for stripped in wanted - result.keys():
-            if (_contains_bounded(originals[stripped], line, URL_CHARS)
-                    or _contains_bounded(stripped, line, URL_CHARS)):
+            if (contains_bounded(originals[stripped], line, URL_CHARS)
+                    or contains_bounded(stripped, line, URL_CHARS)):
                 result[stripped] = query
     return result
 
@@ -70,9 +70,9 @@ def build_lineage(kept: list[dict], sliced_evidence: str,
             payload = json.loads(line)
         except ValueError:
             continue
-        query = _line_query(payload)
+        query = line_query(payload)
         phase, node, results_count = journal_map.get(query, ("", "", ""))
-        for url in _result_urls(payload):
+        for url in result_urls(payload):
             stripped = strip_citation_anchors(url)
             name, reason = collected.get(stripped, ("", ""))
             rows.append([phase, node, query, results_count, stripped,
@@ -84,13 +84,13 @@ def build_lineage(kept: list[dict], sliced_evidence: str,
         if stripped in covered:
             continue
         for line in sliced_evidence.splitlines():
-            if not _contains_bounded(stripped, line, URL_CHARS):
+            if not contains_bounded(stripped, line, URL_CHARS):
                 continue
             try:
                 payload = json.loads(line)
             except ValueError:
                 continue
-            query = _line_query(payload)
+            query = line_query(payload)
             phase, node, results_count = journal_map.get(query, ("", "", ""))
             rows.append([phase, node, query, "", stripped, "是", name, reason,
                          "摘要文本提取"])
