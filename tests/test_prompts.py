@@ -66,6 +66,7 @@ def test_extract_prompt_carries_search_results():
     assert "SONiC documentation" in prompt
     assert "https://sonic-net.github.io/SONiC/" in prompt
     assert "new_entities" in prompt
+    assert "evidence_urls" in prompt  # L2 修订：新节点提案须携带证据
 
 
 def test_review_prompt_carries_structure_summary_history():
@@ -74,10 +75,12 @@ def test_review_prompt_carries_structure_summary_history():
           "dims": [], "angles": []}],
         {"total": 3, "per_node": {"交换机": {"count": 3, "types": {"官方文档": 3}}}},
         [{"batch": 1, "query": "q", "node": "交换机"}],
+        [{"revision_id": 1, "proposed": {"name": "待裁决节点"}}],
     )
     assert "交换机" in prompt
     assert '"官方文档": 3' in prompt
     assert '"converged"' in prompt or "converged" in prompt
+    assert "待裁决节点" in prompt  # L2 修订：待裁决修订池注入 review prompt
 
 
 def test_report_prompt_carries_sources_and_six_sections():
@@ -100,3 +103,7 @@ def test_templates_match_spec_chapter_six():
     assert "granularity" in EXTRACT_TMPL and "source_type" in EXTRACT_TMPL
     assert "gaps" in REVIEW_TMPL and "converged" in REVIEW_TMPL
     assert "六板块" in REPORT_TMPL
+    # L2 修订契约：extract 提案携带证据、review 输出裁决
+    assert "evidence_urls" in EXTRACT_TMPL
+    assert "revisions" in REVIEW_TMPL
+    assert "pending_revisions" in REVIEW_TMPL

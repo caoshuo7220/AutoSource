@@ -28,8 +28,9 @@ from llm_client import LLMClient, LLMError
 from prompts import (build_extract_prompt, build_init_prompt, build_plan_prompt,
                      build_report_prompt, build_review_prompt)
 from search_provider import HostSearchProvider
-from state import (StateError, apply_writeback, ensure_angle_in_dims, leaf_names,
-                   load_state, mark_angles, new_state, node_map, save_state,
+from state import (StateError, adjudicate_revisions, apply_writeback,
+                   ensure_angle_in_dims, leaf_names, load_state, mark_angles,
+                   new_state, node_map, pool_revisions, save_state,
                    sanitize_domain, validate_tree)
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -57,6 +58,24 @@ def load_config() -> dict:
 def build_client(config: dict) -> LLMClient:
     """LLM 客户端工厂（测试 monkeypatch 点，运行期走 LLM 网关）。"""
     return LLMClient(config)
+
+
+def _proper_noun_set(nodes: list[dict]) -> set[str]:
+    """节点名 / 实体名 / 术语集合（source_type 校验用：标签不得包含具体名称）。"""
+    nouns: set[str] = set()
+    for node in nodes:
+        nouns.add(str(node.get("name") or ""))
+        nouns.update(str(term) for term in (node.get("terms") or []))
+        nouns.update(str(entity.get("name") or "")
+                     for entity in (node.get("entities") or []))
+    return {noun for noun in nouns if noun}
+
+
+def _contains_proper_noun(source_type: str, nouns: set[str]) -> Optional[str]:
+    for noun in nouns:
+        if noun and noun in source_type:
+            return noun
+    return None
 
 
 def _state_path(run_dir: Path) -> Path:
@@ -249,8 +268,10 @@ def cmd_commit(config: dict, run_dir: Path, results_path: Path) -> int:
 
     nodes = state["structure"]["nodes"]
     leaves = leaf_names(nodes)
-    writeback = apply_writeback(state, extracted["new_nodes"],
-                                extracted["new_entities"], extracted["new_terms"])
+    # new_entities / new_terms 即时写回；new_nodes 走证据闸门入修订池（L2 修订）
+    writeback = apply_writeback(state, extracted["new_entities"],
+                                extracted["new_terms"])
+    proper_nouns = _proper_noun_set(nodes)
 
     # 候选逐条校验：字段 → 证据（批文件全文边界匹配）→ node 叶子 → 归因 → 去重 → 入库
     evidence_text = results_path.read_text(encoding="utf-8", errors="replace")
@@ -280,6 +301,13 @@ def cmd_commit(config: dict, run_dir: Path, results_path: Path) -> int:
             rejected.append({"name": name, "url": url,
                              "reason": f"node「{node}」非叶子节点或不存在"})
             continue
+        source_type = str(candidate.get("source_type") or "")
+        matched = _contains_proper_noun(source_type, proper_nouns)
+        if matched:
+            rejected.append({"name": name, "url": url,
+                             "reason": f"source_type「{source_type}」包含具体名称「{matched}」，"
+                                       "标签应只取词类词汇"})
+            continue
         # 归因：最早命中的 done query（first_seen 语义；证据已过必有命中）
         first_qid = next((qid for qid in done_order
                           if _contains_bounded(url, entry_texts[qid], URL_CHARS)),
@@ -305,6 +333,10 @@ def cmd_commit(config: dict, run_dir: Path, results_path: Path) -> int:
     # 已搜索角度：仅 done 的 query 记入 angles（failed 保持 dims - angles，可补搜）
     mark_angles(nodes, pending["queries"])
 
+    # 结构修订：提案经证据闸门入池（证据不足的提案拒绝，不进入裁决）
+    proposal_result = pool_revisions(state, extracted["new_nodes"], batch_id,
+                                     conv["revision_evidence_min"], conv["k"])
+
     # 搜索历史（每 query 一行，pending 顺序）与循环统计
     history = []
     for entry, query in zip(batch, pending["queries"]):
@@ -326,6 +358,13 @@ def cmd_commit(config: dict, run_dir: Path, results_path: Path) -> int:
         stats["consecutive_no_new"] += 1
     else:
         stats["consecutive_no_new"] = 0
+    if not done_entries:
+        stats["consecutive_no_proposal"] = 0
+    elif not proposal_result["pooled"]:
+        # 被证据闸门拒绝的提案不重置计数——无据提案不能阻止停止侧达成
+        stats["consecutive_no_proposal"] += 1
+    else:
+        stats["consecutive_no_proposal"] = 0
 
     # 失败判定：存活熔断 → 失败率（批次处理完成后判定，状态保留）
     abort_reason = ""
@@ -346,9 +385,12 @@ def cmd_commit(config: dict, run_dir: Path, results_path: Path) -> int:
           f" / 失败 {failed_count}），新增来源 {len(new_sources)} 条"
           f"（证据拒绝 {len(rejected)} / 重复跳过 {skipped_dup}"
           f" / 写回拒绝 {len(writeback['rejected'])}），"
+          f"修订入池 {proposal_result['pooled']} 条"
+          f"（证据拒绝 {len(proposal_result['rejected'])}），"
           f"累计批次 {stats['batch_count']}，连续无新增 {stats['consecutive_no_new']}，"
+          f"连续无新提案 {stats['consecutive_no_proposal']}，"
           f"累计失败查询 {stats['failed_queries']}")
-    for item in rejected + writeback["rejected"]:
+    for item in rejected + writeback["rejected"] + proposal_result["rejected"]:
         print(f"  拒绝: {item.get('name') or item.get('url') or '(空)'} —— {item['reason']}")
     if abort_reason:
         print(f"本次运行失败：{abort_reason}（已保留状态与已收录数据源）")
@@ -376,23 +418,56 @@ def cmd_review(config: dict, run_dir: Path) -> int:
     source_summary = compute_stats(state["sources"], leaves)
 
     client = build_client(config)
-    try:
-        data = client.chat_json(
-            build_review_prompt(nodes, source_summary,
-                                state["exploration"]["search_history"]),
-            node="review")
-        gaps = data.get("gaps")
-        if not isinstance(gaps, list) or not isinstance(data.get("converged"), bool):
-            raise ValueError("review 输出缺 gaps 列表或 converged 布尔")
-        for item in gaps:
-            if not isinstance(item, dict) or not item.get("description") \
-                    or item.get("node") not in by_name:
-                raise ValueError(f"review 缺口条目非法: {item}")
-    except (LLMError, ValueError) as exc:
+    pending_ids = {r["revision_id"] for r in state["pending_revisions"]}
+    # review 输出校验：gaps 上限、revisions 覆盖完整性、decision 枚举、merge_into 可解析；
+    # 违反视为契约违反整体重试（最多 llm.retry 次），重试耗尽按节点失败处理
+    last_error: Exception | None = None
+    for _ in range(int(config["llm"]["retry"]) + 1):
+        try:
+            data = client.chat_json(
+                build_review_prompt(nodes, source_summary,
+                                    state["exploration"]["search_history"],
+                                    state["pending_revisions"]),
+                node="review")
+            gaps = data.get("gaps")
+            revisions = data.get("revisions")
+            if not isinstance(gaps, list) or not isinstance(data.get("converged"), bool) \
+                    or not isinstance(revisions, list):
+                raise ValueError("review 输出缺 gaps 列表、converged 布尔或 revisions 列表")
+            for item in gaps:
+                if not isinstance(item, dict) or not item.get("description") \
+                        or item.get("node") not in by_name:
+                    raise ValueError(f"review 缺口条目非法: {item}")
+            if len(gaps) > conv["gaps_max"]:
+                raise ValueError(f"gaps 数量 {len(gaps)} 超过上限 {conv['gaps_max']}")
+            covered = set()
+            for item in revisions:
+                if not isinstance(item, dict) or item.get("revision_id") not in pending_ids:
+                    raise ValueError(f"revisions 含非法 revision_id: {item}")
+                if item.get("decision") not in ("accept", "merge", "reject"):
+                    raise ValueError(f"decision 非法: {item}")
+                if item.get("decision") == "merge" \
+                        and item.get("merge_into") not in by_name:
+                    raise ValueError(f"merge_into「{item.get('merge_into')}」不存在")
+                covered.add(item["revision_id"])
+            if covered != pending_ids:
+                raise ValueError(f"revisions 未覆盖全部待裁决修订（缺 {pending_ids - covered}）")
+            break
+        except (LLMError, ValueError) as exc:
+            last_error = exc
+    else:
         state["phase"] = "failed"
         save_state(_state_path(run_dir), state)
-        _declare_failure("review", exc)
+        _declare_failure("review", last_error)
         return 1
+
+    # 结构修订裁决：脚本应用（白名单/树校验/单轮上限由裁决函数执行），应用后池清空
+    adjudication = adjudicate_revisions(state, revisions, conv["revision_accept_max"])
+    if adjudication["accepted"] or adjudication["merged"] or adjudication["rejected"]:
+        print(f"修订裁决: 采纳 {adjudication['accepted']} / 归并 {adjudication['merged']}"
+              f" / 拒绝 {len(adjudication['rejected'])}", file=sys.stderr)
+        for item in adjudication["rejected"]:
+            print(f"  裁决拒绝: {item['name']} —— {item['reason']}", file=sys.stderr)
 
     # gaps 整体替换（反馈闭环：每轮 review 更新，plan 据此补搜）
     state["exploration"]["gaps"] = gaps

@@ -1,8 +1,9 @@
-"""converge.py 的单元测试：客观覆盖三条件、连续两批失败率、存活熔断。"""
+"""converge.py 的单元测试：客观覆盖条件（含无新提案）、连续两批失败率、存活熔断。"""
 from converge import fuse_triggered, last_two_batches_failing, objective_conditions
 
 
-def _state(gaps=(), angles=None, dims=None, consecutive_no_new=4, k=4):
+def _state(gaps=(), angles=None, dims=None, consecutive_no_new=4,
+           consecutive_no_proposal=4, revisions=(), k=4):
     """构造客观覆盖判定所需的最小状态。"""
     nodes = [
         {"name": "交换机", "parent": "", "terms": [], "entities": [],
@@ -14,9 +15,11 @@ def _state(gaps=(), angles=None, dims=None, consecutive_no_new=4, k=4):
     return {
         "exploration": {
             "gaps": [{"description": d, "node": "数据中心交换机"} for d in gaps],
-            "loop_stats": {"consecutive_no_new": consecutive_no_new},
+            "loop_stats": {"consecutive_no_new": consecutive_no_new,
+                           "consecutive_no_proposal": consecutive_no_proposal},
         },
         "structure": {"nodes": nodes},
+        "pending_revisions": list(revisions),
     }
 
 
@@ -50,6 +53,21 @@ def test_objective_no_new_reaches_k():
     """连续无新增恰达 K：该条件满足。"""
     met, _ = objective_conditions(_state(consecutive_no_new=4), k=4)
     assert met is True
+
+
+def test_objective_unmet_no_proposal():
+    """连续无新修订提案未达 K：不通过（L2 修订新增条件）。"""
+    met, reasons = objective_conditions(_state(consecutive_no_proposal=2), k=4)
+    assert met is False
+    assert any("新提案" in r for r in reasons)
+
+
+def test_objective_unmet_pending_revisions():
+    """修订池非空（协议时序异常）：不通过。"""
+    met, reasons = objective_conditions(
+        _state(revisions=({"revision_id": 1},)), k=4)
+    assert met is False
+    assert any("修订池" in r for r in reasons)
 
 
 def test_last_two_batches_failing_trigger():

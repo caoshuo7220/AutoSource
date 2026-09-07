@@ -12,6 +12,9 @@
     "queries_per_batch_max": 5,
     "fuse_batch_limit": 100,
     "retry": 2,
-    "fail_rate_threshold": 0.5
+    "fail_rate_threshold": 0.5,
+    "revision_evidence_min": 2,
+    "revision_accept_max": 2,
+    "gaps_max": 10
   }
 }

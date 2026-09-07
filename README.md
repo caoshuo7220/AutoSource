@@ -20,7 +20,23 @@
 
 ## 运行前提
 
-复制 `.claude/skills/autosource/config.example.json` 为 `.claude/skills/autosource/config.json`，填入 LLM 网关的 `base_url` / `api_key` / `model`（含密钥，不入库）。收敛与失败参数（K、每批查询词数、单次查询重试、失败率阈值、熔断批次上限）也集中在此文件，脚本读取、不硬编码。
+复制 `.claude/skills/autosource/config.example.json` 为 `.claude/skills/autosource/config.json`，填入 LLM 网关的 `base_url` / `api_key` / `model`（含密钥，不入库）。全部参数集中在此文件，脚本读取、不硬编码：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| llm.base_url | 无（必填） | LLM 网关地址（OpenAI Chat Completions 兼容；结尾不带 `/chat/completions`，脚本自动拼接） |
+| llm.api_key | 无（必填） | 网关密钥（不入库） |
+| llm.model | 无（必填） | 网关模型名 |
+| llm.timeout | 60 | 单次网关调用的网络超时（秒）；网关对长生成偏慢时可调大（如 300） |
+| llm.retry | 2 | LLM 调用重试次数（JSON 非法 / 超时 / 网关错误） |
+| converge.k | 4 | 连续无新增批次阈值（同时作为修订证据窗口宽度与"连续无新提案"阈值） |
+| converge.queries_per_batch_min / max | 3 / 5 | plan 每批生成的查询词数量区间（脚本校验，超界视为契约失败） |
+| converge.retry | 2 | 单次查询重试次数（首次 + 2 次重试） |
+| converge.fail_rate_threshold | 0.5 | 连续 2 批失败率 ≥ 此值判定搜索服务异常，中止循环 |
+| converge.fuse_batch_limit | 100 | 存活熔断：总批次数达上限判定收敛判据失效，异常中止（保留状态） |
+| converge.revision_evidence_min | 2 | 新节点提案须携带的有效证据来源数下限（须为近 K 批新增，历史来源不作证据） |
+| converge.revision_accept_max | 2 | review 每轮最多采纳的修订数（超出按拒绝处理） |
+| converge.gaps_max | 10 | 缺口清单条目上限（超限视为契约违反，重试） |
 
 ## 架构
 

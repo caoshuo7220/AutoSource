@@ -54,31 +54,39 @@ EXTRACT_TMPL = """你是数据源发现系统的提取器。对搜索结果逐�
 - 标注 granularity：合集级 / 单篇级；同一来源同时有合集入口与单篇时，优先收合集入口；
 - 语言版本偏好：同一内容多语言版本只收一个，优先级 中文 > 英文 > 其他；
 - 平台准入：知网、专利库、百科、标准平台首页等跨领域通用平台不收录；平台的领域专属入口可收；
-- source_type 从词类词汇（组织形式词/体裁词/来源角色词）中选取，不另造同义新词；
+- source_type 只从词类词汇（组织形式词/体裁词/来源角色词）中选取，可两两组合；不得包含任何节点名、实体名、产品名或检索词（脚本校验，命中即拒绝该候选）；
 - URL 必须从搜索结果中逐字复制，禁止规范化、截短、凭先验知识补 URL。
+
+new_nodes 是"结构修订建议"，仅在本批搜索结果揭示了无法归入现有节点的独立新子方向时提出（脚本会校验证据，无据提案会被拒绝）：
+- 每条建议必须携带 evidence_urls：本批搜索中判定收录、且归属该新方向的来源 URL 清单（至少 2 条）；不得引用本批之外的来源；
+- 具体新主题（产品、技术、检索方向）优先写入 new_terms / new_entities 挂载现有节点，不建新节点；
+- dims 必须取自探索维度词类（官方文档 / 行业标准 / 论文 / 专利 / 数据集 / 开源社区 / 标准 / 厂商等来源类型与来源角色词），不得填检索词、实体名、产品名。
 
 只输出 JSON，不要其他文字：
 {"sources":[{"name":"...","url":"...","source_type":"...","granularity":"...","node":"...","description":"..."}],
  "new_entities":[{"name":"...","kind":"机构|厂商|产品|项目|规范","node":"..."}],
  "new_terms":[{"term":"...","node":"..."}],
- "new_nodes":[{"name":"...","parent":"...","terms":["..."],"dims":["..."]}]}
-new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 必须给完整可搜索字段（terms/dims）。"""
+ "new_nodes":[{"name":"...","parent":"...","terms":["..."],"dims":["..."],"evidence_urls":["https://...","https://..."]}]}
+new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 的 evidence_urls 必须逐字来自本批搜索结果的已收录 URL。"""
 
-REVIEW_TMPL = """你是数据源发现系统的评审器。基于当前状态，生成开放缺口清单与覆盖充分性判断。
+REVIEW_TMPL = """你是数据源发现系统的评审器。基于当前状态，生成开放缺口清单、覆盖充分性判断与结构修订裁决。
 
 领域结构：{{structure}}
 源集合统计：{{source_summary}}
 搜索历史：{{search_history}}
+待裁决修订池：{{pending_revisions}}
 
 评审规则：
-- 开放缺口清单：只列出当前仍未覆盖的方向/维度/实体，每条标注归属节点（已覆盖的不再列出，缺口被补齐后自然消失）；
+- 结构修订裁决：对"待裁决修订池"逐条裁决，decision ∈ {accept, merge, reject}——与现有节点同级且无法归入任何现有节点的独立新子方向 accept；可归入某现有节点的 merge（填 merge_into）；与现有节点重复或过细的 reject；revisions 必须覆盖池内全部修订（缺一不可）；
+- 开放缺口清单：只列出当前仍未覆盖的方向/维度/实体，每条标注归属节点（已覆盖的不再列出，缺口被补齐后自然消失）；数量收敛（通常不超过 10 条）；
 - 覆盖充分性判断：领域的主要子方向是否都已有数据源覆盖、是否还有明显未探索的维度；
 - 客观覆盖条件（脚本另行校验，此处只做语义判断）：各节点适用维度是否都已搜索、是否有明显遗漏。
 
 只输出 JSON，不要其他文字：
 {"gaps":[{"description":"...","node":"..."}],
  "converged":true或false,
- "reason":"..."}
+ "reason":"...",
+ "revisions":[{"revision_id":1,"decision":"accept|merge|reject","merge_into":"...","note":"..."}]}
 gaps 是"当前全部开放缺口"——脚本用它整体替换 state.exploration.gaps。"""
 
 REPORT_TMPL = """你是数据源发现系统的分析报告撰写器。基于领域结构、已收录数据源清单与搜索历史，按六板块撰写分析报告正文。
@@ -147,11 +155,13 @@ def build_extract_prompt(search_results: list[dict]) -> str:
 
 
 def build_review_prompt(structure: list[dict], source_summary: dict,
-                        search_history: list[dict]) -> str:
+                        search_history: list[dict],
+                        pending_revisions: list[dict]) -> str:
     return fill(REVIEW_TMPL, {
         "structure": json.dumps(structure, ensure_ascii=False),
         "source_summary": json.dumps(source_summary, ensure_ascii=False),
         "search_history": json.dumps(search_history, ensure_ascii=False),
+        "pending_revisions": json.dumps(pending_revisions, ensure_ascii=False),
     })
 
 

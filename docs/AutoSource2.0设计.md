@@ -70,18 +70,27 @@ AutoSource 2.0 的目标：系统性地发现指定领域的公开数据源，�
 
 - 源集合包含 6 个核心字段：`name / url / source_type / granularity / node / description`，外加溯源字段 `first_seen_batch / first_seen_query`；
 
-- 探索记录包含：搜索历史（query / node / 结果数 / 去重后新增数）、开放缺口清单（描述 / 归属节点，每轮 review 整体替换，无状态）、循环统计（连续无新增批次计数）；
+- 结构修订池：extract 的新节点建议以 `pending_revisions` 承载（proposed / evidence_urls / evidence_batch / evidence_query / status），由 review 统一裁决后应用，应用后清空；
+
+- 探索记录包含：搜索历史（query / node / 结果数 / 去重后新增数）、开放缺口清单（描述 / 归属节点，每轮 review 整体替换，无状态）、循环统计（批次计数 / 连续无新增计数 / 连续无新提案计数 / 失败查询数）；
 
 - 状态设计原则：状态仅记录事实，不记录判断。
 
 ### 收敛判据（两层）
 
-1. 脚本校验客观覆盖条件：所有节点的 `dims - angles` 为空，且缺口清单为空，且连续 K 批次无新增；
+1. 脚本校验客观覆盖条件：所有节点的 `dims - angles` 为空，且缺口清单为空，且连续 K 批次无新增来源，且连续 K 批次无新修订提案；
 2. LLM 确认：客观覆盖条件达成后，由 LLM 确认领域覆盖充分。
 
    - 终止条件 = 客观覆盖条件达成 且 LLM 确认；
 
    - 连续无新增是"调整探索方向"的信号（由 review 内部处理），而非终止信号。
+
+### 结构修订与证据闸门
+
+- extract 的 new_nodes 是**结构修订建议**而非直接写入：每条必须携带 `evidence_urls`（至少 2 条已入库来源，且其 first_seen_batch 落在近 K 批窗口内）；脚本在 --commit 时校验，证据不足的提案直接拒绝，不进入裁决；
+- review 每轮对修订池统一裁决：accept（入树，dims 须属探索维度词类）/ merge（terms 归并现有节点，不并入 dims）/ reject（丢弃）；脚本校验后应用并清空池；
+- 窗口约束使"连续 K 批无新增来源"在逻辑上蕴含"无有效提案"——节点增长必须锚定近期新增来源，停止长节点由脚本持有，收敛为硬保证而非概率；
+- 宁漏建、勿滥建：漏建方向的发现信息仍以 terms / entities 挂载现有节点，不丢信息，后续批次可再次提出修订。
 
 ### 存活熔断（异常中止，非正常终止）
 
@@ -94,7 +103,9 @@ AutoSource 2.0 的目标：系统性地发现指定领域的公开数据源，�
 
 ### 评审产出格式
 
-- 开放缺口清单（写入探索记录，每轮整体替换）：`{描述, 归属节点}`；
+- 开放缺口清单（写入探索记录，每轮整体替换）：`{描述, 归属节点}`；数量收敛（脚本硬限 10 条，超限视为契约违反）；
+
+- 结构修订裁决（review 输出，脚本应用后清空修订池）：`{revision_id, decision ∈ accept / merge / reject, merge_into, note}`；裁决必须覆盖池内全部修订；
 
 - 覆盖充分性判断（--review 即时输出，不持久化，供脚本收敛判定结合）：`{收敛: bool, 理由: str}`。
 
@@ -104,8 +115,8 @@ AutoSource 2.0 的目标：系统性地发现指定领域的公开数据源，�
 | ------- | ------------------ | ------------------------------------------------- |
 | init    | 领域描述               | nodes（name / parent / terms / dims）               |
 | plan    | 领域结构 + 缺口清单 + 搜索历史 | queries（query / node / angle / reason）            |
-| extract | 搜索结果               | sources + new\_entities + new\_terms + new\_nodes |
-| review  | 状态                 | gaps + converged + reason                         |
+| extract | 搜索结果               | sources + new\_entities + new\_terms + new\_nodes（修订建议，含 evidence\_urls） |
+| review  | 状态（含修订池）          | gaps + converged + reason + revisions（修订裁决）      |
 
 三项约束：
 

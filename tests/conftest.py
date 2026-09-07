@@ -30,7 +30,8 @@ DEFAULT_RESPONSES = {
          "angle": "厂商文档", "reason": "补厂商文档入口"},
     ]},
     "extract": {"sources": [], "new_entities": [], "new_terms": [], "new_nodes": []},
-    "review": {"gaps": [], "converged": True, "reason": "领域覆盖充分"},
+    "review": {"gaps": [], "converged": True, "reason": "领域覆盖充分",
+               "revisions": []},
     "report": "## 一、领域概览\n报告正文（测试桩）",
 }
 
@@ -78,7 +79,9 @@ def config(tmp_path, monkeypatch):
         "llm": {"base_url": "http://example.test/v1", "api_key": "test-key",
                 "model": "test-model", "timeout": 5, "retry": 2},
         "converge": {"k": 2, "queries_per_batch_min": 1, "queries_per_batch_max": 3,
-                     "fuse_batch_limit": 100, "retry": 2, "fail_rate_threshold": 0.5},
+                     "fuse_batch_limit": 100, "retry": 2, "fail_rate_threshold": 0.5,
+                     "revision_evidence_min": 2, "revision_accept_max": 2,
+                     "gaps_max": 10},
     }
     path = tmp_path / "config.json"
     path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")

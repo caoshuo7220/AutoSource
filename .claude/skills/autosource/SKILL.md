@@ -15,7 +15,7 @@ allowed-tools: WebSearch, Read, Write, Edit, Bash
 ## 运行前提（一次性准备）
 
 1. 复制 `config.example.json` 为 `config.json`，填入 LLM 网关的 `base_url` 与 `api_key`（config.json 含密钥，不入库）。
-2. 参数集中在此文件（脚本读取，不硬编码）：K（连续无新增批次阈值，默认 4）、每批查询词数（3-5）、单次查询重试（2）、失败率阈值（50%）、熔断批次上限（100）。
+2. 参数集中在此文件（脚本读取，不硬编码）；各参数说明见 README「运行前提」参数表。
 
 ## 固定执行流程
 
@@ -57,8 +57,8 @@ allowed-tools: WebSearch, Read, Write, Edit, Bash
 | ------ | ---- | ---- | ---- |
 | `python .claude/skills/autosource/scripts/orchestrator.py --init "<领域描述>"` | 领域描述 | 创建运行目录并打印路径 | 调 LLM init 生成领域结构，初始化 state.json |
 | `python .claude/skills/autosource/scripts/orchestrator.py --plan <run_dir>` | 读 state.json | stdout 输出 `{"queries":[...]}` | 调 LLM plan 生成查询词，写入 state.pending_batch 后输出 |
-| `python .claude/skills/autosource/scripts/orchestrator.py --commit <run_dir> <search_results.json>` | 结果文件路径 | 打印入库统计 | extract + 证据校验 + 去重 + 更新 state，清空 pending_batch |
-| `python .claude/skills/autosource/scripts/orchestrator.py --review <run_dir>` | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review、整体替换 gaps、客观覆盖校验、判定收敛 |
+| `python .claude/skills/autosource/scripts/orchestrator.py --commit <run_dir> <search_results.json>` | 结果文件路径 | 打印入库统计 | extract + 证据校验 + 去重 + 修订提案证据闸门 + 更新 state，清空 pending_batch |
+| `python .claude/skills/autosource/scripts/orchestrator.py --review <run_dir>` | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review、裁决结构修订、整体替换 gaps、客观覆盖校验、判定收敛 |
 | `python .claude/skills/autosource/scripts/orchestrator.py --finalize <run_dir>` | 读 state.json | 生成交付物，重命名运行目录 | 前置条件 phase=converged；生成 CSV/stats/报告并重命名目录 |
 
 ## 证据链纪律（脚本强制校验）

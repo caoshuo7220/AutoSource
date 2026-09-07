@@ -10,9 +10,20 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from evidence import strip_citation_anchors
+
 PHASES = ("init", "running", "converged", "failed")
 # 实体 kind 枚举（实现规格第二章 entities 契约）
 ENTITY_KINDS = ("机构", "厂商", "产品", "项目", "规范")
+
+# 探索维度词类白名单（设计文档"角度池"六类词汇的枚举集合）：
+# 修订裁决时校验 proposed.dims——不合规词剔除、全不合规则拒绝该修订。
+DIM_VOCABULARY = frozenset((
+    "论文", "专利", "列表", "排名", "数据库", "标准", "仓库", "合集",
+    "官方文档", "手册", "知识库", "白皮书", "数据集", "开放数据",
+    "社区", "博客", "资讯平台", "标准组织", "监管机构", "政府部门",
+    "行业协会", "厂商", "研究机构", "大学", "评测机构", "基金会", "公共数据平台",
+))
 
 _DIRTY_RE = re.compile(r'[\\/:*?"<>|\s]+')
 
@@ -25,7 +36,10 @@ def new_state(domain: str, nodes: list[dict]) -> dict:
     """--init 后的初始状态：phase=running，源集合为空，pending 空，统计归零。
 
     init 节点输出无 entities/angles，脚本补齐空数组（契约字段完整）。
+    节点列表做列表级复制——状态持有独立副本，后续写回不污染调用方数据。
     """
+    nodes = [{key: (list(value) if isinstance(value, list) else value)
+              for key, value in node.items()} for node in nodes]
     for node in nodes:
         node.setdefault("entities", [])
         node.setdefault("angles", [])
@@ -35,11 +49,12 @@ def new_state(domain: str, nodes: list[dict]) -> dict:
         "structure": {"nodes": nodes},
         "sources": [],
         "pending_batch": {},
+        "pending_revisions": [],
         "exploration": {
             "search_history": [],
             "gaps": [],
             "loop_stats": {"batch_count": 0, "consecutive_no_new": 0,
-                           "failed_queries": 0},
+                           "consecutive_no_proposal": 0, "failed_queries": 0},
         },
     }
 
@@ -88,6 +103,16 @@ def load_state(path: Path) -> dict:
         _check_shape(isinstance(pending.get("batch_id"), int)
                      and isinstance(pending.get("queries"), list),
                      "pending_batch 应为 {batch_id, queries}")
+    revisions = state.get("pending_revisions")
+    _check_shape(isinstance(revisions, list), "pending_revisions 应为数组")
+    for revision in revisions:
+        _check_shape(isinstance(revision, dict), "修订条目应为对象")
+        _check_shape(isinstance(revision.get("revision_id"), int)
+                     and isinstance(revision.get("proposed"), dict)
+                     and isinstance(revision.get("evidence_urls"), list)
+                     and isinstance(revision.get("evidence_batch"), int)
+                     and isinstance(revision.get("evidence_query"), str),
+                     "修订条目缺 revision_id/proposed/evidence_urls/evidence_batch/evidence_query 字段")
     exploration = state.get("exploration")
     _check_shape(isinstance(exploration, dict), "exploration 应为对象")
     _check_shape(isinstance(exploration.get("search_history"), list),
@@ -97,8 +122,9 @@ def load_state(path: Path) -> dict:
     stats = exploration.get("loop_stats")
     _check_shape(isinstance(stats, dict)
                  and all(isinstance(stats.get(k), int) for k in
-                         ("batch_count", "consecutive_no_new", "failed_queries")),
-                 "exploration.loop_stats 应为三个整数计数字段")
+                         ("batch_count", "consecutive_no_new",
+                          "consecutive_no_proposal", "failed_queries")),
+                 "exploration.loop_stats 应为四个整数计数字段")
     if nodes:
         validate_tree(nodes)
     return state
@@ -147,44 +173,17 @@ def path_of(node: str, nodes: list[dict]) -> str:
     return "-".join(reversed(chain))
 
 
-def apply_writeback(state: dict, new_nodes: list[dict],
-                    new_entities: list[dict], new_terms: list[dict]) -> dict:
-    """extract 的 new_nodes / new_entities / new_terms 增量写回 structure。
+def apply_writeback(state: dict, new_entities: list[dict],
+                    new_terms: list[dict]) -> dict:
+    """extract 的 new_entities / new_terms 增量写回 structure。
 
     逐条校验后追加（去重），单条校验不通过不阻断其余条目；返回 rejected 明细。
-    new_nodes 先落（同批新节点可被后续实体/词条引用）。写回后结构仍满足树校验。
+    new_nodes 不在此处理——修订建议经证据闸门入池（pool_revisions），
+    由 review 裁决后经 adjudicate_revisions 应用。
     """
     nodes = state["structure"]["nodes"]
     by_name = node_map(nodes)
     rejected: list[dict] = []
-
-    for index, item in enumerate(new_nodes or []):
-        if not isinstance(item, dict):
-            rejected.append({"index": index, "name": "", "reason": "非对象"})
-            continue
-        name = str(item.get("name") or "")
-        parent = str(item.get("parent") or "")
-        if not name:
-            rejected.append({"index": index, "name": name, "reason": "缺 name"})
-            continue
-        if name in by_name:
-            rejected.append({"index": index, "name": name, "reason": "节点名重复"})
-            continue
-        if parent == "":
-            if any(n["parent"] == "" for n in nodes):
-                rejected.append({"index": index, "name": name,
-                                 "reason": "根节点已存在，不允许第二个根节点"})
-                continue
-        elif parent not in by_name:
-            rejected.append({"index": index, "name": name,
-                             "reason": f"parent「{parent}」不存在"})
-            continue
-        node = {"name": name, "parent": parent,
-                "terms": item.get("terms") if isinstance(item.get("terms"), list) else [],
-                "entities": [], "dims": item.get("dims") if isinstance(item.get("dims"), list) else [],
-                "angles": []}
-        nodes.append(node)
-        by_name[name] = node
 
     for index, item in enumerate(new_entities or []):
         if not isinstance(item, dict):
@@ -225,6 +224,122 @@ def apply_writeback(state: dict, new_nodes: list[dict],
             by_name[node_name]["terms"].append(term)
 
     return {"rejected": rejected}
+
+
+def pool_revisions(state: dict, proposals: list[dict], batch_id: int,
+                   evidence_min: int, window_k: int) -> dict:
+    """extract 的修订建议经证据闸门后入池（实现规格 L2 修订）。
+
+    证据规则：evidence_urls 逐条须存在于已入库来源（URL 剥锚点相等），且其
+    first_seen_batch 落在 [batch_id - window_k, batch_id] 窗口内——历史批次来源
+    不作为证据，由此"连续 K 批无新增来源"在逻辑上蕴含"无有效提案"。有效证据数
+    ≥ evidence_min 才准予入池；被闸门拒绝的提案不进入裁决。返回 {pooled, rejected}。
+    """
+    pending = state["pending_revisions"]
+    next_id = max((r["revision_id"] for r in pending), default=0) + 1
+    by_url: dict[str, tuple[int, str]] = {}
+    for source in state["sources"]:
+        url = strip_citation_anchors(str(source.get("url") or ""))
+        if url and url not in by_url:
+            by_url[url] = (int(source.get("first_seen_batch") or 0),
+                           str(source.get("first_seen_query") or ""))
+    window_start = batch_id - window_k
+    rejected: list[dict] = []
+    pooled = 0
+    for item in proposals or []:
+        name = str(item.get("name") or "") if isinstance(item, dict) else ""
+        if not isinstance(item, dict) or not name:
+            rejected.append({"name": name, "reason": "非对象或缺 name"})
+            continue
+        evidence = item.get("evidence_urls")
+        if not isinstance(evidence, list) or not evidence:
+            rejected.append({"name": name,
+                             "reason": "缺 evidence_urls（新节点必须锚定已入库来源）"})
+            continue
+        valid: list[tuple[str, tuple[int, str]]] = []
+        for url in evidence:
+            hit = by_url.get(strip_citation_anchors(str(url)))
+            if hit is not None and window_start <= hit[0] <= batch_id:
+                valid.append((str(url), hit))
+        if len(valid) < evidence_min:
+            rejected.append({"name": name,
+                             "reason": f"证据不足：{len(valid)} 条窗口内来源 < {evidence_min}"
+                                       f"（须为近 {window_k} 批新增）"})
+            continue
+        pending.append({
+            "revision_id": next_id,
+            "proposed": {
+                "name": name,
+                "parent": str(item.get("parent") or ""),
+                "terms": item.get("terms") if isinstance(item.get("terms"), list) else [],
+                "dims": item.get("dims") if isinstance(item.get("dims"), list) else [],
+            },
+            "evidence_urls": [url for url, _ in valid],
+            "evidence_batch": batch_id,
+            "evidence_query": valid[0][1][1],  # 首条有效证据的发现查询（溯源）
+            "status": "pending",
+        })
+        next_id += 1
+        pooled += 1
+    return {"pooled": pooled, "rejected": rejected}
+
+
+def adjudicate_revisions(state: dict, decisions: list[dict], accept_max: int) -> dict:
+    """按 review 裁决应用修订池，应用后清空（实现规格 L2 修订）。
+
+    accept：dims 词类白名单（不合规词剔除、全不合规拒绝）+ 树校验（重名/双根/
+    parent 可解析）通过后入树，受单轮采纳上限约束；merge：terms 并入 merge_into
+    节点（去重，不并入 dims）；reject：丢弃。裁决结果不持久化。返回
+    {accepted, merged, rejected}。
+    """
+    nodes = state["structure"]["nodes"]
+    by_name = node_map(nodes)
+    by_id = {r["revision_id"]: r for r in state["pending_revisions"]}
+    accepted = merged = 0
+    rejected: list[dict] = []
+    for decision in decisions:
+        revision = by_id[decision["revision_id"]]
+        proposed = revision["proposed"]
+        name = proposed["name"]
+        if decision.get("decision") == "accept":
+            if accepted >= accept_max:
+                rejected.append({"name": name, "reason": f"超出单轮采纳上限 {accept_max}"})
+                continue
+            dims = [d for d in proposed.get("dims", []) if d in DIM_VOCABULARY]
+            if not dims:
+                rejected.append({"name": name, "reason": "dims 均不在探索维度词类白名单内"})
+                continue
+            parent = proposed.get("parent")
+            if parent == "":
+                rejected.append({"name": name, "reason": "根节点已存在，不允许第二个根节点"})
+                continue
+            if name in by_name:
+                rejected.append({"name": name, "reason": "节点名重复"})
+                continue
+            if parent not in by_name:
+                rejected.append({"name": name, "reason": f"parent「{parent}」不存在"})
+                continue
+            nodes.append({"name": name, "parent": parent,
+                          "terms": proposed.get("terms")
+                          if isinstance(proposed.get("terms"), list) else [],
+                          "entities": [], "dims": dims, "angles": []})
+            by_name[name] = nodes[-1]
+            accepted += 1
+        elif decision.get("decision") == "merge":
+            target = by_name.get(decision.get("merge_into") or "")
+            if target is None:
+                rejected.append({"name": name,
+                                 "reason": f"merge_into「{decision.get('merge_into')}」不存在"})
+                continue
+            for term in proposed.get("terms") or []:
+                if term not in target["terms"]:
+                    target["terms"].append(term)
+            merged += 1
+        else:
+            rejected.append({"name": name,
+                             "reason": str(decision.get("note") or "reject")})
+    state["pending_revisions"] = []
+    return {"accepted": accepted, "merged": merged, "rejected": rejected}
 
 
 def ensure_angle_in_dims(nodes: list[dict], node_name: str, angle: str) -> bool:

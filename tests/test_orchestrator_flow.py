@@ -83,7 +83,9 @@ def test_init_creates_state_and_prints_path(config, init_run):
     assert state["domain"] == "交换机"  # domain = 根节点名（init 提炼）
     assert state["phase"] == "running"
     assert state["pending_batch"] == {}
+    assert state["pending_revisions"] == []
     assert state["exploration"]["loop_stats"]["batch_count"] == 0
+    assert state["exploration"]["loop_stats"]["consecutive_no_proposal"] == 0
     assert run_dir.name.startswith("run_")
     assert run_dir.parent == Path(os.environ["AUTOSOURCE_OUTPUTS"])
 
@@ -219,7 +221,7 @@ def test_review_objective_veto(config, init_run, cli, fake_llm):
     queries = plan_queries(cli, run_dir)
     commit_no_new(cli, run_dir, queries)
     fake_llm.responses["review"] = {"gaps": [], "converged": True,
-                                    "reason": "自认为充分"}
+                                    "reason": "自认为充分", "revisions": []}
     code, out, err = cli("--review", run_dir)
     assert code == 0
     result = json.loads(out)
@@ -325,7 +327,7 @@ def test_review_gaps_feed_plan(config, init_run, cli, fake_llm):
     commit_no_new(cli, run_dir, queries)
     fake_llm.responses["review"] = {"gaps": [
         {"description": "缺少国内交换机厂商的配置指南", "node": "数据中心交换机"}],
-        "converged": False, "reason": "还有缺口"}
+        "converged": False, "reason": "还有缺口", "revisions": []}
     code, out, err = cli("--review", run_dir)
     assert code == 0
     assert json.loads(out)["converged"] is False
@@ -466,3 +468,137 @@ def test_report_llm_failure_degrade(config, init_run, cli, fake_llm):
     assert "## 数据总览" in report  # 脚本注入的数据总览不受影响
     assert (outdir / f"{outdir.name}_数据源清单.csv").is_file()
     assert any(f.name.endswith("_stats.csv") for f in (outdir / "intermediate").iterdir())
+
+
+# ---------- L2 结构修订（证据闸门 + 裁决） ----------
+
+def _extract_two_sources(new_nodes):
+    """构造两来源 extract 响应：URL_A / URL_B 均在本批结果中（可作修订证据）。"""
+    return {"sources": [
+        {"name": "源A", "url": URL_A, "source_type": "官方文档",
+         "granularity": "合集级", "node": "数据中心交换机", "description": ""},
+        {"name": "源B", "url": URL_B, "source_type": "官方文档",
+         "granularity": "合集级", "node": "数据中心交换机", "description": ""}],
+        "new_entities": [], "new_terms": [], "new_nodes": new_nodes}
+
+
+def _commit_two_sources(cli, run_dir, queries):
+    return commit_results(cli, run_dir, queries, {
+        1: ([{"title": "A", "url": URL_A, "snippet": ""},
+             {"title": "B", "url": URL_B, "snippet": ""}], False, 1)})
+
+
+def test_revision_gate_rejects_unfounded_proposal(config, init_run, cli, fake_llm):
+    """L2 验收：提案证据不足 → 闸门拒绝，不入池、不重置"连续无新提案"计数。"""
+    run_dir = init_run()
+    queries = plan_queries(cli, run_dir)
+    fake_llm.responses["extract"] = _extract_two_sources([
+        {"name": "凭空提案", "parent": "交换机", "terms": [], "dims": ["官方文档"],
+         "evidence_urls": ["https://not-collected.example/x"]}])
+    code, out, err = _commit_two_sources(cli, run_dir, queries)
+    assert code == 0
+    state = load_state_dict(run_dir)
+    assert state["pending_revisions"] == []
+    assert state["exploration"]["loop_stats"]["consecutive_no_proposal"] == 1
+    assert "修订入池 0 条" in out
+    assert "凭空提案" in out  # 拒绝明细可见
+
+
+def test_revision_pooled_then_adjudicated(config, init_run, cli, fake_llm):
+    """L2 验收：本批来源为证 → 提案入池 → review accept → 节点入树、池清空。"""
+    run_dir = init_run()
+    queries = plan_queries(cli, run_dir)
+    fake_llm.responses["extract"] = _extract_two_sources([
+        {"name": "SONiC 生态", "parent": "数据中心交换机", "terms": ["SONiC"],
+         "dims": ["官方文档", "开源社区"], "evidence_urls": [URL_A, URL_B]}])
+    code, out, err = _commit_two_sources(cli, run_dir, queries)
+    assert code == 0
+    state = load_state_dict(run_dir)
+    assert len(state["pending_revisions"]) == 1
+    assert state["exploration"]["loop_stats"]["consecutive_no_proposal"] == 0
+
+    fake_llm.responses["review"] = {"gaps": [], "converged": False, "reason": "继续",
+                                    "revisions": [{"revision_id": 1,
+                                                   "decision": "accept"}]}
+    code, out, err = cli("--review", run_dir)
+    assert code == 0
+    assert json.loads(out)["converged"] is False  # 新节点维度未覆盖，客观条件未达成
+    state = load_state_dict(run_dir)
+    names = {n["name"] for n in state["structure"]["nodes"]}
+    assert "SONiC 生态" in names
+    assert state["pending_revisions"] == []
+
+
+def test_review_retries_on_incomplete_revisions(config, init_run, cli, fake_llm):
+    """L2 验收：revisions 缺池内条目 → 契约违反重试 → 第二次覆盖完整 → 成功。"""
+    run_dir = init_run()
+    queries = plan_queries(cli, run_dir)
+    fake_llm.responses["extract"] = _extract_two_sources([
+        {"name": "SONiC 生态", "parent": "数据中心交换机", "terms": ["SONiC"],
+         "dims": ["官方文档"], "evidence_urls": [URL_A, URL_B]}])
+    code, out, err = _commit_two_sources(cli, run_dir, queries)
+    assert code == 0
+
+    def flaky_review(calls):
+        review_calls = [c for c in calls if c[0] == "review"]
+        if len(review_calls) < 2:
+            return {"gaps": [], "converged": False, "reason": "",
+                    "revisions": []}  # 第一次缺失裁决条目
+        return {"gaps": [], "converged": False, "reason": "",
+                "revisions": [{"revision_id": 1, "decision": "reject"}]}
+
+    fake_llm.responses["review"] = flaky_review
+    code, out, err = cli("--review", run_dir)
+    assert code == 0
+    state = load_state_dict(run_dir)
+    assert state["pending_revisions"] == []
+    assert state["phase"] == "running"
+    assert sum(1 for node, _ in fake_llm.calls if node == "review") == 2
+
+
+def test_review_fails_when_gaps_over_cap(config, init_run, cli, fake_llm):
+    """L2 验收：gaps 超上限 → 重试耗尽 → phase=failed。"""
+    run_dir = init_run()
+    queries = plan_queries(cli, run_dir)
+    commit_no_new(cli, run_dir, queries)
+    fake_llm.responses["review"] = {
+        "gaps": [{"description": f"缺口{i}", "node": "数据中心交换机"}
+                 for i in range(11)],
+        "converged": False, "reason": "", "revisions": []}
+    code, out, err = cli("--review", run_dir)
+    assert code == 1
+    assert "本次运行失败" in err
+    assert load_state_dict(run_dir)["phase"] == "failed"
+
+
+def test_no_proposal_counter_not_reset_by_gated(config, init_run, cli, fake_llm):
+    """L2 验收：被闸门拒绝的提案不重置计数（无据提案不能阻止停止侧达成）。"""
+    run_dir = init_run()
+    queries = plan_queries(cli, run_dir)
+    commit_no_new(cli, run_dir, queries)
+    assert load_state_dict(run_dir)["exploration"]["loop_stats"]["consecutive_no_proposal"] == 1
+    queries = plan_queries(cli, run_dir)
+    fake_llm.responses["extract"] = _extract_two_sources([
+        {"name": "凭空提案", "parent": "交换机", "terms": [], "dims": ["官方文档"],
+         "evidence_urls": ["https://x.example/1"]}])
+    code, out, err = _commit_two_sources(cli, run_dir, queries)
+    assert code == 0
+    assert load_state_dict(run_dir)["exploration"]["loop_stats"]["consecutive_no_proposal"] == 2
+
+
+def test_source_type_proper_noun_rejected(config, init_run, cli, fake_llm):
+    """L2 验收：source_type 包含节点名 → 拒绝该候选（标签只取词类词汇）。"""
+    run_dir = init_run()
+    queries = plan_queries(cli, run_dir)
+    fake_llm.responses["extract"] = {"sources": [
+        {"name": "合规源", "url": URL_A, "source_type": "官方文档",
+         "granularity": "合集级", "node": "数据中心交换机", "description": ""},
+        {"name": "违规源", "url": URL_B, "source_type": "数据中心交换机 文档汇总",
+         "granularity": "合集级", "node": "数据中心交换机", "description": ""}],
+        "new_entities": [], "new_terms": [], "new_nodes": []}
+    code, out, err = _commit_two_sources(cli, run_dir, queries)
+    assert code == 0
+    sources = load_state_dict(run_dir)["sources"]
+    assert [s["name"] for s in sources] == ["合规源"]
+    assert "违规源" in out
+    assert "source_type" in out

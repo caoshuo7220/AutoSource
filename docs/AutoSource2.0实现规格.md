@@ -10,13 +10,16 @@
 
 | 参数           | 默认值 | 说明                                             |
 | ------------ | --- | ---------------------------------------------- |
-| K（连续无新增批次阈值） | 4   | 连续 K 批无任何新增来源时触发收敛判断（沿用 1.0"连续 4 次无新增饱和"的实测经验） |
+| K（连续无新增批次阈值） | 4   | 连续 K 批无任何新增来源时触发收敛判断（沿用 1.0"连续 4 次无新增饱和"的实测经验）；同时作为修订证据窗口宽度与"连续无新提案"阈值 |
 | 每批查询词数       | 3-5 | plan 节点每次生成的查询词数量                              |
 | 单次查询重试次数     | 2   | 首次 + 2 次重试（最多 3 次尝试）；仍异常则标记该查询 failed          |
 | 失败率阈值        | 50% | 连续 2 批失败率 ≥ 50% 判定搜索服务异常，中止循环                  |
 | 熔断批次上限       | 100 | 存活熔断：总批次数达到上限判定收敛判据失效，异常中止（保留状态、声明失败），非成功终止    |
+| 修订证据门槛       | 2   | 新节点提案的 evidence\_urls 须含 ≥2 条有效来源（已入库且 first\_seen\_batch 在近 K 批窗口内），否则脚本直接拒绝 |
+| 修订单轮采纳上限     | 2   | review 每轮最多 accept 的修订数（次要护栏），超出部分强制按 reject 处理        |
+| 缺口清单上限       | 10  | review 输出的 gaps 超过上限视为契约违反，重试；重试耗尽按节点失败处理             |
 
-收敛判据（引用设计文档）：`dims - angles` 为空 且 缺口清单为空 且 连续 K 批无新增，再由 LLM 确认覆盖充分，即正常终止。
+收敛判据（引用设计文档）：`dims - angles` 为空 且 缺口清单为空 且 连续 K 批无新增来源 且 连续 K 批无新修订提案，再由 LLM 确认覆盖充分，即正常终止。
 
 存活熔断：搜索量不设成本上限；总批次数达到 100 时异常中止（保留状态、声明失败、报告"未收敛"），防止收敛判据失效导致无限循环。
 
@@ -69,6 +72,17 @@
       }
     ]
   },
+  "pending_revisions": [
+    {
+      "revision_id": 1,
+      "proposed": {"name": "SONiC 生态", "parent": "数据中心交换机",
+                   "terms": ["SONiC"], "dims": ["官方文档", "开源社区"]},
+      "evidence_urls": ["https://sonic-net.github.io/SONiC/", "https://github.com/sonic-net/SONiC"],
+      "evidence_batch": 6,
+      "evidence_query": "SONiC documentation",
+      "status": "pending"
+    }
+  ],
   "exploration": {
     "search_history": [
       {"batch": 3, "query": "SONiC documentation", "node": "数据中心交换机", "result_count": 10, "new_count": 2, "failed": 0}
@@ -79,6 +93,7 @@
     "loop_stats": {
       "batch_count": 5,
       "consecutive_no_new": 1,
+      "consecutive_no_proposal": 2,
       "failed_queries": 0
     }
   }
@@ -100,21 +115,27 @@
 | sources\[]                  | object\[] | 脚本     | 源集合条目（name/url/source\_type/granularity/node/description/first\_seen\_batch/first\_seen\_query） |
 | pending\_batch              | object    | 脚本     | 当前已规划待搜索的批次（--plan 写入，--commit 处理完清空）                                                           |
 | pending\_batch.queries\[]   | object\[] | 脚本     | {query\_id, query, node, angle, reason, status, attempts}，status ∈ {pending, done, failed}      |
-| exploration.search\_history | object\[] | 脚本     | 搜索历史（batch/query/node/结果数/去重后新增数/失败数）                                                           |
-| exploration.gaps            | object\[] | 脚本     | 开放缺口清单（description/node）；每轮 review 后整体替换，无 status                                               |
-| exploration.loop\_stats     | object    | 脚本     | 循环统计（批次计数/连续无新增计数/失败查询数）                                                                        |
+| pending\_revisions\[]       | object\[] | LLM+脚本 | 结构修订池（extract 提出、review 裁决后清空）：proposed 由 LLM 产出，evidence\_urls/batch/query/id/status 由脚本维护 |
+| pending\_revisions\[].evidence\_urls | string\[] | LLM+脚本 | 提案证据：已入库来源 URL 清单（脚本校验 ≥ 修订证据门槛 条有效，且 first\_seen\_batch 在近 K 批窗口内） |
+| exploration.search\_history | object\[] | 脚本     | 搜索历史（batch/query/node/结果数/提取数/去重后新增数/失败数）                                                        |
+| exploration.gaps            | object\[] | 脚本     | 开放缺口清单（description/node）；每轮 review 后整体替换，无 status；数量上限见第一章                          |
+| exploration.loop\_stats     | object    | 脚本     | 循环统计（批次计数/连续无新增计数/连续无新提案计数/失败查询数）                                                             |
 
 设计原则（引用设计文档）：状态仅记录事实，不记录判断。`converged` 布尔与理由不持久化，只作为 `--review` 即时输出；但 phase 在 --review 判定收敛时置为 converged（作为运行状态持久化，供 --finalize 与断点续跑识别）。
 
 ### 领域结构增量写回
 
-extract 输出的 `new_entities` / `new_terms` / `new_nodes` 由脚本写回 structure，规则：
+extract 输出的 `new_entities` / `new_terms` 由脚本即时写回 structure；`new_nodes` 是**结构修订建议**，经证据闸门入修订池、由 review 裁决后应用，规则：
 
 - new\_entities 的每个 `{name, kind, node}` → 追加到 name 匹配节点的 entities（去重）；
 
 - new\_terms 的每个 `{term, node}` → 追加到 name 匹配节点的 terms（去重）；
 
-- new\_nodes 的每个 `{name, parent, terms, dims}` → 作为完整节点加入 structure.nodes（含可搜索字段，保证新节点可被后续 plan 搜索）；
+- new\_nodes 的每个 `{name, parent, terms, dims, evidence_urls}` → 先过证据闸门（见下），通过者入 pending\_revisions（脚本附加 revision\_id / evidence\_batch / evidence\_query / status=pending），不直接写回结构；
+
+- 证据闸门：evidence\_urls 逐条须存在于已入库来源（URL 剥锚点相等），且其 first\_seen\_batch 落在 [当前批 - K, 当前批] 窗口内（历史批次来源不作为证据）；有效证据数 ≥ 修订证据门槛（默认 2）才准予入池，否则脚本直接拒绝该提案并计数——被闸门拒绝的提案不进入裁决、不重置"连续无新提案"计数；
+
+- 修订裁决（--review 内，裁决后池清空）：accept → 入树前校验（dims 词类白名单：角度池六类词汇枚举，不合规词剔除、全不合规拒绝；树校验：单根/唯一名/parent 可解析）；merge → proposed.terms 并入 merge\_into 节点（去重，不并入 dims）；reject → 丢弃；每轮 accept 数 ≤ 修订单轮采纳上限，超出按 revision\_id 升序强制 reject；裁决结果不持久化；
 
 - plan 输出中某 query 的 angle 不在其节点 dims 中时，脚本将该 angle 加入 dims（声明该维度需要搜索）；
 
@@ -193,8 +214,8 @@ Skill 形式下，宿主（TRAE / Claude Code）是唯一能调用 websearch 的
 | ------------------------------------------ | ------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `--init "<领域描述>"`                          | 领域描述         | 创建运行目录并打印路径                                 | 调 LLM init 生成领域结构，初始化 state.json（phase=running）                                                               |
 | `--plan <run_dir>`                         | 读 state.json | stdout 输出 `{"queries":[...]}`               | 调 LLM plan 生成查询词，写入 state.pending\_batch（status=pending），再输出                                                  |
-| `--commit <run_dir> <search_results.json>` | 结果文件路径       | 打印入库统计                                      | 读 pending\_batch，经 SearchProvider 取 SearchBatch，校验各 query 状态，extract + 证据校验 + 去重 + 更新 state，清空 pending\_batch |
-| `--review <run_dir>`                       | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review、整体替换 state.gaps、脚本客观覆盖校验，判定收敛（收敛时置 phase=converged）                                              |
+| `--commit <run_dir> <search_results.json>` | 结果文件路径       | 打印入库统计                                      | 读 pending\_batch，经 SearchProvider 取 SearchBatch，校验各 query 状态，extract + 证据校验 + 去重 + 修订提案证据闸门入池 + 更新 state，清空 pending\_batch |
+| `--review <run_dir>`                       | 读 state.json | stdout 输出 `{"converged":bool,"reason":str}` | 调 LLM review（含修订裁决）、校验并应用裁决、整体替换 state.gaps、脚本客观覆盖校验，判定收敛（收敛时置 phase=converged）                                |
 | `--finalize <run_dir>`                     | 读 state.json | 生成交付物，重命名运行目录                               | 前置条件 phase=converged；生成 CSV/stats/报告并重命名目录                                                                    |
 
 ### 批次生命周期与失败处理
@@ -282,17 +303,21 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 
 `--review` 内部按以下顺序执行：
 
-1. 调 LLM review，输出 gaps + converged + reason；
-2. 脚本用 review 的 gaps 整体替换 state.exploration.gaps（开放缺口每批更新，反馈闭环生效）；
-3. 脚本校验客观覆盖三条件（用更新后的 gaps）：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增；
-4. 客观覆盖未达成 → 返回 converged=false（客观覆盖一票否决，LLM 的 converged 无效）；
-5. 客观覆盖达成 → 返回 converged = LLM 的 converged（LLM 确认是最后一关），并原子写入 phase=converged。
+1. 调 LLM review，输出 gaps + converged + reason + revisions（修订裁决）；
+2. 脚本校验 review 输出：gaps 数量 ≤ 缺口清单上限；revisions 必须覆盖池内全部待裁决修订、decision 枚举合法、merge 的 merge\_into 可解析——违反视为契约违反整体重试（最多 llm.retry 次），重试耗尽按节点失败处理；
+3. 脚本应用裁决（证据闸门之外的裁决边界见"领域结构增量写回"），应用后修订池清空；
+4. 脚本用 review 的 gaps 整体替换 state.exploration.gaps（开放缺口每批更新，反馈闭环生效）；
+5. 脚本校验客观覆盖条件（用更新后的 gaps）：所有节点 `dims - angles` 为空、gaps 为空、连续 K 批无新增来源、连续 K 批无新修订提案（修订池须为空，属协议时序不变量）；
+6. 客观覆盖未达成 → 返回 converged=false（客观覆盖一票否决，LLM 的 converged 无效）；
+7. 客观覆盖达成 → 返回 converged = LLM 的 converged（LLM 确认是最后一关），并原子写入 phase=converged。
 
 ### 循环统计计数规则
 
 - batch\_count：每批 --commit 处理完成后 +1（存活熔断以此计数）；
 
 - consecutive\_no\_new：每批 --commit 后，若本批 status=done 的 query 去重后新增 0 条来源，则 +1；否则清零；整批 query 全部 failed（无任何 done）时重置为 0（无搜索证据的批次不作收敛证据）；
+
+- consecutive\_no\_proposal：每批 --commit 后，若本批无修订提案通过证据闸门入池，则 +1；有提案入池则清零；整批 query 全部 failed 时重置为 0；**被证据闸门拒绝的提案不重置计数**（无据提案不能阻止停止侧达成）；
 
 - failed\_queries：累计所有 status=failed 的 query 数。
 
@@ -396,15 +421,20 @@ SearchBatch = [{query_id, query, results: [{title, url, snippet}], failed, attem
 - 标注 granularity：合集级 / 单篇级；同一来源同时有合集入口与单篇时，优先收合集入口；
 - 语言版本偏好：同一内容多语言版本只收一个，优先级 中文 > 英文 > 其他；
 - 平台准入：知网、专利库、百科、标准平台首页等跨领域通用平台不收录；平台的领域专属入口可收；
-- source_type 从词类词汇（组织形式词/体裁词/来源角色词）中选取，不另造同义新词；
+- source_type 只从词类词汇（组织形式词/体裁词/来源角色词）中选取，可两两组合；不得包含任何节点名、实体名、产品名或检索词（脚本校验，命中即拒绝该候选）；
 - URL 必须从搜索结果中逐字复制，禁止规范化、截短、凭先验知识补 URL。
+
+new_nodes 是"结构修订建议"，仅在本批搜索结果揭示了无法归入现有节点的独立新子方向时提出（脚本会校验证据，无据提案会被拒绝）：
+- 每条建议必须携带 evidence_urls：本批搜索中判定收录、且归属该新方向的来源 URL 清单（至少 2 条）；不得引用本批之外的来源；
+- 具体新主题（产品、技术、检索方向）优先写入 new_terms / new_entities 挂载现有节点，不建新节点；
+- dims 必须取自探索维度词类（官方文档 / 行业标准 / 论文 / 专利 / 数据集 / 开源社区 / 标准 / 厂商等来源类型与来源角色词），不得填检索词、实体名、产品名。
 
 只输出 JSON，不要其他文字：
 {"sources":[{"name":"...","url":"...","source_type":"...","granularity":"...","node":"...","description":"..."}],
  "new_entities":[{"name":"...","kind":"机构|厂商|产品|项目|规范","node":"..."}],
  "new_terms":[{"term":"...","node":"..."}],
- "new_nodes":[{"name":"...","parent":"...","terms":["..."],"dims":["..."]}]}
-new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 必须给完整可搜索字段（terms/dims）。
+ "new_nodes":[{"name":"...","parent":"...","terms":["..."],"dims":["..."],"evidence_urls":["https://...","https://..."]}]}
+new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 的 evidence_urls 必须逐字来自本批搜索结果的已收录 URL。
 ```
 
 ### review：评审
@@ -415,16 +445,19 @@ new_entities 与 new_terms 必须带 node（归属节点）；new_nodes 必须�
 领域结构：{{structure}}
 源集合统计：{{source_summary}}
 搜索历史：{{search_history}}
+待裁决修订池：{{pending_revisions}}
 
 评审规则：
-- 开放缺口清单：只列出当前仍未覆盖的方向/维度/实体，每条标注归属节点（已覆盖的不再列出，缺口被补齐后自然消失）；
+- 结构修订裁决：对"待裁决修订池"逐条裁决，decision ∈ {accept, merge, reject}——与现有节点同级且无法归入任何现有节点的独立新子方向 accept；可归入某现有节点的 merge（填 merge_into）；与现有节点重复或过细的 reject；revisions 必须覆盖池内全部修订（缺一不可）；
+- 开放缺口清单：只列出当前仍未覆盖的方向/维度/实体，每条标注归属节点（已覆盖的不再列出，缺口被补齐后自然消失）；数量收敛（通常不超过 10 条）；
 - 覆盖充分性判断：领域的主要子方向是否都已有数据源覆盖、是否还有明显未探索的维度；
 - 客观覆盖条件（脚本另行校验，此处只做语义判断）：各节点适用维度是否都已搜索、是否有明显遗漏。
 
 只输出 JSON，不要其他文字：
 {"gaps":[{"description":"...","node":"..."}],
  "converged":true或false,
- "reason":"..."}
+ "reason":"...",
+ "revisions":[{"revision_id":1,"decision":"accept|merge|reject","merge_into":"...","note":"..."}]}
 gaps 是"当前全部开放缺口"——脚本用它整体替换 state.exploration.gaps。
 ```
 
@@ -522,6 +555,7 @@ phase 取值：`init` / `running` / `converged` / `failed`。循环中间态（�
 | --plan 后（pending\_batch 已写、未搜索） | 续跑时宿主先搜索 pending\_batch 的 queries，再 --commit        |
 | 搜索中（部分 query 已搜）                | 宿主按 search\_results.json 已有的 query 补齐缺失项，再 --commit |
 | --commit 中                      | 重跑 --commit 安全（幂等）                                  |
+| --commit 后、--review 前（修订池非空） | 重跑 --review 完成裁决；若直接续跑 --plan，修订池累积至下次 --review 一并裁决（覆盖完整性校验保证不遗漏） |
 | --review 已收敛、--finalize 前中断     | 直接重跑 --finalize                                     |
 | --review 后（未收敛）                 | state 已更新，续跑时 --plan 继续下一批                          |
 
@@ -548,7 +582,10 @@ LLM 通过 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，支持 f
     "queries_per_batch_max": 5,
     "fuse_batch_limit": 100,
     "retry": 2,
-    "fail_rate_threshold": 0.5
+    "fail_rate_threshold": 0.5,
+    "revision_evidence_min": 2,
+    "revision_accept_max": 2,
+    "gaps_max": 10
   }
 }
 ```
@@ -585,6 +622,14 @@ LLM 通过 OpenAI 兼容网关调用（OpenAI Chat Completions 协议，支持 f
 
 - 熔断：批次数达 100 → 异常中止 + 保留状态 + 声明失败；
 
-- 报告 LLM 失败：--finalize 内报告生成 LLM 失败 → 重试后仍失败则报告降级（正文缺失但 CSV/stats 正常产出）。
+- 报告 LLM 失败：--finalize 内报告生成 LLM 失败 → 重试后仍失败则报告降级（正文缺失但 CSV/stats 正常产出）；
+
+- 修订证据闸门：new\_nodes 提案缺 evidence\_urls / 证据不足 2 条 / 证据来自窗口外历史批次 → 脚本直接拒绝，不入池、不重置"连续无新提案"计数；
+
+- 修订裁决：review 裁决 accept（dims 白名单 + 树校验）/ merge（terms 并入、dims 不并入）/ reject；单轮 accept 超上限按 revision\_id 截断；裁决后池清空；
+
+- 裁决覆盖完整性：revisions 缺失池内条目 → 契约违反重试 → 耗尽 phase=failed；gaps 超上限同理；
+
+- 连续无新提案：有提案入池则清零、无则 +1、整批 failed 重置 0；未达 K 时收敛判定不通过；修订池非空时收敛判定不通过。
 
 测试命令：`python -m pytest tests/ -q`。
