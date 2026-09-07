@@ -46,7 +46,9 @@ def test_project_root_and_relative_resolution():
     """2026-08-31 首轮实测 bug 钉进测试：PROJECT_ROOT 曾上溯到 .claude/（parents[3]
     off-by-one），相对 run_dir 解析到 .claude/outputs/ 下，store 与证据留痕全
     找不到、record_sources 全被拒。项目根必须锚定仓库根，相对路径锚定项目根。"""
-    assert ms.PROJECT_ROOT.name == "AutoSource"
+    # 2026-09-07：目录改名（AutoSource → AutoSource-1.0）后 name 硬编码断言必红，
+    # 改为结构性断言——仍钉 parents 层数（off-by-one 回归），但不绑目录名
+    assert ms.PROJECT_ROOT == Path(__file__).resolve().parent.parent
     assert (ms.PROJECT_ROOT / ".claude" / "skills" / "autosource" / "scripts"
             / "mcp_server.py").is_file()
     assert ms._resolve("outputs/run_x") == ms.PROJECT_ROOT / "outputs" / "run_x"

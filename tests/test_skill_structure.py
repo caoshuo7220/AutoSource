@@ -1,5 +1,6 @@
 """skill 结构约定的契约钉进测试：单 skill 合并、脚本归位 scripts/、路径引用一致。"""
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -129,6 +130,7 @@ def test_storage_contract_mcp_tools():
     assert "基底 16 次搜索完成后" in SKILL_MD
     assert "**防截断哨兵**" in SKILL_MD
     assert "数据落盘只走 MCP 工具" in SKILL_MD
+    assert "存储机制自检" in SKILL_MD  # 装配层故障时四工具硬失败的行为说明（mcp_server.self_check）
     assert "model = " not in SKILL_MD  # 防误用：禁止模型用 Write 写数据文件组装
 
 
@@ -264,6 +266,24 @@ def test_settings_deny_outputs_read():
     deny = settings["permissions"].get("deny", [])
     assert "Read(outputs/**)" in deny
     assert "Glob(outputs*)" in deny
+
+
+def test_settings_outputs_write_only_no_edit():
+    """docs/04 §3.3/§10 契约：outputs 目录只放行 Write——Edit 不入 allow。
+    2026-09-07：allow 曾显式放行 Edit(outputs/**)，与契约文本矛盾（Edit 墙实际由
+    deny Read(outputs/**) 兜底），删除并对齐。"""
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    allow = settings["permissions"]["allow"]
+    assert "Write(outputs/**)" in allow
+    assert "Edit(outputs/**)" not in allow
+
+
+def test_settings_allow_entries_well_formed():
+    """2026-09-07：allow 曾含两个缺右括号的死条目（WebSearch(*、Read(**）——匹配不到
+    任何调用。每个条目必须是裸工具名或 Tool(说明符) 完整形式。"""
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    for entry in settings["permissions"]["allow"]:
+        assert re.match(r"^[A-Za-z_][\w-]*(\(.*\))?$", entry), entry
 
 
 def test_settings_allow_mcp_store_tools():

@@ -15,9 +15,11 @@ store 只承载两类记录：增量发现条目（type=source）与搜索日志
 入库校验与收尾统计共用，编排层（postprocess）从这里取（依赖方向：编排 → 存储，
 单向向下；本模块不 import 编排层）。
 
-store.jsonl 由脚本持有，模型不可见；每行一条、追加原子，崩溃最多丢最后一个批次。
+store.jsonl 由脚本持有，模型不可见；每行一条（脚本盖 ts，模型无时钟——docs/04 §3.1）、
+追加原子，崩溃最多丢最后一个批次。
 """
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -96,6 +98,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
     evidence_ok = evidence_path.exists()
     evidence = evidence_path.read_text(encoding="utf-8", errors="replace") if evidence_ok else ""
     existing_urls = _existing_urls(store_path)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # 每批一个时间戳（脚本盖，模型无时钟）
 
     for i, e in enumerate(entries):
         name = str(e.get("name") or "") if isinstance(e, dict) else ""
@@ -127,6 +130,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
             "url": url,
             "description": e.get("description", ""),
             "reason": e.get("reason", ""),
+            "ts": ts,
         })
         existing_urls.add(url)
     append_records(store_path, accepted)
@@ -138,6 +142,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
 
 def record_search(store_path: Path, entries: list) -> int:
     """搜索日志批量追加；非 dict 条目跳过。返回追加数。"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = []
     for e in entries:
         if not isinstance(e, dict):
@@ -150,6 +155,7 @@ def record_search(store_path: Path, entries: list) -> int:
             "results": e.get("results", ""),
             "extracted": e.get("extracted", ""),
             "verified": e.get("verified", ""),
+            "ts": ts,
         })
     return append_records(store_path, rows)
 

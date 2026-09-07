@@ -144,6 +144,14 @@ class TestRecordSources:
         assert records[0]["node"] == "AI训练GPU"
         assert records[1]["node"] == "无线网-Wi-Fi"
 
+    def test_ts_stamped_on_accepted_rows(self, tmp_path):
+        """docs/04 §3.1：store 每行由脚本盖时间戳（模型无时钟）——入库记录必须带 ts。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc"])
+        assert record_sources(store, [source_entry()], evidence, NODES)["accepted"] == 1
+        records, _ = load_store(store)
+        assert records[0].get("ts")
+
 
 class TestRecordSearch:
     def test_search_batch_appended(self, tmp_path):
@@ -168,6 +176,14 @@ class TestRecordSearch:
     def test_non_dict_rows_skipped(self, tmp_path):
         store = tmp_path / "store.jsonl"
         assert record_search(store, [{"query": "q"}, "垃圾", None]) == 1
+
+    def test_ts_stamped_on_search_rows(self, tmp_path):
+        """docs/04 §3.1：搜索日志行同样由脚本盖时间戳。"""
+        store = tmp_path / "store.jsonl"
+        assert record_search(store, [{"phase": "增量发现", "node": "AI训练GPU",
+                                      "query": "q", "results": 1, "extracted": 0}]) == 1
+        records, _ = load_store(store)
+        assert records[0].get("ts")
 
 
 class TestCoverage:

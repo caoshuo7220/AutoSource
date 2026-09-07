@@ -22,6 +22,8 @@ allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sourc
 
 **运行期边界**：本流程不写代码、不跑测试——运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令（初始化 `--prepare` 与阶段 6 报告命名 `--rename-report`）；数据写入只走四个 MCP 工具（record_sources / record_search / coverage / finalize），禁止自创脚本或 Write 数据文件组装。
 
+**存储机制自检**：四个 MCP 工具每次调用前由服务自检装配层（项目根锚定、hook 依赖的会话 ID 环境变量、运行目录证据文件）——装配层故障时工具报「存储机制自检失败」并按失败路径中止，按报错修装配层后重跑即可（2026-08-31 首轮实测教训的防护，不是流程缺陷）。
+
 ## 参数与运行约定
 
 | 参数 | 必填 | 说明 |

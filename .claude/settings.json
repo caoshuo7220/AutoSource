@@ -5,10 +5,8 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebSearch(*",
-      "Read(**",
+      "Read(**)",
       "Write(outputs/**)",
-      "Edit(outputs/**)",
       "Bash(python .claude/skills/autosource/scripts/postprocess.py *)",
       "mcp__autosource-store__record_sources",
       "mcp__autosource-store__record_search",
