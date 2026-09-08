@@ -9,6 +9,7 @@ CLAUDE.md
 .codex/
 # autosource outputs
 outputs/
+outputs_1/
 # 日报（个人记录，不入库）
 docs/日报/
 # local overrides (not committed)

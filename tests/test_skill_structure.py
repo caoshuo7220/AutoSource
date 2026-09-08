@@ -92,16 +92,18 @@ def test_model_field_optional_contract():
 
 
 def test_incremental_search_count_per_node():
-    """增量发现每节点至少 16 次（2026-09-01 起：固定 4 + 自由 10 + 实体 2，16 次后按产出扩充——
-    上限由数据定：连续 4 次无新增即饱和停止；分配依据为两轮 252 次按类别产量实测。
-    2026-09-02 实测后用户决策：实体 4→2（82 样本每搜 0.87 vs 框架 1.64），空出 2 次并入自由角度）。
-    角度池独立成组（六类分行），并新增易失效角度说明。"""
+    """增量发现每节点基底 16 次（固定 4 + 自由 8 + 实体 4），扩充有界化（09-08 修订：
+    09-07 SOM 轮无限制扩充 489 次撞 1M 上下文墙——扩充改为至多 2 批、批级有效新增 ≥2 才继续、
+    每节点上限 24 次；实体配额 4 为 09-08 用户决策恢复（09-02 曾 4→2、空出并入自由 8→10，
+    现自由回 8、基底 16 不变）。角度池独立成组（六类分行），并新增易失效角度说明。"""
     assert "每节点**至少 16 次**搜索" in SKILL_MD
-    assert "**固定 2 次实体选题**" in SKILL_MD
-    assert "**扩充（16 次之后，不限次数、不限中英文）**" in SKILL_MD
-    assert "连续 4 次无任何新增" in SKILL_MD
-    assert "**自由 10 次**（**仅中文搜索词**）" in SKILL_MD  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文；09-02 实体 4→2 并入自由 8→10
-    assert "**自由 10 次**" in SKILL_MD
+    assert "**固定 4 次实体选题**" in SKILL_MD
+    assert "**扩充（第 1 批必跑，至多 2 批，每节点上限 24 次）**" in SKILL_MD
+    assert "必须先执行第 1 批扩充" in SKILL_MD  # 2026-09-08：首轮实测模型 0 批扩充（把增产并入阶段 4 扩量轮）——第 1 批改必跑，消灭"要不要扩"的决策空间
+    assert "有效新增 0-3 条" in SKILL_MD
+    assert "扩充不得并入扩量轮执行" in SKILL_MD  # 阶段 3 扩充与阶段 4 扩量轮语义区分（模型曾混淆跳过扩充）
+    assert "**自由 8 次**（**仅中文搜索词**）" in SKILL_MD  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文
+    assert "**自由 8 次**" in SKILL_MD
     assert "**角度池**" in SKILL_MD
     assert "**易失效角度（必须带领域词 + 入口词）**" in SKILL_MD
     assert "**英文未组合后缀同样易失效**" in SKILL_MD  # 2026-08-27：英文 X list 模式返回垃圾页，扩展易失效规则；09-02 "裸后缀"俚语改为"未组合后缀"
@@ -139,6 +141,19 @@ def test_scripts_include_store_and_mcp_server():
     assert (SCRIPTS_DIR / "store.py").is_file()
     assert (SCRIPTS_DIR / "mcp_server.py").is_file()
     assert (ROOT / ".mcp.json").is_file()
+
+
+def test_skill_genre_free_label_no_taxonomy_leak():
+    """source_type 字段语义与机制隔离（2026-09-08 终版）：SKILL 只给模型字段语义
+    （内容形态标签，不填机构名/领域名/网址）；词表 12 类、归一、表外词审计等脚本
+    机制不出现在 SKILL——词表作为提取筛子的两版尝试均致产量暴跌（每搜提取
+    0.85→0.20、store 类型 22→5 类），机制细节告知模型只会诱发保守提取。"""
+    assert "#### 数据源类型" in SKILL_MD
+    assert "内容形态标签" in SKILL_MD
+    assert "不填机构名、领域名或网址" in SKILL_MD
+    assert "SOURCE_TYPES" not in SKILL_MD  # 脚本机制词不泄漏进 SKILL（分类归 store.py）
+    assert "归一" not in SKILL_MD
+    assert "词表" not in SKILL_MD
 
 
 def test_termination_condition_aligned_with_finalization():
@@ -184,6 +199,22 @@ def test_extraction_per_item_no_whole_row_rejection():
     assert "合集入口与单篇同时出现在结果里" in SKILL_MD
 
 
+def test_extraction_yield_benchmark_and_self_check():
+    """提取量自查标尺（2026-09-08 决策）：提取环节是全流水线唯一无机制锚的量——
+    URL 有证据链、查询词有留痕比对、搜索数有配额，唯独"收几条"纯靠模型自觉：
+    同版同模型三轮 172/274/813（08-27 SKILL）、pro 基底 ~1.1/搜 vs 08-28 全收
+    6.39/搜 实证提取默认值漂移是产量主变量。"全量提取"义务型文本约束不住执行，
+    改补量化常态预期（10 条通常拒 1-2 条）作自查标尺 + group commit 前提取率
+    自查；同时写死两条防线：词题例外（整批书商/元器件站/SEO 页如实 0，不为凑数
+    收录垃圾）、重审不重新搜索（防复核变成加搜拖长运行）。"""
+    assert "**常态预期（自查标尺）**" in SKILL_MD
+    assert "通常只有 1-2 条需要拒收" in SKILL_MD
+    assert "不为凑数收录垃圾" in SKILL_MD
+    assert "**入库前自查**" in SKILL_MD
+    assert "明显低于 1 条/搜" in SKILL_MD
+    assert "重审不重新搜索" in SKILL_MD
+
+
 def test_node_search_profile():
     """节点搜索画像（2026-08-26 起）：基础契约钉进测试——不改 nodes 契约、禁编造机构、
     核心搜索词含行业术语与细分场景词（2026-08-27 补：薄弱节点维度窄的治理）。"""
@@ -203,12 +234,13 @@ def test_journal_verified_field_contract():
 def test_entity_query_second_type_contract():
     """2026-09-01：实体选题放开——阶段 3 查询词构造改两类选题，
     旧"每个查询词必须包含领域词"一刀切句移除（与通用纪律 3/4 类词的矛盾根）。
-    实体选题固定配额（新实体不足退回角度池）：09-02 实测 82 样本每搜 0.87 后由 4 降为 2。"""
+    实体选题固定配额（新实体不足退回角度池）：09-02 实测 82 样本每搜 0.87 后曾 4→2，
+    09-08 用户决策恢复 4（配合扩充有界化，实体覆盖由固定配额保障）。"""
     assert "两类选题" in SKILL_MD
     assert "实体选题" in SKILL_MD
     assert "可不含领域词" in SKILL_MD
     assert "每个查询词必须包含领域词" not in SKILL_MD
-    assert "新实体不足 2 个时，空缺次数退回角度池" in SKILL_MD
+    assert "新实体不足 4 个时，空缺次数退回角度池" in SKILL_MD
 
 
 def test_coverage_missing_rough_signal_contract():
@@ -261,11 +293,13 @@ def test_settings_raises_web_search_session_budget():
 
 
 def test_settings_deny_outputs_read():
-    """防历史自锚定：deny Read(outputs/**) + Glob(outputs*)（转录实证的两条通道）。"""
+    """防历史自锚定：deny Read(outputs/**) + Glob(outputs*)（转录实证的两条通道）。
+    2026-09-08 用户决策移除：开发/复盘会话需读 outputs（运行防自锚定暂由 SKILL
+    提示词承担；动态 hook 拦截方案挂账，见 docs/02 09-08 日志）。钉桩断言现状并留痕。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     deny = settings["permissions"].get("deny", [])
-    assert "Read(outputs/**)" in deny
-    assert "Glob(outputs*)" in deny
+    assert "Read(outputs/**)" not in deny
+    assert "Glob(outputs*)" not in deny
 
 
 def test_settings_outputs_write_only_no_edit():
@@ -345,21 +379,21 @@ def test_contradiction_and_wording_cleanup():
     assert "裸搜" not in SKILL_MD  # 2026-09-02："裸"俚语前缀清除（裸搜/裸后缀→单独搜/未组合）
     assert "禁止裸搜产品名" not in SKILL_MD
     assert "❌" not in SKILL_MD and "✅" not in SKILL_MD
-    # 数据源类型标签治理（2026-08-26 起）：从词类词汇中选，不自创同义新词；
-    # 组合仅限词类词汇两两拼合、不加领域名（子集分裂治理）
-    assert "#### 数据源类型（标签从词类词汇中选）" in SKILL_MD
-    assert "不另造同义新词" in SKILL_MD
-    assert "不要往标签里加领域名" in SKILL_MD
-    assert "市场研究" in SKILL_MD  # 2026-08-26 交换机运行实证（26 条高频、用词稳定）纳入体裁词表
+    # 数据源类型（2026-09-08 终版）：SKILL 只留字段语义，脚本机制（词表 12 类/归一/
+    # 表外词审计）全部在 store.py——词表当提取筛子的两版尝试均致产量暴跌，机制不进 SKILL
+    assert "#### 数据源类型" in SKILL_MD
+    assert "内容形态标签" in SKILL_MD
+    assert "SOURCE_TYPES" not in SKILL_MD and "归一" not in SKILL_MD
 
 
 def test_conciseness_review_cleanup():
     """2026-09-01 规范符合性审查钉桩：① 分工原则截断句砍论证尾——"离截断边界约 10 倍"
-    是设计算术、非执行指令，机制结论（写入截断在机制上不可能发生）保留（防回到写大文件
-    老路，与阶段 3 可执行批量规则分工）；② 弹窗机制解释单一归属——55 行落盘规则保留
-    细节版（含 build_xxx.py 实例），57 行证据核对只留"这是脚本的职责"。"""
+    是设计算术、非执行指令，机制结论（写入截断在机制上不可能发生）原保留（防回到写大文件
+    老路，与阶段 3 可执行批量规则分工）——2026-09-08 用户删除该结论句（判断冗余：
+    数据落盘只走 MCP 工具等强约束已足够），钉桩断言同步改为不在；② 弹窗机制解释单一归属——
+    55 行落盘规则保留细节版（含 build_xxx.py 实例），57 行证据核对只留"这是脚本的职责"。"""
     assert "离截断边界约 10 倍" not in SKILL_MD
-    assert "写入截断在机制上不可能发生" in SKILL_MD
+    assert "写入截断在机制上不可能发生" not in SKILL_MD
     assert "越界命令会被权限白名单拦截弹窗" not in SKILL_MD
     assert "执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗" in SKILL_MD
 
@@ -375,7 +409,7 @@ def test_docs_01_skill_layer_quota_sync():
     """docs/01 分层表的增量发现组合与 SKILL 当前配额一致——2026-09-02 实体 4→2、
     自由 8→10 后该行未同步（文档人工同步反复漂移的又一例），钉进测试强制下次配额调整一并改。"""
     docs01 = (ROOT / "docs" / "01-交付手册.md").read_text(encoding="utf-8")
-    assert "固定 4 + 自由 10 + 实体 2 = 基底 16 次/节点，之后按产出扩充" in docs01
+    assert "固定 4 + 自由 8 + 实体 4 = 基底 16 次/节点，扩充至多 2 批" in docs01
 
 
 def test_quote_style_unified_straight():

@@ -117,7 +117,9 @@ def record_sources(run_dir: str, entries: list) -> str:
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
 
     返回 JSON：{"accepted": 入库数, "skipped": 裸 URL 精确重复跳过数,
-    "rejected": [{index, name, url, reason}]}——单条被拒不阻断批次。
+    "rejected": [{index, name, url, reason}], "unmapped": [表外原始体裁词]}——
+    单条被拒不阻断批次；unmapped 列出 source_type 落「其他」的原始词（词表外，
+    应改从 SKILL 词表内选择；高频新词可补别名进 store.SOURCE_TYPE_ALIASES）。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)

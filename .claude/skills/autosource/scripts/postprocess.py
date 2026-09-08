@@ -76,7 +76,8 @@ from lineage import build_lineage, first_query_by_source, write_lineage_csv
 from report import finalize_report
 # 条目粒度契约与节点推导归存储层（store），编排层从这里取——依赖方向单向向下
 # （mcp_server → store/postprocess → evidence/lineage/report，无环）。
-from store import GRANULARITY_LEVELS, leaf_node, load_store
+from store import (GRANULARITY_LEVELS, canonicalize_source_type, leaf_node,
+                   load_store)
 
 # 重导出（test_postprocess 的导入面）：query_in_evidence 本模块未用，仅作兼容出口。
 __all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicate",
@@ -354,6 +355,17 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     evidence_strings = extract_strings(evidence) if journal else set()
 
     all_candidates = valid + merged
+    # 体裁归一（封闭词表）：MCP 路径的 store 行入库时已归一一次，此处对三来源
+    # 汇合（store/CLI raw/knowledge manifest）统一再归一——幂等，双入口口径一致
+    # （knowledge 与 CLI 路径不经 record_sources）。表外词（落「其他」）在归一
+    # 发生的这一处按原始词计数——审计语义 = 本次运行实际发生的表外词，与来源无关。
+    unmapped_types: dict[str, int] = {}
+    for s in all_candidates:
+        raw_type = str(s.get("source_type") or "").strip()
+        source_type = canonicalize_source_type(raw_type)
+        s["source_type"] = source_type
+        if source_type == "其他" and raw_type != "其他":
+            unmapped_types[raw_type] = unmapped_types.get(raw_type, 0) + 1
     grounded, rejected = check_grounded(all_candidates, evidence)
     ungrounded = len(rejected)
 
@@ -462,6 +474,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
         "single_count": single_count,
         "granularity_missing": granularity_missing,
+        "unmapped_types": unmapped_types,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
@@ -542,9 +555,9 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     store_path = run_dir_path / "store.jsonl"
     records, bad_lines = load_store(store_path) if store_path.exists() else ([], 0)
 
-    # store 行含内部字段（type/node/ts）——组装等价 raw 时剥离；
-    # store 原件由 intermediate/store_input.jsonl 保留
-    sources = [{k: v for k, v in r.items() if k not in ("type", "node", "ts")}
+    # store 行含内部字段（type/node/ts/source_type_raw）——组装等价 raw 时剥离；
+    # store 原件（含 source_type_raw 审计留痕）由 intermediate/store_input.jsonl 保留
+    sources = [{k: v for k, v in r.items() if k not in ("type", "node", "ts", "source_type_raw")}
                for r in records if r.get("type") == "source"]
     searches = [r for r in records if r.get("type") == "search"]
     journal = [{"phase": s.get("phase", ""), "node": s.get("node", ""),
@@ -613,6 +626,11 @@ def summary_text(summary: dict) -> str:
             lines.append(f"  - {name}: {url}")
     if summary["granularity_missing"]:
         lines.append(f"警告: {summary['granularity_missing']} 条缺 granularity 声明，按合集级处理")
+    if summary.get("unmapped_types"):
+        detail = "、".join(f"{w}×{c}" for w, c in sorted(
+            summary["unmapped_types"].items(), key=lambda kv: (-kv[1], kv[0])))
+        lines.append(f"表外词兜底: {sum(summary['unmapped_types'].values())} 条（{detail}）"
+                     "——落『其他』，高频词可补别名进 store.SOURCE_TYPE_ALIASES")
     lines.append(f"清单核对: 验证通过 {summary['list_verified']} 项")
     mismatch = summary.get("verification_mismatch")
     if mismatch:

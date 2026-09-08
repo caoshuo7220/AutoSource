@@ -320,6 +320,54 @@ class TestMultilangAudit:
         assert "多语言版本并存" not in buf.getvalue()
 
 
+class TestSourceTypeNormalization:
+    """体裁封闭词表归一（12 类 + 其他）：三来源（CLI sources / knowledge manifest /
+    store）在 pipeline 汇合处统一归一——幂等，双入口（CLI/MCP）口径一致；
+    表外词落「其他」并按原始词计数进审计行（与来源无关）。"""
+
+    def test_alias_normalized_in_csv_and_stats(self, tmp_path):
+        data = base_data()
+        data["sources"][0]["source_type"] = "厂商文档"  # 别名 → 文档
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"])
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+        assert summary["unmapped_types"] == {}
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert all(r[2] in ("文档", "数据集") for r in rows[1:])
+        stats_csv = next((Path(summary["outdir"]) / "intermediate").glob("*stats.csv"))
+        srows = read_csv_rows(stats_csv)
+        assert srows[1][2] == "文档:1"
+
+    def test_unmapped_counted_across_all_three_sources(self, tmp_path):
+        """审计覆盖三来源：CLI sources 一条 + knowledge manifest 一条（store 行
+        入库时已归一，pipeline 再归一为幂等——表外词只计一次）。"""
+        data = base_data()
+        data["sources"][0]["source_type"] = "某新词"
+        kn = {"name": "K", "node": "服务器CPU", "verified": True,
+              "category_path": "算力服务器-服务器CPU", "source_type": "另一新词",
+              "url": "https://k.com/doc", "description": "d", "reason": "r"}
+        data["knowledge"] = [kn]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence(tmp_path, data["sources"] + [kn])
+        import io
+        from contextlib import redirect_stdout
+        from postprocess import _print_summary
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                          evidence_log=str(ev))
+            _print_summary(summary)
+        assert summary["unmapped_types"] == {"某新词": 1, "另一新词": 1}
+        out = buf.getvalue()
+        assert "表外词兜底: 2 条" in out
+        assert "某新词×1" in out and "另一新词×1" in out
+        source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
+        rows = read_csv_rows(source_csv)
+        assert sum(1 for r in rows[1:] if r[2] == "其他") == 2
+
+
 class TestRun:
     def test_full_pipeline(self, tmp_path):
         data = base_data()
@@ -364,13 +412,13 @@ class TestRun:
         assert len(rows) == 5  # header + 3 nodes + 总计
         by_node = {r[0]: r for r in rows[1:] if r[0] != "总计"}
         assert by_node["AI训练GPU"][1] == "1"
-        assert by_node["AI训练GPU"][2] == "官方文档:1"
+        assert by_node["AI训练GPU"][2] == "文档:1"
         assert by_node["图形渲染GPU"][1] == "1"
         assert by_node["服务器CPU"][1] == "0"
         assert by_node["服务器CPU"][2] == ""
         assert rows[-1][0] == "总计"
         assert rows[-1][1] == "2"  # 最终收录 = 候选数求和
-        assert rows[-1][2] == "官方文档:1; 数据集:1"
+        assert rows[-1][2] == "数据集:1; 文档:1"  # 同数按体裁名升序：数(U+6570) < 文(U+6587)
         # stats 列集合钉死：纯清单统计表（领域/时间戳在文件名、模型在 manifest、健康指标在 stdout）
         assert rows[0] == ["分类节点", "候选数", "体裁分布"]
 
@@ -420,7 +468,7 @@ class TestRun:
     def test_unmatched_source_counted_but_kept_in_csv(self, tmp_path):
         data = base_data()
         data["sources"].append({"name": "U", "category_path": "算力服务器-不存在的节点",
-                                "source_type": "技术博客", "url": "https://u.com",
+                                "source_type": "媒体", "url": "https://u.com",
                                 "description": "d"})
         raw = write_raw(tmp_path, data)
         ev = write_evidence(tmp_path, data["sources"])
@@ -525,7 +573,7 @@ class TestRun:
         kn = {"name": "国标文件", "node": "服务器CPU", "verified": True,
               "granularity": "单篇级",
               "category_path": "算力服务器-服务器CPU",
-              "source_type": "行业标准", "url": "https://m.com/gb.pdf",
+              "source_type": "标准", "url": "https://m.com/gb.pdf",
               "description": "标准全文", "reason": "标准文件，无合集可替代"}
         data["knowledge"] = [kn]
         raw = write_raw(tmp_path, data)
@@ -655,7 +703,7 @@ class TestKnowledge:
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         merged_row = next(r for r in rows[1:] if r[0] == "IEEE 802.3 工作组")
-        assert merged_row[2] == "行业标准"
+        assert merged_row[2] == "标准"
 
     def test_knowledge_missing_tolerated(self, tmp_path):
         data = base_data()
@@ -1750,6 +1798,26 @@ class TestFinalizeFold:
         assert (outdir / "intermediate" / "manifest_input.json").exists()
         assert not (outdir / "store.jsonl").exists()
         assert not (outdir / "manifest.json").exists()
+
+    def test_fold_strips_source_type_raw_but_archives_it(self, tmp_path):
+        """store 内部字段 source_type_raw 不漏进组装的 raw（交付物干净），
+        但归档的 store_input.jsonl 保留原始词（审计零损失）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)
+        row = self._source_row()
+        row["source_type_raw"] = "厂商文档"
+        self._write_store(run_dir, [row, self._search_row()])
+        evidence = write_evidence_queries(tmp_path, ["GPU 排名 数据库"],
+                                          [{"url": "https://a.com/doc", "name": "A"},
+                                           {"url": "https://k.com/doc", "name": "K1"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        outdir = Path(summary["outdir"])
+        archived = (outdir / "intermediate" / "store_input.jsonl").read_text(encoding="utf-8")
+        assert "source_type_raw" in archived
+        assert "厂商文档" in archived
+        source_csv = next(outdir.glob("*数据源清单.csv"))
+        assert "source_type_raw" not in source_csv.read_text(encoding="utf-8-sig")
 
     def test_sentinel_not_triggered_by_verification_only_run(self, tmp_path):
         """2026-09-01 钉进测试：哨兵只对增量/扩量轮的提取计数——

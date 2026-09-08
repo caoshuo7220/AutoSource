@@ -139,7 +139,7 @@ class TestMcpProtocol:
             r = _rpc(proc, "tools/call", {"name": "record_sources", "arguments": {
                 "run_dir": str(run_dir), "entries": [
                     {"name": "A", "category_path": "交换机-数据中心交换机",
-                     "source_type": "官方文档", "granularity": "合集级",
+                     "source_type": "文档", "granularity": "合集级",
                      "url": "https://a.com/doc", "description": "d", "reason": "r"}]}},
                 req_id=3)
             assert '"accepted": 1' in _tool_text(r)

@@ -2,6 +2,7 @@
   "env": {
     "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": "1000"
   },
+  "autoMemoryEnabled": false,
   "permissions": {
     "allow": [
       "WebSearch",
@@ -15,10 +16,7 @@
       "Skill(autosource)",
       "Skill(autosource:*)"
     ],
-    "deny": [
-      "Read(outputs/**)",
-      "Glob(outputs*)"
-    ],
+
     "additionalDirectories": [
       ".claude/skills"
     ]

@@ -3,12 +3,12 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource" / "scripts"
 sys.path.insert(0, str(SKILL_DIR))
 
-from store import append_records, coverage, load_store, record_search, record_sources
+from store import (SOURCE_TYPES, SOURCE_TYPE_ALIASES, append_records,
+                   canonicalize_source_type, coverage, load_store, record_search,
+                   record_sources)
 
 NODES = ["AI训练GPU", "图形渲染GPU", "无线网-Wi-Fi"]
 
@@ -26,8 +26,80 @@ def write_evidence(tmp_path: Path, urls: list[str]) -> Path:
 
 def source_entry(url="https://a.com/doc", name="A",
                  category_path="算力服务器-GPU服务器-AI训练GPU") -> dict:
-    return {"name": name, "category_path": category_path, "source_type": "官方文档",
+    return {"name": name, "category_path": category_path, "source_type": "文档",
             "granularity": "合集级", "url": url, "description": "d", "reason": "r"}
+
+
+class TestCanonicalizeSourceType:
+    """封闭词表归一：标准词自映射（幂等）→ 别名映射 → 其他兜底。"""
+
+    def test_canonical_words_self_map(self):
+        for t in SOURCE_TYPES:
+            assert canonicalize_source_type(t) == t
+
+    def test_alias_words_mapped(self):
+        assert canonicalize_source_type("厂商文档") == "文档"
+        assert canonicalize_source_type("市场研究") == "报告"
+        assert canonicalize_source_type("行业标准") == "标准"
+        assert canonicalize_source_type("开源社区") == "社区"
+        assert canonicalize_source_type("仓库") == "代码仓库"
+        # 2026-09-08 交换机 403 条轮表外词收敛（180413 实测 67 条落「其他」中三条
+        # 高频形态词：开放组织=联盟/基金会官网、专利数据库=专利检索平台、技术白皮书=报告）
+        assert canonicalize_source_type("开放组织") == "官网"
+        assert canonicalize_source_type("专利数据库") == "专利"
+        assert canonicalize_source_type("技术白皮书") == "报告"
+
+    def test_unknown_word_falls_back_to_other(self):
+        assert canonicalize_source_type("没见过的新词") == "其他"
+
+    def test_empty_preserved_as_missing(self):
+        """空/空白 = 模型违约未填（残缺）——如实保留空，不落「其他」、不被误报为
+        表外词（残缺由 stats「未标注」口径承接，见 postprocess.compute_stats）。"""
+        assert canonicalize_source_type("") == ""
+        assert canonicalize_source_type(None) == ""
+        assert canonicalize_source_type("  ") == ""
+
+    def test_idempotent_on_double_apply(self):
+        once = canonicalize_source_type("厂商文档")
+        assert canonicalize_source_type(once) == once
+
+    def test_canonicalize_closed_idempotent_on_known_words(self):
+        """性质钉住：非空输入闭合于 SOURCE_TYPES 且幂等——词表/别名扩展不破坏不变量。"""
+        samples = list(SOURCE_TYPES) + list(SOURCE_TYPE_ALIASES)
+        for w in samples:
+            once = canonicalize_source_type(w)
+            assert once in SOURCE_TYPES
+            assert canonicalize_source_type(once) == once
+
+
+class TestRecordSourcesTypeNormalization:
+    """入库即归一：store 只存标准词，原始词留痕 source_type_raw，表外词进 unmapped。"""
+
+    def test_alias_normalized_and_raw_preserved(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc"])
+        result = record_sources(store, [source_entry() | {"source_type": "厂商文档"}],
+                                evidence, NODES)
+        assert result["accepted"] == 1
+        assert result["unmapped"] == []
+        records, _ = load_store(store)
+        assert records[0]["source_type"] == "文档"
+        assert records[0]["source_type_raw"] == "厂商文档"
+
+    def test_unmapped_word_falls_back_with_alert(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc", "https://b.com/doc"])
+        result = record_sources(store, [
+            source_entry() | {"source_type": "某新词"},
+            source_entry(url="https://b.com/doc", name="B") | {"source_type": "文档"},
+        ], evidence, NODES)
+        assert result["accepted"] == 2
+        assert result["unmapped"] == ["某新词"]
+        records, _ = load_store(store)
+        assert records[0]["source_type"] == "其他"
+        assert records[0]["source_type_raw"] == "某新词"
+        assert records[1]["source_type"] == "文档"
+        assert records[1]["source_type_raw"] == "文档"
 
 
 class TestAppendLoad:
