@@ -1,9 +1,10 @@
-"""AutoSource MCP stdio 服务：四工具（docs/04 存储架构改造）。
+"""AutoSource MCP stdio 服务：五工具（docs/04 存储架构改造）。
 
-record_sources(run_dir, entries)  — 批次入库即验（store.py.record_sources）
-record_search(run_dir, entries)   — 搜索日志批量追加（store.py.record_search）
-coverage(run_dir)                 — 每节点"已收 vs 提取"只读计数（只测缺失）
-finalize(run_dir)                 — 收尾折叠（postprocess.fold），返回汇总文本
+record_sources(run_dir, entries)   — 批次入库即验（store.py.record_sources）
+record_search(run_dir, entries)    — 搜索日志批量追加（store.py.record_search）
+record_knowledge(run_dir, entries) — 清单核对结果批量入库（store.py.record_knowledge）
+coverage(run_dir)                  — 每节点"已收 vs 提取"只读计数（只测缺失）
+finalize(run_dir)                  — 收尾折叠（postprocess.fold），返回汇总文本
 
 run_dir 为初始化 --prepare 打印的运行目录（outputs/run_{时间戳}/）；
 manifest.json（阶段 0-1 由模型 Write）与 store.jsonl（本服务持有、模型不可见）
@@ -112,7 +113,7 @@ def record_sources(run_dir: str, entries: list) -> str:
 
     何时调用：每完成一批搜索并提取新条目后调用一次——阶段 3 每节点基底 16 次
     搜索完成后一批、扩充每批 4 次再落一次；阶段 4 每节点收敛后一批；阶段 2 不需要
-    （清单核对结果走 manifest，见 SKILL 阶段 5）。条目字段：name/category_path/source_type/
+    （清单核对结果走 record_knowledge，见 SKILL 阶段 2/4）。条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
 
@@ -145,6 +146,29 @@ def record_search(run_dir: str, entries: list) -> str:
 
 
 @mcp.tool()
+def record_knowledge(run_dir: str, entries: list) -> str:
+    """把一批知识清单核对结果落库（2026-09-08 架构修订：核对结果随验证过程落库，
+    废除"会话暂存 + 阶段 5 一次性转写 manifest"——手工转写 65 条 JSON 曾漏写 60
+    个 verified 字段）。
+
+    何时调用：阶段 2 每验证 ~10-15 项后一批（与 record_search 同节奏）；阶段 4
+    扩量轮定案项一批。每项 {name, node, verified, ...}：
+    - verified=true：带 category_path/source_type/granularity/url/description/
+      reason，URL 逐字照抄搜索结果（入库即验证据链，不在则当场拒绝）
+    - verified=false：带 note（"疑似无效机构"/"未找到官方入口"），不带 URL
+    同名重录 = 状态更新（收尾折叠取末次）。清单项全部了结是阶段 4 的终止条件——
+    收尾时声明清单中无核对记录的项会拒绝折叠并点名。
+
+    返回 JSON：{"accepted": 入库数, "rejected": [{index, name, reason}],
+    "unmapped": [表外原始体裁词]}。
+    """
+    _ensure_healthy(run_dir)
+    d = _resolve(run_dir)
+    result = store.record_knowledge(d / "store.jsonl", entries, _evidence_path(d))
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
 def coverage(run_dir: str) -> str:
     """查每节点"已收 vs 提取"的缺口（只读，不改数据）。
 
@@ -170,8 +194,9 @@ def finalize(run_dir: str) -> str:
     运行 --rename-report（报告流程不变）。
 
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 时拒绝折叠并报错（模型漏调
-    record_sources 时失败响亮，不会静默产出空清单）；失败发生在目录重命名前，
-    修正后可安全重跑。成功时 store/manifest 归档进 intermediate/。
+    record_sources 时失败响亮，不会静默产出空清单）；清单了结哨兵：声明清单中
+    无核对记录的项拒绝折叠并点名（漏调 record_knowledge 时同样响亮）。
+    失败发生在目录重命名前，修正后可安全重跑。成功时 store/manifest 归档进 intermediate/。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)

@@ -1,7 +1,7 @@
 ---
 name: autosource
 description: 系统性发现技术、行业或研究领域的多个公开数据源并导出结构化清单。仅在用户需要多来源收集、分类整理或 CSV 输出时使用，不适用于单个网页、文档或数据集查询。
-allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sources, mcp__autosource-store__record_search, mcp__autosource-store__coverage, mcp__autosource-store__finalize
+allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sources, mcp__autosource-store__record_search, mcp__autosource-store__record_knowledge, mcp__autosource-store__coverage, mcp__autosource-store__finalize
 ---
 
 # AutoSource — 数据源自动发现
@@ -18,11 +18,11 @@ allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sourc
 
 ## 分工与边界
 
-**分工原则**：LLM 只负责语义环节（领域拆解、知识清单、搜索、验证与提取判断），一切确定性环节（时间戳、目录命名、入库校验、证据链、对账、去重、CSV 编码、stats 统计、搜索日志、折叠收尾、文件清理）由脚本保证。**数据落盘不靠写大文件**：新增条目与搜索日志通过 record_sources / record_search 工具入库（store.jsonl 由脚本持有、模型不可见），收尾由 finalize 工具一次性折叠；元数据（领域/节点/模型/知识清单）在 manifest.json，由模型 Write 两次（阶段 0-1 声明版、阶段 5 最终核对态）。
+**分工原则**：LLM 只负责语义环节（领域拆解、知识清单、搜索、验证与提取判断），一切确定性环节（时间戳、目录命名、入库校验、证据链、对账、去重、CSV 编码、stats 统计、搜索日志、折叠收尾、文件清理）由脚本保证。**数据落盘不靠写大文件**：新增条目、搜索日志与清单核对结果通过 record_sources / record_search / record_knowledge 工具入库（store.jsonl 由脚本持有、模型不可见），收尾由 finalize 工具一次性折叠；元数据（领域/节点/模型/知识清单声明）在 manifest.json，由模型 Write 一次（阶段 0-1）——清单核对结果**不进 manifest 转写**，随验证过程分批落库。
 
-**运行期边界**：本流程不写代码、不跑测试——运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令（初始化 `--prepare` 与阶段 6 报告命名 `--rename-report`）；数据写入只走四个 MCP 工具（record_sources / record_search / coverage / finalize），禁止自创脚本或 Write 数据文件组装。
+**运行期边界**：本流程不写代码、不跑测试——运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令（初始化 `--prepare` 与阶段 6 报告命名 `--rename-report`）；数据写入只走五个 MCP 工具（record_sources / record_search / record_knowledge / coverage / finalize），禁止自创脚本或 Write 数据文件组装。
 
-**存储机制自检**：四个 MCP 工具每次调用前由服务自检装配层（项目根锚定、hook 依赖的会话 ID 环境变量、运行目录证据文件）——装配层故障时工具报「存储机制自检失败」并按失败路径中止，按报错修装配层后重跑即可。
+**存储机制自检**：五个 MCP 工具每次调用前由服务自检装配层（项目根锚定、hook 依赖的会话 ID 环境变量、运行目录证据文件）——装配层故障时工具报「存储机制自检失败」并按失败路径中止，按报错修装配层后重跑即可。
 
 ## 参数与运行约定
 
@@ -54,7 +54,7 @@ allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sourc
 - 禁止截短 URL（取父路径/裸域名）——校验为边界匹配，截短不放行
 - URL 尾部的 `#…` 片段（数字引用锚点或文字锚点）不改变资源主体，**照抄即可**——脚本在输出 CSV 前确定性剥离纯数字引用锚点；漏抄片段不再被证据校验拒绝，但截短路径主体（父路径/裸域名）或去掉 query 参数（`?…`）仍会被拒绝
 - record_search 的 query 照抄**实际发出的**查询词（脚本逐字比对留痕，不一致会被标注"证据缺失"）
-- **数据落盘只走 MCP 工具**：record_sources（新增条目批次）、record_search（搜索日志批次）、finalize（收尾折叠）——禁止自创脚本 / Write 数据文件组装（执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗）
+- **数据落盘只走 MCP 工具**：record_sources（新增条目批次）、record_search（搜索日志批次）、record_knowledge（清单核对批次）、finalize（收尾折叠）——禁止自创脚本 / Write 数据文件组装（执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗）
 - 只传契约字段，内部字段（如 `expected_type`）不写入
 - **禁止手工核对证据**——不得用 grep/shell 循环/自创脚本等复合命令核对或重建（这是脚本的职责）；调查/排查用 Read 工具
 - 被拒条目不进清单——入库校验由脚本执行，被拒明细在 record_sources 的返回里当场可见，修正后重传该条即可
@@ -152,7 +152,21 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 **预期体裁**：仅用于构造验证搜索词；最终 `source_type` 以验证时的实际形态为准，允许修正
 
-**输出**：将清单展示给用户（无需等待用户确认）。随后立即 Write **manifest.json**（阶段 0-1 声明版）到初始化 `--prepare` 打印的运行目录——`{domain, nodes, model, knowledge}`，knowledge 各项只含 name/node/预期体裁（URL 留空待验证）。这是唯一由模型直接 Write 的元数据文件，阶段 5 会整体重写为最终核对态。
+**输出**：将清单展示给用户（无需等待用户确认）。随后立即 Write **manifest.json**（阶段 0-1 声明版）到初始化 `--prepare` 打印的运行目录——`{domain, nodes, model, knowledge}`，knowledge 各项只含 name/node/预期体裁（URL 留空待验证）；**必须整体 Write，禁止 Edit**（outputs 目录权限只放行 Write）。这是唯一由模型直接 Write 的元数据文件，**整轮只写这一次**——清单核对结果不进 manifest，随验证过程用 record_knowledge 落库（见阶段 2/4）。
+
+```json
+{
+  "domain": "交换机",
+  "nodes": ["数据中心交换机", "以太网标准(IEEE 802.3)", "..."],
+  "model": "会话提供的模型名（未提供时留空）",
+  "knowledge": [
+    {"name": "IEEE 802.3 以太网工作组", "node": "以太网标准(IEEE 802.3)", "预期体裁": "行业标准"},
+    {"name": "Cisco Nexus 文档体系", "node": "数据中心交换机", "预期体裁": "官方文档"}
+  ]
+}
+```
+
+字段约束：`domain / nodes` 全轮不变；`model` 可选（会话未明确提供可靠模型名时留空，不编造）；knowledge 项只含 name/node/预期体裁（name 不可为空，URL 留空待验证）。通用约束：仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；通用平台规则见通用纪律"平台准入判据"。
 
 ## 阶段 2 · 验证搜索
 
@@ -179,8 +193,8 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
   - 合集级清单项只搜到合集内**单篇载体**（PDF、单条 KB 等）：扩量轮换角度专找入口（如 `{机构名} documentation`）；仍找不到入口 → **以该单篇验证通过**，granularity 修正为"单篇级"，reason 注明"仅找到单篇载体，未找到合集入口"
   - 单篇级清单项：搜索结果中出现**该载体本身**即通过
   - 连单篇载体都没有 → 标记未验证，留待扩量轮换角度重试后按阶段 4 定案
-- **通过后**：在**清单项内**填上 `category_path（完整路径）/ source_type / granularity / url / description / reason`（URL 照抄），预期体裁允许按实际形态修正——核对结果**暂存会话**，阶段 5 随 manifest 重写落盘（清单核对结果不进 store）
-- **未通过**：先标记 verified=false，不急于分类——扩量轮换角度重试后按阶段 4 定案（同样暂存会话）
+- **通过后**：在**清单项内**填上 `category_path（完整路径）/ source_type / granularity / url / description / reason`（URL 照抄），预期体裁允许按实际形态修正——核对结果用 **record_knowledge 分批落库**（每 ~10-15 项一批，与 record_search 同节奏；verified=true 项 URL 入库即验证据链，被拒当场修正重传）
+- **未通过**：先标记 verified=false，不急于分类——扩量轮换角度重试后按阶段 4 定案（定案结果同样走 record_knowledge）
 - 验证搜索时顺路发现的新源 → 全量提取（同样遵守粒度规则、平台准入判据与证据链约束）
 - **搜索日志记录**：每 ~10-15 次验证搜索调用一次 record_search 批量入库——验证搜索项 `phase/node/query/results/extracted/verified`（**phase 只允许三个取值：验证搜索 / 增量发现 / 扩量轮**；**verified=该次验证是否通过**：搜到该机构入口填 true、未通过填 false；**extracted 只记顺路新源数，验证通过本身不计入**——两个字段各装一个事实；一次搜索验证了同机构多个入口时，verified=true 只记一次即可）；增量发现项的 verified 留空即可（脚本按 phase 过滤，填了也不计入验证账）。query 照抄实际发出的查询词——逐条记、批量入，不要每次搜索单独调用
 
@@ -228,6 +242,7 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 - 换角度重试后仍搜不到该机构存在的**任何证据** → 疑似幻觉/过时 → **从有效来源中剔除**，note="疑似无效机构"
 - 能搜到该机构存在、但始终找不到官方入口 → 换角度重试 ≤2 次仍失败 → **留在未验证清单**，note="未找到官方入口"
+- 定案结果（剔除/留未验证/换角度后转验证通过）用 **record_knowledge 落库**（verified=false 项带 note；换角度后验证通过的项按阶段 2 字段齐套重录——同名重录即状态更新）
 
 **终止条件**：所有节点**非薄弱或已收敛** **且** 清单项全部了结（验证通过或已定案）。**扩量轮按节点独立判断，不再全局共享轮数**：仍薄弱且未收敛的节点继续扩量，非薄弱节点停止；某节点在一轮扩量中无任何新增有效来源时，该节点视为收敛并停止，如实报告。
 
@@ -235,31 +250,13 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 
 **记录时机**：扩量轮每节点收敛后，把该节点补充条目与搜索记录按节点批量入库（同阶段 3 的两个批量调用）。**收尾前用 coverage() 自查**：missing 是粗略缺口信号（提取数含去重前与跨节点顺路发现、已收数是幂等去重后的入库数，两口径天然有差）——小额 missing 属正常，不触发补搜；只有当 missing 接近该节点一整批提取量时才怀疑漏调了 record_sources，补该节点。
 
-## 阶段 5 · 重写 manifest（knowledge 最终核对态）
+## 阶段 5 · 清单了结自检
 
-**把阶段 0-1 写入的 `manifest.json` 用 Write 工具整体重写一遍**（路径 = 初始化 `--prepare` 打印的运行目录 + `/manifest.json`；**必须整体 Write，禁止 Edit**——outputs 目录权限只放行 Write）。重写后文件 ≤15KB，远离截断边界。写完文件后**不要结束回合**——立即执行阶段 6 收尾。
+**manifest 无需重写**——阶段 0-1 写入的声明版即终版；清单核对结果已随阶段 2/4 用 record_knowledge 分批落库。本阶段只做了结对账：
 
-```json
-{
-  "domain": "交换机",
-  "nodes": ["数据中心交换机", "以太网标准(IEEE 802.3)", "..."],
-  "model": "会话提供的模型名（未提供时留空）",
-  "knowledge": [
-    {"name": "IEEE 802.3 以太网工作组", "node": "以太网标准(IEEE 802.3)", "verified": true,
-     "category_path": "交换机-核心技术-以太网标准(IEEE 802.3)",
-     "source_type": "行业标准", "granularity": "合集级", "url": "https://www.ieee802.org/3/",
-     "description": "IEEE 以太网标准工作组官网", "reason": "清单验证通过，官方入口"},
-    {"name": "某某机构", "node": "某节点", "verified": false, "note": "疑似无效机构"}
-  ]
-}
-```
-
-字段约束：
-
-- `knowledge` 是**最终核对态**——阶段 2/3/4 暂存在会话里的全部核对结果在此落盘：node 必须在 nodes 中；verified=true 的项带齐 `category_path/source_type/url/description/reason`（category_path 用 `-` 连接完整层级路径，末段与 node 一致），`granularity` 可带（默认合集级）；verified=false 的项带 `note`（"疑似无效机构"或"未找到官方入口"）；被剔除的疑似无效机构也留在清单里（note 标注），供报告展示
-- `domain / nodes` 与阶段 0-1 声明版一致；`model` 可选（脚本按归档留存处理——会话未明确提供可靠模型名时留空，不编造）
-- 清单核对结果**不进 store**——store 只承载增量条目与搜索日志；verified=true 的清单项由脚本在收尾时并入
-- 通用约束：name 和 url 不可为空；仅收录公开可访问的数据源；同一数据源只出现在一条分类路径下；分类路径术语统一；确保体裁多样性；通用平台规则见通用纪律"平台准入判据"
+- **应录 vs 已录**：清单共 N 项，各批 record_knowledge 返回的 accepted 数累计应等于 N。少于 N → 逐项排查漏录项并补录（verified=true 项齐套 `category_path/source_type/url/description/reason`；未验证项带 note）
+- 被剔除的疑似无效机构**同样要录**（verified=false + note="疑似无效机构"），供报告展示
+- 对账完成后**不要结束回合**——立即执行阶段 6 收尾。finalize 会独立复核：声明清单中无核对记录的项**拒绝收尾并点名**（漏录在此响亮失败，补录后重跑即可，运行目录不会被重命名）
 
 ## 阶段 6 · 收尾
 
@@ -269,7 +266,7 @@ python .claude/skills/autosource/scripts/postprocess.py --prepare
 finalize(run_dir=<运行目录>)
 ```
 
-折叠一次性完成 证据终检 / 清单并入 / 去重 / CSV / stats / 溯源 / 搜索日志 / 清理——运行目录重命名为 `outputs/{领域词}_{时间戳}/`，store 与 manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）——把 finalize 的返回文本**原样展示给用户作为最终汇总**（含清单核对、未验证清单、输出目录）。**防截断哨兵**：若增量/扩量搜索有提取、但来源 0 入库且清单无验证通过项，finalize 会拒绝并报错——说明漏调了 record_sources，补录后重跑即可（纯清单验证的运行不受影响；失败时运行目录不会被重命名）。
+折叠一次性完成 证据终检 / 清单并入 / 去重 / CSV / stats / 溯源 / 搜索日志 / 清理——运行目录重命名为 `outputs/{领域词}_{时间戳}/`，store 与 manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）——把 finalize 的返回文本**原样展示给用户作为最终汇总**（含清单核对、未验证清单、输出目录）。**防截断哨兵**：若增量/扩量搜索有提取、但来源 0 入库且清单无验证通过项，finalize 会拒绝并报错——说明漏调了 record_sources，补录后重跑即可（纯清单验证的运行不受影响；失败时运行目录不会被重命名）。**清单了结哨兵**：声明清单中无核对记录的项会拒绝收尾并点名——漏调 record_knowledge 同样响亮失败，补录后重跑即可。
 
 **收尾的最后一步：写领域分析报告。** 先 Read `.claude/skills/autosource/references/分析报告模板.md`，按其模板把报告 Write 到 finalize 返回的"输出目录"里的 `分析报告.md`（**内容由模型写、文件名由脚本命名，不要自行命名**；**统计数字一律不写**——"数据总览"段由脚本在下一步自动生成）。写完报告，立即执行（该 Bash 命令在权限白名单内，直接运行；`<输出目录>` 照抄 finalize 返回的"输出目录"）：
 

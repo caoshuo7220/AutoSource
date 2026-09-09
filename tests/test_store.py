@@ -8,7 +8,7 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from store import (SOURCE_TYPES, SOURCE_TYPE_ALIASES, append_records,
                    canonicalize_source_type, coverage, load_store, record_search,
-                   record_sources)
+                   record_sources, record_knowledge)
 
 NODES = ["AI训练GPU", "图形渲染GPU", "无线网-Wi-Fi"]
 
@@ -122,6 +122,83 @@ class TestAppendLoad:
         store = tmp_path / "store.jsonl"
         assert append_records(store, []) == 0
         assert not store.exists()
+
+
+class TestRecordKnowledge:
+    """清单核对结果入库（2026-09-08 架构修订：验证结果随验证过程落库，废除
+    "会话暂存 + 阶段 5 一次性转写 manifest"——214051 实证漏写 60 个 verified
+    字段，手工转写 65 条 JSON 是必然出错的事故类型，且与压缩丢失风险同源）。"""
+
+    def _entry(self, **kw) -> dict:
+        e = {"name": "K1", "node": "AI训练GPU", "verified": True,
+             "category_path": "算力服务器-GPU服务器-AI训练GPU",
+             "source_type": "官方文档", "granularity": "合集级",
+             "url": "https://k.com/doc", "description": "kd", "reason": "kr"}
+        e.update(kw)
+        return e
+
+    def test_verified_entry_accepted_and_normalized(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [self._entry()], evidence)
+        assert result["accepted"] == 1
+        assert result["rejected"] == []
+        assert result["unmapped"] == []
+        records, _ = load_store(store)
+        r = records[0]
+        assert r["type"] == "knowledge"
+        assert r["name"] == "K1"
+        assert r["verified"] is True
+        assert r["source_type"] == "文档"          # 入库即归一
+        assert r["source_type_raw"] == "官方文档"   # 原始词留痕
+        assert r["ts"]
+
+    def test_unverified_entry_accepted_without_url_or_evidence(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = tmp_path / "absent.jsonl"       # 未验证项不带 URL，不查证据
+        result = record_knowledge(store, [self._entry(
+            verified=False, url="", note="未找到官方入口",
+            category_path="", source_type="", description="", reason="")],
+            evidence)
+        assert result["accepted"] == 1
+        records, _ = load_store(store)
+        assert records[0]["verified"] is False
+        assert records[0]["note"] == "未找到官方入口"
+
+    def test_verified_without_url_rejected(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [self._entry(url="")], evidence)
+        assert result["accepted"] == 0
+        assert result["rejected"][0]["reason"] == "verified=true 缺 url"
+
+    def test_verified_url_not_in_evidence_rejected(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://other.com/x"])
+        result = record_knowledge(store, [self._entry()], evidence)
+        assert result["accepted"] == 0
+        assert "证据" in result["rejected"][0]["reason"]
+        assert not store.exists()
+
+    def test_missing_name_or_node_rejected(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [self._entry(name="")], evidence)
+        assert result["accepted"] == 0
+        assert result["rejected"][0]["reason"] == "缺 name/node"
+        result = record_knowledge(store, [self._entry(node="")], evidence)
+        assert result["accepted"] == 0
+        assert result["rejected"][0]["reason"] == "缺 name/node"
+
+    def test_unmapped_type_reported(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [self._entry(source_type="某新词")], evidence)
+        assert result["accepted"] == 1
+        assert result["unmapped"] == ["某新词"]
+        records, _ = load_store(store)
+        assert records[0]["source_type"] == "其他"
+        assert records[0]["source_type_raw"] == "某新词"
 
 
 class TestRecordSources:

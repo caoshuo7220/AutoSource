@@ -134,7 +134,8 @@ class TestMcpProtocol:
         try:
             _init(proc)
             tools = {t["name"] for t in _rpc(proc, "tools/list", req_id=2)["result"]["tools"]}
-            assert tools == {"record_sources", "record_search", "coverage", "finalize"}
+            assert tools == {"record_sources", "record_search", "record_knowledge",
+                             "coverage", "finalize"}
 
             r = _rpc(proc, "tools/call", {"name": "record_sources", "arguments": {
                 "run_dir": str(run_dir), "entries": [
@@ -149,8 +150,17 @@ class TestMcpProtocol:
                     {"phase": "增量发现", "node": "数据中心交换机", "query": "q1",
                      "results": 10, "extracted": 5}]}}, req_id=4)
 
+            # 清单核对结果入库（2026-09-08 架构修订：验证结果随验证过程落库）
+            r = _rpc(proc, "tools/call", {"name": "record_knowledge", "arguments": {
+                "run_dir": str(run_dir), "entries": [
+                    {"name": "K", "node": "数据中心交换机", "verified": True,
+                     "category_path": "交换机-数据中心交换机", "source_type": "文档",
+                     "granularity": "合集级", "url": "https://a.com/doc",
+                     "description": "d", "reason": "r"}]}}, req_id=5)
+            assert '"accepted": 1' in _tool_text(r)
+
             r = _rpc(proc, "tools/call", {"name": "coverage", "arguments": {
-                "run_dir": str(run_dir)}}, req_id=5)
+                "run_dir": str(run_dir)}}, req_id=6)
             cov = json.loads(_tool_text(r))
             assert cov[0] == {"node": "数据中心交换机", "recorded": 1,
                               "extracted": 5, "missing": 4}
@@ -159,9 +169,9 @@ class TestMcpProtocol:
             _rpc(proc, "tools/call", {"name": "record_search", "arguments": {
                 "run_dir": str(run_dir2), "entries": [
                     {"phase": "增量发现", "node": "数据中心交换机", "query": "q1",
-                     "results": 10, "extracted": 5}]}}, req_id=6)
+                     "results": 10, "extracted": 5}]}}, req_id=7)
             r = _rpc(proc, "tools/call", {"name": "finalize", "arguments": {
-                "run_dir": str(run_dir2)}}, req_id=7)
+                "run_dir": str(run_dir2)}}, req_id=8)
             assert r["result"].get("isError") is True
             assert "来源未入库" in _tool_text(r)
         finally:

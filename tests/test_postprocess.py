@@ -1779,6 +1779,65 @@ class TestFinalizeFold:
             assert fold_file.read_text(encoding="utf-8-sig" if name.endswith(".csv") else "utf-8") \
                 == run_file.read_text(encoding="utf-8-sig" if name.endswith(".csv") else "utf-8"), name
 
+    def test_fold_merges_verified_knowledge_records_from_store(self, tmp_path):
+        """2026-09-08 架构修订：清单核对结果存 store（type=knowledge），fold 从
+        store 并入 verified 项——废除阶段 5 一次性转写 manifest（214051 实证漏写
+        60 个 verified 字段的事故类别）。manifest 只承载阶段 0-1 声明态清单
+        （name/node/预期体裁，无 verified 字段）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir, knowledge=[
+            {"name": "K1", "node": "AI训练GPU", "预期体裁": "官方文档"}])
+        self._write_store(run_dir, [
+            {"type": "knowledge", "ts": "2026-09-08 21:30:00", "node": "AI训练GPU",
+             "name": "K1", "verified": True,
+             "category_path": "算力服务器-GPU服务器-AI训练GPU",
+             "source_type": "文档", "source_type_raw": "官方文档",
+             "granularity": "合集级", "url": "https://k.com/doc",
+             "description": "kd", "reason": "kr"},
+            self._search_row(phase="验证搜索", query="K1 官网")])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["kept"] == 1
+        assert summary["list_verified"] == "1/1"
+        assert not run_dir.exists()  # 正常重命名收尾
+
+    def test_fold_unrecorded_declared_items_raise_with_names(self, tmp_path):
+        """清单了结哨兵（2026-09-08 架构修订配套）：声明清单项在 store 中无核对
+        记录 → 拒绝收尾并点名（防漏调 record_knowledge）。失败发生在重命名前，
+        补录后可安全重跑——与防截断哨兵同构。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir, knowledge=[
+            {"name": "K1", "node": "AI训练GPU", "预期体裁": "官方文档"},
+            {"name": "K2", "node": "服务器CPU", "预期体裁": "行业标准"}])
+        self._write_store(run_dir, [
+            {"type": "knowledge", "ts": "t", "node": "AI训练GPU", "name": "K1",
+             "verified": True,
+             "category_path": "算力服务器-GPU服务器-AI训练GPU",
+             "source_type": "文档", "source_type_raw": "官方文档",
+             "granularity": "合集级", "url": "https://k.com/doc",
+             "description": "kd", "reason": "kr"}])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        with pytest.raises(ValueError, match="清单项未了结"):
+            fold(str(run_dir), evidence_log=str(evidence),
+                 out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert run_dir.exists()
+        assert run_dir.name.startswith("run_")
+        assert not (run_dir / "raw.json").exists()
+
+    def test_fold_manifest_carried_knowledge_still_works(self, tmp_path):
+        """旧路径兜底：store 无 knowledge 记录、manifest 清单带核对字段
+        （verified/url——2026-09-08 前的运行归档）→ 照旧按最终核对态并入，
+        历史归档可复盘、迁移期新旧流程并存。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)  # 默认清单：verified=true 带 url（最终核对态）
+        self._write_store(run_dir, [self._search_row(phase="验证搜索", query="K1 官网")])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["kept"] == 1
+        assert summary["list_verified"] == "1/1"
+
     def test_fold_archives_store_manifest_and_cleans_root(self, tmp_path):
         """2026-09-01 实测 bug 钉进测试：fold 只归档并删除了 manifest，store.jsonl
         既未归档也未删除——交付目录根残留 store.jsonl（用户实测发现）。

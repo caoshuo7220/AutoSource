@@ -1,7 +1,10 @@
 """AutoSource 存储层：store.jsonl 追加日志 + 入库即验 + coverage 对账（docs/04）。
 
-store 只承载两类记录：增量发现条目（type=source）与搜索日志（type=search）；
-知识清单不进 store（在 manifest.json，收尾折叠时由 postprocess.fold 组装）。
+store 承载三类记录：增量发现条目（type=source）、搜索日志（type=search）、
+清单核对结果（type=knowledge，2026-09-08 架构修订：验证结果随验证过程落库，
+废除"会话暂存 + 阶段 5 一次性转写 manifest"——214051 实证漏写 60 个 verified
+字段的事故类别；manifest 只承载阶段 0-1 声明态清单，收尾折叠时由 postprocess.fold
+把 store 核对记录与声明对账并入）。
 分工原则：LLM 只做语义判断，持久化与校验全部由本模块（脚本）保证。
 
 - record_sources：批次入库即验——name/url 非空、granularity 枚举（缺省/非法
@@ -9,6 +12,8 @@ store 只承载两类记录：增量发现条目（type=source）与搜索日志
   含 # 豁免与 ? 严格）；裸 URL 精确相等才幂等跳过并计数（不归一化——见
   docs/04 裁决 8.1）；单条被拒不阻断批次，其余照常入库
 - record_search：搜索日志批量追加（查询词的证据比对在收尾折叠时做，现状机制）
+- record_knowledge：清单核对结果批量入库（verified=true 必带 url 且过证据链；
+  verified=false 带 note 不查证据；同名重录 = 状态更新，折叠取末次）
 - coverage：每节点"已收 vs 提取"的只读计数（只测缺失，不测薄弱）
 
 条目粒度契约（GRANULARITY_LEVELS）与节点推导（leaf_node）是存储层的契约工具——
@@ -330,6 +335,78 @@ def record_search(store_path: Path, entries: list) -> int:
             "ts": ts,
         })
     return append_records(store_path, rows)
+
+
+def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> dict:
+    """清单核对结果批量入库（2026-09-08 架构修订：清单核对结果不再"会话暂存 +
+    阶段 5 一次性转写 manifest"——214051 实证漏写 60 个 verified 字段，65 条
+    JSON 手工转写是必然出错的事故类型，且与压缩丢失风险同源；改为随验证过程
+    分批落库，与增量条目/搜索日志同一机制）。
+
+    每项 {name, node, verified, category_path?, source_type?, granularity?,
+    url?, description?, reason?, note?}：
+    - name/node 必填；verified=true 必带 url 且过证据链校验（当场拒绝+原因，
+      可修正重传）；verified=false 带 note（"疑似无效机构"/"未找到官方入口"），
+      不带 URL、不查证据
+    - 同名重录 = 状态更新（append-only，收尾折叠按 name 取末次记录）
+    - source_type 入库即归一（标准词 + raw 留痕），表外词进 unmapped
+    返回 {accepted, rejected, unmapped}。
+    """
+    accepted: list[dict] = []
+    rejected: list[dict] = []
+    unmapped: set[str] = set()
+    evidence_ok = evidence_path.exists()
+    evidence = evidence_path.read_text(encoding="utf-8", errors="replace") if evidence_ok else ""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            rejected.append({"index": i, "name": "", "reason": "缺 name/node"})
+            continue
+        name = str(e.get("name") or "")
+        node = str(e.get("node") or "")
+        if not name or not node:
+            rejected.append({"index": i, "name": name, "reason": "缺 name/node"})
+            continue
+        verified = bool(e.get("verified"))
+        url = str(e.get("url") or "") if verified else ""
+        if verified and not url:
+            rejected.append({"index": i, "name": name, "reason": "verified=true 缺 url"})
+            continue
+        if verified and not evidence_ok:
+            rejected.append({"index": i, "name": name,
+                             "reason": f"证据留痕不存在: {evidence_path}"
+                                       "（PostToolUse hook 未生效？）"})
+            continue
+        if verified:
+            kept, rej = check_grounded([e], evidence)
+            if rej:
+                rejected.append({"index": i, "name": name,
+                                 "reason": "URL 不在证据留痕中"})
+                continue
+        raw_type = str(e.get("source_type") or "").strip()
+        source_type = canonicalize_source_type(raw_type)
+        if source_type == "其他" and raw_type != "其他":
+            unmapped.add(raw_type)
+        granularity = e.get("granularity")
+        accepted.append({
+            "type": "knowledge",
+            "node": node,
+            "name": name,
+            "verified": verified,
+            "category_path": e.get("category_path", ""),
+            "source_type": source_type,
+            "source_type_raw": raw_type,
+            "granularity": granularity if granularity in GRANULARITY_LEVELS else "合集级",
+            "url": url,
+            "description": e.get("description", ""),
+            "reason": e.get("reason", ""),
+            "note": e.get("note", ""),
+            "ts": ts,
+        })
+    append_records(store_path, accepted)
+    return {"accepted": len(accepted), "rejected": rejected,
+            "unmapped": sorted(unmapped)}
 
 
 def coverage(store_path: Path, nodes: list[str]) -> list[dict]:

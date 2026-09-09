@@ -531,12 +531,15 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
          now: Optional[datetime] = None) -> dict:
     """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/04）。
 
-    store.jsonl 只承载增量条目与搜索日志；manifest.json 承载 domain/nodes/model/
-    knowledge（清单声明与最终核对态）。组装是确定性环节，由脚本完成——复用
-    run_pipeline() 全链路，逻辑一行不改，只换入口。
+    store.jsonl 承载增量条目、搜索日志与清单核对结果（type=knowledge，2026-09-08
+    架构修订：核对结果随验证过程落库，废除阶段 5 一次性转写 manifest）；manifest.json
+    承载 domain/nodes/model/知识清单声明态（阶段 0-1）。组装是确定性环节，由脚本
+    完成——复用 run_pipeline() 全链路，逻辑一行不改，只换入口。
 
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
     违约未调用 record_sources 时失败响亮，不再静默丢数据）。
+    清单了结哨兵：声明清单项在 store 中无核对记录 → 拒绝折叠并点名（漏调
+    record_knowledge 同样响亮；2026-09-08 前归档的 manifest 最终核对态走旧路径兜底）。
     失败发生在目录重命名之前——运行目录保持 run_ 原名，修正后可安全重跑（幂等）。
     成功后 store/manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）。
     """
@@ -575,6 +578,43 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
         except (TypeError, ValueError):
             pass
     knowledge_list = manifest.get("knowledge") if isinstance(manifest.get("knowledge"), list) else []
+    # 清单核对结果（2026-09-08 架构修订）：核对结果随验证过程经 record_knowledge
+    # 落库，fold 从 store 取末次记录与声明清单对账——废除"会话暂存 + 阶段 5
+    # 一次性转写 manifest"（214051 实证漏写 60 个 verified 字段的事故类别）。
+    declared = knowledge_list
+    declared_names = {str(k.get("name")) for k in declared
+                      if isinstance(k, dict) and k.get("name")}
+    knowledge_records = [r for r in records if r.get("type") == "knowledge"]
+    latest: dict[str, dict] = {}
+    for r in knowledge_records:
+        name = str(r.get("name") or "")
+        if name:
+            latest[name] = r  # 同名重录 = 状态更新（append-only，末次胜出）
+    unrecorded = sorted(declared_names - set(latest))
+    # 旧路径兜底：manifest 清单带核对字段（verified/url——2026-09-08 前归档的
+    # 最终核对态）且 store 无核对记录 → 照旧并入（历史归档可复盘，新旧流程并存）
+    manifest_carries_state = any(
+        isinstance(k, dict) and ("verified" in k or k.get("url")) for k in declared)
+    if knowledge_records:
+        if unrecorded:
+            raise AutoSourceError(
+                f"清单项未了结：{len(unrecorded)} 项在 store 中无核对记录"
+                f"（漏调 record_knowledge）——补录后重跑 finalize："
+                + "、".join(unrecorded))
+        # source_type 回填原始词（入库时已归一）——收尾统一归一处在 run_pipeline，
+        # 表外词审计按原始词计数（与 record_sources 的入库反馈口径互补）
+        knowledge_list = [
+            {k: v for k, v in r.items() if k not in ("type", "ts")}
+            | {"source_type": r.get("source_type_raw") or r.get("source_type", "")}
+            for r in latest.values()
+        ]
+    elif manifest_carries_state:
+        knowledge_list = declared
+    elif declared_names:
+        raise AutoSourceError(
+            f"清单项未了结：清单 {len(declared_names)} 项均无核对记录"
+            f"（漏调 record_knowledge）——补录后重跑 finalize："
+            + "、".join(sorted(declared_names)))
     knowledge_any_verified = any(
         isinstance(k, dict) and k.get("verified") and k.get("name") and k.get("url")
         for k in knowledge_list)
@@ -587,7 +627,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
         "domain": manifest.get("domain", ""),
         "nodes": [str(n) for n in manifest["nodes"]],
         "model": manifest.get("model", ""),
-        "knowledge": manifest.get("knowledge") if isinstance(manifest.get("knowledge"), list) else [],
+        "knowledge": knowledge_list,
         "journal": journal,
         "sources": sources,
     }

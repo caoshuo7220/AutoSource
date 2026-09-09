@@ -62,12 +62,14 @@ def test_skill_has_no_phantom_c_parameter():
 
 def test_skill_frontmatter_tools_no_agent():
     """frontmatter allowed-tools 为运行所需最小集，不含未被流程使用的 Agent。
-    四个 MCP 工具（.mcp.json 注册的 autosource-store）与正文强依赖对齐，一并声明。"""
+    五个 MCP 工具（.mcp.json 注册的 autosource-store）与正文强依赖对齐，一并声明
+    （2026-09-08 架构修订起为五工具：record_knowledge 清单核对批次）。"""
     frontmatter = SKILL_MD.split("---")[1]
     assert "allowed-tools" in frontmatter
     assert "Agent" not in frontmatter
     for tool in ["mcp__autosource-store__record_sources",
                  "mcp__autosource-store__record_search",
+                 "mcp__autosource-store__record_knowledge",
                  "mcp__autosource-store__coverage",
                  "mcp__autosource-store__finalize"]:
         assert tool in frontmatter
@@ -111,11 +113,14 @@ def test_incremental_search_count_per_node():
 
 
 def test_prepare_run_dir_contract():
-    """运行目录契约：--prepare 预留唯一目录，阶段 1/5 写其中 manifest.json，阶段 6 同一路径收尾。
+    """运行目录契约：--prepare 预留唯一目录，阶段 1 写其中 manifest.json，阶段 6 同一路径收尾。
     预留步骤命名"初始化"（2026-08-25 起）——旧名"阶段 0 前"易误读为阶段序列的一部分。
-    raw.json 契约已取消（docs/04 存储改造：sources/journal 走 store，元数据走 manifest）。"""
+    raw.json 契约已取消（docs/04 存储改造：sources/journal 走 store，元数据走 manifest）。
+    2026-09-08 架构修订：manifest 只写一次（阶段 0-1 声明版），阶段 5 不再重写——
+    清单核对结果随验证过程走 record_knowledge（钉桩断言语义同步，防阶段 5 重写回潮）。"""
     assert "postprocess.py --prepare" in SKILL_MD
-    assert "运行目录 + `/manifest.json`" in SKILL_MD
+    assert "Write **manifest.json**（阶段 0-1 声明版）到初始化" in SKILL_MD
+    assert "整轮只写这一次" in SKILL_MD
     assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
     assert "raw.json" not in SKILL_MD  # raw.json 契约整体取消（docs/04）
     assert "## 初始化 · 预留运行目录" in SKILL_MD
@@ -123,16 +128,19 @@ def test_prepare_run_dir_contract():
 
 
 def test_storage_contract_mcp_tools():
-    """存储架构契约（docs/04 定案）：四工具 + manifest 两段式 Write + 禁 Edit + 记录时机 + 哨兵。
-    数据落盘只走 MCP 工具——模型不 Write 数据文件、不自创脚本组装。"""
-    for tool in ["record_sources", "record_search", "coverage", "finalize"]:
+    """存储架构契约（docs/04 定案）：五工具 + manifest 单次 Write + 禁 Edit + 记录时机 + 哨兵。
+    数据落盘只走 MCP 工具——模型不 Write 数据文件、不自创脚本组装。
+    2026-09-08 架构修订：清单核对结果走 record_knowledge 分批落库（废除阶段 5
+    一次性转写 manifest），清单了结哨兵与防截断哨兵并列。"""
+    for tool in ["record_sources", "record_search", "record_knowledge",
+                 "coverage", "finalize"]:
         assert tool in SKILL_MD
     assert "manifest.json" in SKILL_MD
     assert "**必须整体 Write，禁止 Edit**" in SKILL_MD
     assert "基底 16 次搜索完成后" in SKILL_MD
     assert "**防截断哨兵**" in SKILL_MD
     assert "数据落盘只走 MCP 工具" in SKILL_MD
-    assert "存储机制自检" in SKILL_MD  # 装配层故障时四工具硬失败的行为说明（mcp_server.self_check）
+    assert "存储机制自检" in SKILL_MD  # 装配层故障时五工具硬失败的行为说明（mcp_server.self_check）
     assert "model = " not in SKILL_MD  # 防误用：禁止模型用 Write 写数据文件组装
 
 
@@ -141,6 +149,22 @@ def test_scripts_include_store_and_mcp_server():
     assert (SCRIPTS_DIR / "store.py").is_file()
     assert (SCRIPTS_DIR / "mcp_server.py").is_file()
     assert (ROOT / ".mcp.json").is_file()
+
+
+def test_knowledge_recorded_via_record_knowledge_not_manifest():
+    """2026-09-08 架构修订钉桩（214051 事故根治）：清单核对结果随验证过程经
+    record_knowledge 分批落库，废除"会话暂存 + 阶段 5 一次性转写 manifest"——
+    手工转写 65 条 JSON 曾漏写 60 个 verified 字段（finalize 如实报 0/65 后
+    模型违规手动收尾）。断言：manifest 只写一次、阶段 5 为了结自检、
+    暂存会话表述不残留、清单了结哨兵在场（防回潮到转写方案）。"""
+    assert "## 阶段 5 · 清单了结自检" in SKILL_MD
+    assert "record_knowledge" in SKILL_MD
+    assert "清单核对结果**不进 manifest 转写**" in SKILL_MD
+    assert "整轮只写这一次" in SKILL_MD
+    assert "**清单了结哨兵**" in SKILL_MD
+    assert "暂存会话" not in SKILL_MD  # 转写方案的标志词，不得回潮
+    assert "阶段 5 随 manifest 重写落盘" not in SKILL_MD
+    assert "**阶段 5 · 重写 manifest" not in SKILL_MD
 
 
 def test_skill_genre_free_label_no_taxonomy_leak():
@@ -321,14 +345,16 @@ def test_settings_allow_entries_well_formed():
 
 
 def test_settings_allow_mcp_store_tools():
-    """MCP 四工具进 settings.json 会话级白名单：frontmatter 放行是回合级
+    """MCP 五工具进 settings.json 会话级白名单：frontmatter 放行是回合级
     （用户中途插话即失效），运行期零弹窗需会话级放行兜底。
-    服务名从 .mcp.json 读取，settings 条目与注册保持一致。"""
+    服务名从 .mcp.json 读取，settings 条目与注册保持一致
+    （2026-09-08 架构修订起含 record_knowledge）。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     mcp_config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
     (server,) = mcp_config["mcpServers"]
     allow = settings["permissions"]["allow"]
-    for tool in ["record_sources", "record_search", "coverage", "finalize"]:
+    for tool in ["record_sources", "record_search", "record_knowledge",
+                 "coverage", "finalize"]:
         assert f"mcp__{server}__{tool}" in allow
 
 
