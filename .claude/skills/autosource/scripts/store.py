@@ -11,7 +11,8 @@ store 承载三类记录：增量发现条目（type=source）、搜索日志（
   归一化为合集级）、URL 走证据链边界校验（evidence.check_grounded，
   含 # 豁免与 ? 严格）；裸 URL 精确相等才幂等跳过并计数（不归一化——见
   docs/04 裁决 8.1）；单条被拒不阻断批次，其余照常入库
-- record_search：搜索日志批量追加（查询词的证据比对在收尾折叠时做，现状机制）
+- record_search：搜索日志批量追加（查询词的证据比对在收尾折叠时做，现状机制）；
+  zero_reason 可选——增量/扩量零提取的拒收理由（收尾护栏哨兵 2/3 校验）
 - record_knowledge：清单核对结果批量入库（verified=true 必带 url 且过证据链；
   verified=false 带 note 不查证据；同名重录 = 状态更新，折叠取末次）
 - coverage：每节点"已收 vs 提取"的只读计数（只测缺失，不测薄弱）
@@ -27,8 +28,53 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from evidence import check_grounded
+
+# 垃圾域与低价值聚合平台黑名单（2026-09-10 收录政策收紧）：入库即拒 + 收尾过滤双层。
+# 只收录"平台级"域名（反复出现的大平台，子串匹配一条覆盖全部子域），长尾单站垃圾
+# 由判据①（机构发布的信息载体）覆盖，不进名单——名单收敛不膨胀；高频新平台补一行
+# （治理同 SOURCE_TYPE_ALIASES：渐进收敛）。
+GARBAGE_DOMAINS = [
+    # 电商与消费平台
+    "taobao", "tmall", "jd.com", "1688.com", "suning", "pinduoduo",
+    # 注：amazon 条目不写 "amazon.com"——子串会误伤 docs.aws.amazon.com（合法
+    # 厂商文档门户，SOM厂商轮交付物实证）；"www.amazon." 只匹配电商主站
+    "ebay.com", "www.amazon.", "amazon.cn", "alibaba.com",
+    # 内容与自媒体平台
+    "zhihu", "baike.baidu", "csdn", "cnblogs", "jianshu", "51cto",
+    "weibo", "douban", "toutiao",
+    # 新闻门户
+    "sina.com", "sohu.com", "163.com", "netease", "ifeng", "thepaper",
+    # 科技媒体与导购
+    "ithome", "smzdm", "36kr", "huxiu", "tmtpost", "donews",
+    "zol.com", "pconline", "yesky", "it168",
+    # 财经
+    "eastmoney", "stockstar", "10jqka", "gelonghui", "dxpress",
+    "cls.cn", "api3.cls", "xueqiu", "hexun",
+    # 报告倒卖站群
+    "sgpjbg", "168report", "qyresearch", "gminsights", "researchandmarkets",
+    "giiresearch", "6wresearch", "marketresearch.com", "indexbox",
+    "htfmarketintelligence", "straitsresearch", "marketresearchfuture", "worldic",
+    # 文档分享与手册镜像
+    "book118", "renrendoc", "docin", "doc88", ".wenku.", "zhidao", "scribd",
+    "manualslib", "manualzz", "alldatasheet", "elcodis", "iczoom",
+    # 图书平台
+    "books.google", "worldofbooks", "alibris", "abebooks",
+    # 招聘
+    "zhaopin", "liepin", "51job", ".seek.", "indeed.com", ".job.",
+]
+
+
+def _domain(url: str) -> str:
+    return urlparse(url).netloc
+
+
+def is_garbage_domain(domain: str) -> bool:
+    """域名命中垃圾域/低价值聚合平台名单（子串词形匹配，必要非充分——
+    命中即拒收，不命中不保证收录：判据①仍是主过滤）。"""
+    return any(g in domain for g in GARBAGE_DOMAINS)
 
 # existing_urls 增量缓存：record_sources 每批全量读 store 建幂等集合，批数×记录数
 # 增长时是 O(n²)；按 (路径, mtime) 缓存——文件被本进程以外改动（mtime 变化）时
@@ -93,7 +139,7 @@ SOURCE_TYPE_ALIASES: dict[str, str] = {
     "行业标准": "标准", "国家标准": "标准", "团体标准": "标准",
     "军用标准": "标准", "国际标准": "标准", "标准文件": "标准",
     "标准体系": "标准", "技术标准": "标准", "航天行业标准": "标准",
-    "标准文档": "标准", "开源标准": "标准", "评测标准": "标准",
+    "标准文档": "标准", "开源标准": "标准", "开放标准": "标准", "评测标准": "标准",
     "开源硬件标准": "标准", "标准平台": "标准", "标准检索入口": "标准",
     "标准平台检索入口": "标准", "开放硬件标准": "标准", "开源硬件规范": "标准",
     "行业标准文件": "标准", "数据规范": "标准", "标准清单": "标准",
@@ -277,6 +323,10 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
         if not isinstance(e, dict) or not name or not url:
             rejected.append({"index": i, "name": name, "url": url, "reason": "缺 name/url"})
             continue
+        if is_garbage_domain(_domain(url)):
+            rejected.append({"index": i, "name": name, "url": url,
+                             "reason": "垃圾域/低价值聚合平台，不收"})
+            continue
         if not evidence_ok:
             rejected.append({"index": i, "name": name, "url": url,
                              "reason": f"证据留痕不存在: {evidence_path}"
@@ -318,7 +368,12 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
 
 
 def record_search(store_path: Path, entries: list) -> int:
-    """搜索日志批量追加；非 dict 条目跳过。返回追加数。"""
+    """搜索日志批量追加；非 dict 条目跳过。返回追加数。
+
+    zero_reason 可选（2026-09-09 收尾护栏配套）：增量/扩量搜索提取为 0 时的
+    拒收理由（已收/垃圾域/无主题边界等）——收尾折叠时哨兵校验存在性与域名
+    证据一致性，缺失/矛盾拒绝收尾；补录 = 重传同 phase+node+query 行（末次覆盖）。
+    """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = []
     for e in entries:
@@ -332,6 +387,7 @@ def record_search(store_path: Path, entries: list) -> int:
             "results": e.get("results", ""),
             "extracted": e.get("extracted", ""),
             "verified": e.get("verified", ""),
+            "zero_reason": str(e.get("zero_reason") or ""),
             "ts": ts,
         })
     return append_records(store_path, rows)
@@ -372,6 +428,10 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
         url = str(e.get("url") or "") if verified else ""
         if verified and not url:
             rejected.append({"index": i, "name": name, "reason": "verified=true 缺 url"})
+            continue
+        if verified and is_garbage_domain(_domain(url)):
+            rejected.append({"index": i, "name": name,
+                             "reason": "垃圾域/低价值聚合平台，不收"})
             continue
         if verified and not evidence_ok:
             rejected.append({"index": i, "name": name,

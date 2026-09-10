@@ -107,8 +107,7 @@ def test_incremental_search_count_per_node():
     assert "**自由 8 次**（**仅中文搜索词**）" in SKILL_MD  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文
     assert "**自由 8 次**" in SKILL_MD
     assert "**角度池**" in SKILL_MD
-    assert "**易失效角度（必须带领域词 + 入口词）**" in SKILL_MD
-    assert "**英文未组合后缀同样易失效**" in SKILL_MD  # 2026-08-27：英文 X list 模式返回垃圾页，扩展易失效规则；09-02 "裸后缀"俚语改为"未组合后缀"
+    assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in SKILL_MD  # 2026-09-09 重构：易失效角度与英文后缀两条事故规则合并上移通用纪律（模式化收敛，阶段 3 留指针）
     assert "directory / registry / collection 这类泛化目录词" in SKILL_MD  # 2026-08-27：directory 实证命中率低，降级为泛化目录词
 
 
@@ -144,6 +143,41 @@ def test_storage_contract_mcp_tools():
     assert "model = " not in SKILL_MD  # 防误用：禁止模型用 Write 写数据文件组装
 
 
+def test_finalize_guards_quota_zero_reason_and_evidence():
+    """2026-09-09 收尾护栏三哨兵钉桩（155658 轮复盘落地）：① 每节点增量搜索
+    ≥16（配额谎报过不了收尾）；② 增量/扩量零提取必填 zero_reason（拒收留痕）；
+    ③ 理由与结果域名证据一致。以及配套的两处纪律：宁多勿缺授权
+    （打掉"怕清单变杂"的自创拒收借口）、上下文不停靠（打掉停靠与缩水借口）。
+    防回潮：这些文本是脚本哨兵的 SKILL 侧契约（postprocess.run_pipeline
+    enforce_quotas），删文案会重新打开模型谎报/静默拒收的口子。"""
+    assert "**收尾护栏**" in SKILL_MD
+    assert "增量搜索不足 16 次拒绝并点名" in SKILL_MD
+    assert "`zero_reason`" in SKILL_MD
+    assert "声称已收但域名不在清单" in SKILL_MD
+    assert "**宁多勿缺**" in SKILL_MD
+    assert "符合判据的机构信息载体就收" in SKILL_MD
+    assert "不得以上下文长为由停靠" in SKILL_MD
+    assert "不得谎报次数" in SKILL_MD
+    assert "末次覆盖" in SKILL_MD  # 补录机制：重传同 phase+node+query 行
+
+
+def test_criterion_institution_carrier_and_exclusions():
+    """2026-09-10 收录政策收紧钉桩（2110 条清单复盘落地）：判据① = 只收"机构发布
+    的信息载体"两条规则——新闻/资讯/媒体文章/个人内容/导购/百科词条一律不收，
+    垃圾域与低价值聚合平台由脚本名单入库即拒；提取率标尺按实况重校准（2-4 条/10）。
+    防回潮：2110 条里 794 条媒体+530 条噪声的成因就是旧判据（"有主题边界就收"），
+    删这些文案会重新打开新闻洪水与垃圾域收录的口子。"""
+    assert "机构发布的信息载体" in SKILL_MD
+    assert "新闻、资讯与媒体文章不属于收录对象" in SKILL_MD
+    assert "新闻、资讯、媒体文章、个人内容一律不收录" in SKILL_MD
+    assert "百科词条、问答、个人博客与论坛帖不收" in SKILL_MD
+    assert "GARBAGE_DOMAINS" in SKILL_MD
+    assert "机构信息载体通常占 2-4 条" in SKILL_MD
+    assert "行业媒体文章、技术新闻" not in SKILL_MD  # 旧目标句的新闻类收录对象，不得回潮
+    assert "收录数量不是质量指标" not in SKILL_MD  # 旧"宁多勿缺"口径（无限全收），已按机构载体限定
+    assert "博客 / 资讯平台" not in SKILL_MD  # 角度池的新闻/博客角度已移除（其产出全不收录）
+
+
 def test_scripts_include_store_and_mcp_server():
     """docs/04 实现落地：store.py（存储层）与 mcp_server.py（四工具服务）归位 scripts/。"""
     assert (SCRIPTS_DIR / "store.py").is_file()
@@ -171,8 +205,9 @@ def test_skill_genre_free_label_no_taxonomy_leak():
     """source_type 字段语义与机制隔离（2026-09-08 终版）：SKILL 只给模型字段语义
     （内容形态标签，不填机构名/领域名/网址）；词表 12 类、归一、表外词审计等脚本
     机制不出现在 SKILL——词表作为提取筛子的两版尝试均致产量暴跌（每搜提取
-    0.85→0.20、store 类型 22→5 类），机制细节告知模型只会诱发保守提取。"""
-    assert "#### 数据源类型" in SKILL_MD
+    0.85→0.20、store 类型 22→5 类），机制细节告知模型只会诱发保守提取。
+    2026-09-09 重构：数据源类型小节并入标注段，断言同步。"""
+    assert "**标注**" in SKILL_MD
     assert "内容形态标签" in SKILL_MD
     assert "不填机构名、领域名或网址" in SKILL_MD
     assert "SOURCE_TYPES" not in SKILL_MD  # 脚本机制词不泄漏进 SKILL（分类归 store.py）
@@ -215,12 +250,13 @@ def test_verification_query_component_pool():
 
 
 def test_extraction_per_item_no_whole_row_rejection():
-    """提取端禁止整行拒收（2026-08-27 交换机 Nokia 事件实证：查询返回 10 条官方文档页提取 0）：
-    逐条判断、提取为 0 的唯一前提、粒度"优先收合集入口"歧义澄清。"""
-    assert "#### 逐条判断（禁止整行拒收）" in SKILL_MD
+    """提取端禁止整批拒收（2026-08-27 交换机 Nokia 事件实证：查询返回 10 条官方文档页提取 0）：
+    逐条判断、提取为 0 的唯一前提、粒度"优先收合集入口"歧义澄清。
+    2026-09-09 重构：小节标题扁平化为六段结构，断言同步新形态（判断方式段）。"""
+    assert "**判断方式**" in SKILL_MD
     assert "提取为 0 的唯一前提" in SKILL_MD
-    assert "没看到合集入口就整行放弃" in SKILL_MD
-    assert "合集入口与单篇同时出现在结果里" in SKILL_MD
+    assert "没看到合集入口就放弃该批结果" in SKILL_MD
+    assert "合集入口与其包含的同一具体内容页同时出现时" in SKILL_MD
 
 
 def test_extraction_yield_benchmark_and_self_check():
@@ -228,12 +264,13 @@ def test_extraction_yield_benchmark_and_self_check():
     URL 有证据链、查询词有留痕比对、搜索数有配额，唯独"收几条"纯靠模型自觉：
     同版同模型三轮 172/274/813（08-27 SKILL）、pro 基底 ~1.1/搜 vs 08-28 全收
     6.39/搜 实证提取默认值漂移是产量主变量。"全量提取"义务型文本约束不住执行，
-    改补量化常态预期（10 条通常拒 1-2 条）作自查标尺 + group commit 前提取率
-    自查；同时写死两条防线：词题例外（整批书商/元器件站/SEO 页如实 0，不为凑数
-    收录垃圾）、重审不重新搜索（防复核变成加搜拖长运行）。"""
-    assert "**常态预期（自查标尺）**" in SKILL_MD
-    assert "通常只有 1-2 条需要拒收" in SKILL_MD
-    assert "不为凑数收录垃圾" in SKILL_MD
+    改补量化标尺 + group commit 前提取率自查；同时写死两条防线：词题例外（整批
+    书商/元器件站/SEO 页如实 0，不得为提高数量收录）、重审不重新搜索（防复核
+    变成加搜拖长运行）。2026-09-09 重构：改名"提取率自查（非准入条件）"并降格
+    ——只触发复核、不覆盖收录判据、低相关结果集不适用。"""
+    assert "**提取率自查（非准入条件）**" in SKILL_MD
+    assert "机构信息载体通常占 2-4 条" in SKILL_MD  # 2026-09-10 按 2110 条实况重校准（旧标尺 1-2 条不符与搜索生态脱节，激励全收）
+    assert "不得为提高数量收录" in SKILL_MD
     assert "**入库前自查**" in SKILL_MD
     assert "明显低于 1 条/搜" in SKILL_MD
     assert "重审不重新搜索" in SKILL_MD
@@ -394,12 +431,12 @@ def test_contradiction_and_wording_cleanup():
     assert "从有效来源中剔除" in SKILL_MD
     assert "以上约束只管本类" in SKILL_MD
     assert "历史清单是上轮结果的基线，照搬会继承上轮的遗漏与偏差" in SKILL_MD
-    assert SKILL_MD.count("数据集只是其中一类，不应占主导") == 1
-    assert '见通用纪律"平台准入判据"' in SKILL_MD
+    assert "数据集只是其中一类，不应占主导" not in SKILL_MD
+    assert '见通用纪律"提取规则"的平台准入段' in SKILL_MD
     for bad in ["乱搜", "掺长尾垃圾", "不死循环", "纪律保留", "不花一次搜索"]:
         assert bad not in SKILL_MD
     # 厂商/产品名规则单一归属：并入通用纪律词类清单第 4 条，阶段 3 改指针，图标移除
-    assert "**厂商 / 产品名**（按意图区分）" in SKILL_MD
+    assert "**厂商 / 产品名（按意图区分）**" in SKILL_MD
     assert '厂商 / 产品名的用法见通用纪律"搜索词构造"' in SKILL_MD
     assert SKILL_MD.count("单独搜产品名") == 1
     assert "裸搜" not in SKILL_MD  # 2026-09-02："裸"俚语前缀清除（裸搜/裸后缀→单独搜/未组合）
@@ -407,7 +444,8 @@ def test_contradiction_and_wording_cleanup():
     assert "❌" not in SKILL_MD and "✅" not in SKILL_MD
     # 数据源类型（2026-09-08 终版）：SKILL 只留字段语义，脚本机制（词表 12 类/归一/
     # 表外词审计）全部在 store.py——词表当提取筛子的两版尝试均致产量暴跌，机制不进 SKILL
-    assert "#### 数据源类型" in SKILL_MD
+    # 2026-09-09 重构：小节并入标注段
+    assert "**标注**" in SKILL_MD
     assert "内容形态标签" in SKILL_MD
     assert "SOURCE_TYPES" not in SKILL_MD and "归一" not in SKILL_MD
 

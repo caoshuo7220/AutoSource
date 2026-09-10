@@ -116,6 +116,8 @@ def record_sources(run_dir: str, entries: list) -> str:
     （清单核对结果走 record_knowledge，见 SKILL 阶段 2/4）。条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
+    垃圾域/低价值聚合平台（store.GARBAGE_DOMAINS 平台级名单）入库即拒——新闻门户、
+    电商、内容平台、报告倒卖站等大平台不收，命中返回"垃圾域/低价值聚合平台，不收"。
 
     返回 JSON：{"accepted": 入库数, "skipped": 裸 URL 精确重复跳过数,
     "rejected": [{index, name, url, reason}], "unmapped": [表外原始体裁词]}——
@@ -134,8 +136,11 @@ def record_search(run_dir: str, entries: list) -> str:
     """把一批搜索日志落库（替代 raw.json 的 journal 字段）。
 
     何时调用：阶段 2 每 ~10-15 次验证搜索一批；阶段 3/4 每节点完成时一批。
-    每项 {phase, node, query, results, extracted}——query 必须照抄实际发出的
-    查询词（脚本在收尾时逐字比对证据留痕，不在则标注"证据缺失"）。
+    每项 {phase, node, query, results, extracted, zero_reason?}——query 必须照抄实际
+    发出的查询词（脚本在收尾时逐字比对证据留痕，不在则标注"证据缺失"）。
+    zero_reason（2026-09-09 收尾护栏）：增量/扩量搜索提取为 0 时必填拒收理由
+    （已收/垃圾域/无主题边界等）——finalize 校验缺失或与结果域名证据矛盾时
+    拒绝收尾；补录 = 重传同 phase+node+query 行（末次覆盖）。
 
     返回追加条数。
     """
@@ -196,6 +201,10 @@ def finalize(run_dir: str) -> str:
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 时拒绝折叠并报错（模型漏调
     record_sources 时失败响亮，不会静默产出空清单）；清单了结哨兵：声明清单中
     无核对记录的项拒绝折叠并点名（漏调 record_knowledge 时同样响亮）。
+    收尾护栏三哨兵（2026-09-09）：① 配额——每节点增量搜索 ≥16 次，不足拒绝
+    并点名；② 拒收留痕——增量/扩量零提取搜索必须带 zero_reason 理由；
+    ③ 理由与证据一致——声称已收须域名在清单、声称垃圾域须命中垃圾域黑名单。
+    疑似漏收（域名不在清单且非垃圾域）进汇总审计清单，不拦截。
     失败发生在目录重命名前，修正后可安全重跑。成功时 store/manifest 归档进 intermediate/。
     """
     _ensure_healthy(run_dir)

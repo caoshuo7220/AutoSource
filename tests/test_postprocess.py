@@ -803,11 +803,12 @@ class TestJournal:
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         assert journal_csv.read_bytes()[:3] == BOM
         rows = read_csv_rows(journal_csv)
-        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失"]
+        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失", "零提取理由"]
         assert len(rows) == 3
         assert rows[1][2] == "IEEE 802.3 official"
         assert rows[1][5] == ""  # 验证通过列：非验证行留空
         assert rows[1][6] == "否"  # 证据缺失列：未缺失显式填否
+        assert rows[1][7] == ""  # 零提取理由列：非零提取行留空
 
     def test_verification_count_mismatch_flagged(self, tmp_path):
         """2026-09-01 钉进测试：journal verified 计数与清单验证通过数的一致性校验
@@ -1754,7 +1755,8 @@ class TestFinalizeFold:
         self._manifest(run_dir)
         self._write_store(run_dir, [self._source_row(), self._search_row()])
         fold_summary = fold(str(run_dir), evidence_log=str(evidence1),
-                            out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+                            out_dir=str(tmp_path / "outputs"), now=FIXED_NOW,
+                            enforce_quotas=False)  # 单条搜索：本测试钉等价性，护栏由专门测试覆盖
 
         raw = write_raw(tmp_path, {
             "domain": "算力服务器", "nodes": self.FOLD_NODES, "model": "test-model",
@@ -1870,7 +1872,8 @@ class TestFinalizeFold:
                                           [{"url": "https://a.com/doc", "name": "A"},
                                            {"url": "https://k.com/doc", "name": "K1"}])
         summary = fold(str(run_dir), evidence_log=str(evidence),
-                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW,
+                       enforce_quotas=False)  # 单条搜索：本测试钉归档行为，护栏由专门测试覆盖
         outdir = Path(summary["outdir"])
         archived = (outdir / "intermediate" / "store_input.jsonl").read_text(encoding="utf-8")
         assert "source_type_raw" in archived
@@ -1916,3 +1919,270 @@ class TestFinalizeFold:
             fold(str(run_dir), evidence_log=str(tmp_path / "absent.jsonl"),
                  out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
         assert run_dir.exists() and run_dir.name.startswith("run_")
+
+
+def write_evidence_map(tmp_path: Path, query_urls: dict[str, list[str]],
+                       sources: list[dict] | None = None) -> Path:
+    """构造证据留痕：按查询词各配模拟结果 URL（供零提取审计/护栏测试用）。"""
+    p = tmp_path / "search_log.jsonl"
+    with p.open("w", encoding="utf-8") as f:
+        for q, urls in query_urls.items():
+            payload = {
+                "tool_name": "WebSearch",
+                "tool_input": {"query": q},
+                "tool_response": {"results": [{"url": u} for u in urls]},
+            }
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        for s in sources or []:
+            if not isinstance(s, dict) or not s.get("url"):
+                continue
+            payload = {
+                "tool_name": "WebSearch",
+                "tool_input": {"query": "test"},
+                "tool_response": {"results": [{"url": s["url"], "title": s.get("name", "")}]},
+            }
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return p
+
+
+class _SentinelFoldBase:
+    """三个收尾护栏（2026-09-09）共用夹具：fold 路径（enforce_quotas 缺省开启）。"""
+
+    NODES = ["AI训练GPU", "图形渲染GPU"]
+
+    def _manifest(self, run_dir, knowledge=None):
+        data = {"domain": "算力服务器", "nodes": self.NODES, "model": "test-model",
+                "knowledge": knowledge if knowledge is not None else []}
+        (run_dir / "manifest.json").write_text(json.dumps(data, ensure_ascii=False),
+                                               encoding="utf-8")
+        return run_dir / "manifest.json"
+
+    def _source_row(self, node="AI训练GPU", name="A", url="https://a.com/doc"):
+        return {"type": "source", "node": node, "name": name,
+                "category_path": f"算力服务器-GPU服务器-{node}",
+                "source_type": "官方文档", "granularity": "合集级",
+                "url": url, "description": "d", "reason": "r"}
+
+    def _search_row(self, node="AI训练GPU", query="q", extracted=0,
+                    phase="增量发现", **kw):
+        row = {"type": "search", "phase": phase, "node": node, "query": query,
+               "results": 10, "extracted": extracted}
+        row.update(kw)
+        return row
+
+    def _write_store(self, run_dir, rows):
+        (run_dir / "store.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+            encoding="utf-8")
+
+    def _searches(self, node, n, base="q", **kw):
+        return [self._search_row(node=node, query=f"{base}{i}", **kw)
+                for i in range(n)]
+
+    def _fold(self, tmp_path, run_dir, store_rows, query_urls, evidence_sources=()):
+        """组装一次 fold 调用：manifest + store + 证据（查询词各配结果 URL）。"""
+        self._manifest(run_dir)
+        self._write_store(run_dir, store_rows)
+        evidence = write_evidence_map(tmp_path, query_urls, evidence_sources)
+        return fold(str(run_dir), evidence_log=str(evidence),
+                    out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+
+
+class TestQuotaSentry(_SentinelFoldBase):
+    """哨兵 1：每节点增量搜索 ≥16——配额缩水/谎报过不了收尾。"""
+
+    def test_node_shortfall_raises_with_names(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
+            self._searches("图形渲染GPU", 8, base="g", zero_reason="垃圾域")
+        with pytest.raises(ValueError, match="增量搜索未达标") as ei:
+            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert "图形渲染GPU 8 次（缺 8）" in str(ei.value)
+        assert run_dir.exists() and run_dir.name.startswith("run_")
+
+    def test_exact_sixteen_per_node_passes(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        summary = self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert not run_dir.exists()  # 正常重命名收尾
+        assert summary["zero_audit"]["total"] == 32
+
+    def test_expansion_rows_do_not_rescue_shortfall(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 14, zero_reason="垃圾域") + \
+            self._searches("AI训练GPU", 4, base="x", phase="扩量轮", zero_reason="垃圾域")
+        with pytest.raises(ValueError, match="AI训练GPU 14 次（缺 2）"):
+            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert run_dir.exists()
+
+    def test_verification_only_run_not_quota_checked(self, tmp_path):
+        """纯清单验证运行（零增量行）：与防截断哨兵豁免口径一致，不拦。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        knowledge = [{"name": "K1", "node": "AI训练GPU", "verified": True,
+                      "category_path": "算力服务器-GPU服务器-AI训练GPU",
+                      "source_type": "官方文档", "granularity": "合集级",
+                      "url": "https://k.com/doc", "description": "kd", "reason": "kr"}]
+        self._manifest(run_dir, knowledge=knowledge)
+        self._write_store(run_dir, [self._search_row(phase="验证搜索", query="K1 官网")])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        fold(str(run_dir), evidence_log=str(evidence),
+             out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert not run_dir.exists()
+
+    def test_cli_path_not_enforced(self, tmp_path):
+        """CLI 兼容路径（enforce_quotas 缺省关闭）：历史轮次复盘重跑不受影响。"""
+        data = base_data()
+        data["journal"] = [{"phase": "增量发现", "node": "AI训练GPU",
+                            "query": "GPU 排名", "results": 10, "extracted": 0}]
+        raw = write_raw(tmp_path, data)
+        ev = write_evidence_queries(tmp_path, ["GPU 排名"], data["sources"])
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                      evidence_log=str(ev))
+        assert summary["kept"] == 2
+
+
+class TestZeroReasonSentry(_SentinelFoldBase):
+    """哨兵 2：增量/扩量零提取必须带 zero_reason（拒收留痕可审计）。"""
+
+    def test_zero_extraction_without_reason_raises(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 15, zero_reason="垃圾域") + \
+            [self._search_row(query="q15", extracted=0)] + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        with pytest.raises(ValueError, match="零提取留痕缺失或与证据矛盾") as ei:
+            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert "q15" in str(ei.value)
+        assert run_dir.exists()
+
+    def test_verification_search_zero_extraction_exempt(self, tmp_path):
+        """验证搜索的 extracted 只记顺路新源——零提取是合法结果，不需要理由。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
+            [self._search_row(phase="验证搜索", query="K1 官网", extracted=0)] + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert not run_dir.exists()
+
+    def test_positive_extraction_needs_no_reason(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, extracted=1) + \
+            self._searches("图形渲染GPU", 16, base="g", extracted=1)
+        self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert not run_dir.exists()
+
+    def test_duplicate_row_latest_wins(self, tmp_path):
+        """补录机制：同 phase+node+query 重传 = 末次覆盖（append-only 语义）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 15, zero_reason="垃圾域") + \
+            [self._search_row(query="q15", extracted=0),          # 缺理由
+             self._search_row(query="q15", extracted=0, zero_reason="无主题边界")] + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        summary = self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert not run_dir.exists()
+        assert summary["journal_count"] == 32  # 16+16，重复行合并为一条
+        journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
+        csv_rows = read_csv_rows(journal_csv)
+        assert len(csv_rows) == 33  # header + 32
+        q15_rows = [r for r in csv_rows if r[2] == "q15"]
+        assert len(q15_rows) == 1  # 重复行合并
+        assert q15_rows[0][7] == "无主题边界"  # 末次覆盖后的理由进了 CSV
+
+
+class TestZeroReasonContradiction(_SentinelFoldBase):
+    """哨兵 3：zero_reason 与结果域名证据矛盾拦截 + 疑似漏收审计清单。"""
+
+    def test_reason_claims_collected_but_domains_not_in_list_raises(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="已收") + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(16)}
+        with pytest.raises(ValueError, match="理由声称已收") as ei:
+            self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        assert "q0" in str(ei.value)
+        assert run_dir.exists()
+
+    def test_reason_claims_garbage_but_domains_clean_raises(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://www.cisco.com/doc{i}"] for i in range(16)}
+        with pytest.raises(ValueError, match="理由声称垃圾域"):
+            self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        assert run_dir.exists()
+
+    def test_consistent_reasons_pass_and_audit_reported(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="已收") + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(16)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(16)})
+        summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        assert not run_dir.exists()
+        assert summary["zero_audit"]["categorized"] == {"已收": 16, "垃圾域": 16}
+        assert summary["zero_audit"]["suspects"] == []
+        from postprocess import summary_text
+        assert "零提取审计" in summary_text(summary)
+
+    def test_suspects_audit_listed_without_blocking(self, tmp_path):
+        """疑似漏收（域名不在清单且非垃圾域）不拦截——进审计清单供人工复核。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", 16, zero_reason="无主题边界") + \
+            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(16)}
+        summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        assert not run_dir.exists()
+        assert summary["zero_audit"]["categorized"]["疑似漏收"] == 16
+        assert len(summary["zero_audit"]["suspects"]) == 16
+        from postprocess import summary_text
+        text = summary_text(summary)
+        assert "疑似漏收清单" in text
+        assert "example.org" in text
+
+
+class TestGarbageFilter(_SentinelFoldBase):
+    """2026-09-10 收录政策收紧：收尾过滤垃圾域/低价值聚合平台（与入库即拒双层——
+    历史数据与 CLI 路径不经入库闸门，收尾兜底）。"""
+
+    def test_fold_filters_garbage_sources_and_reports(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row(),
+                self._source_row(name="B", url="https://shuma.taobao.com/item/1")] + \
+            self._searches("AI训练GPU", 16, extracted=1) + \
+            self._searches("图形渲染GPU", 16, base="g", extracted=1)
+        self._manifest(run_dir)
+        self._write_store(run_dir, rows)
+        evidence = write_evidence_map(tmp_path, {},
+                                      [{"url": "https://a.com/doc", "name": "A"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["kept"] == 1
+        assert summary["garbage_filtered"] == 1
+        from postprocess import summary_text
+        assert "垃圾域过滤移除: 1 条" in summary_text(summary)
+
+    def test_all_garbage_candidates_do_not_trigger_search_failure(self, tmp_path):
+        """过滤后零候选 ≠ 搜索工具异常——失败路径按过滤前计数判断（政策过滤是合法
+        结果，不得误报"疑似搜索工具异常"）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row(url="https://shuma.taobao.com/item/1")] + \
+            self._searches("AI训练GPU", 16, extracted=1) + \
+            self._searches("图形渲染GPU", 16, base="g", extracted=1)
+        self._manifest(run_dir)
+        self._write_store(run_dir, rows)
+        evidence = write_evidence_map(tmp_path, {})
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["kept"] == 0
+        assert summary["garbage_filtered"] == 1

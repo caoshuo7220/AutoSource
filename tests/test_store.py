@@ -48,6 +48,9 @@ class TestCanonicalizeSourceType:
         assert canonicalize_source_type("开放组织") == "官网"
         assert canonicalize_source_type("专利数据库") == "专利"
         assert canonicalize_source_type("技术白皮书") == "报告"
+        # 2026-09-10 交换机 2110 条轮表外词收敛（46 种原始词唯一真表外词）：
+        # 开放标准=开放标准体系（如 OCP 开放标准）属标准族
+        assert canonicalize_source_type("开放标准") == "标准"
 
     def test_unknown_word_falls_back_to_other(self):
         assert canonicalize_source_type("没见过的新词") == "其他"
@@ -322,6 +325,23 @@ class TestRecordSearch:
         assert records[0]["verified"] is True
         assert records[0]["extracted"] == 0
 
+    def test_search_zero_reason_roundtrip(self, tmp_path):
+        """2026-09-09 收尾护栏配套：零提取理由 zero_reason 透传不丢失（哨兵 2/3 数据面）。"""
+        store = tmp_path / "store.jsonl"
+        assert record_search(store, [{"phase": "增量发现", "node": "AI训练GPU",
+                                      "query": "q", "results": 10, "extracted": 0,
+                                      "zero_reason": "垃圾域"}]) == 1
+        records, _ = load_store(store)
+        assert records[0]["zero_reason"] == "垃圾域"
+
+    def test_search_zero_reason_defaults_empty(self, tmp_path):
+        """未填 zero_reason 的旧批次行为不变（空串落库，哨兵在收尾按空值拦截）。"""
+        store = tmp_path / "store.jsonl"
+        assert record_search(store, [{"phase": "增量发现", "node": "AI训练GPU",
+                                      "query": "q", "results": 10, "extracted": 0}]) == 1
+        records, _ = load_store(store)
+        assert records[0]["zero_reason"] == ""
+
     def test_non_dict_rows_skipped(self, tmp_path):
         store = tmp_path / "store.jsonl"
         assert record_search(store, [{"query": "q"}, "垃圾", None]) == 1
@@ -366,3 +386,74 @@ class TestCoverage:
         )
         cov = {c["node"]: c for c in coverage(store, NODES)}
         assert cov["AI训练GPU"]["missing"] == 0
+
+
+class TestGarbageDomainGate:
+    """2026-09-10 收录政策收紧：垃圾域/低价值聚合平台入库即拒（GARBAGE_DOMAINS
+    平台级名单，与收尾过滤双层——名单放"大平台"，长尾单站由判据①覆盖）。"""
+
+    def test_source_rejected_on_garbage_domain(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://shuma.taobao.com/item/1",
+                                             "https://a.com/doc"])
+        result = record_sources(store, [
+            source_entry(url="https://shuma.taobao.com/item/1", name="G"),
+            source_entry(),
+        ], evidence, NODES)
+        assert result["accepted"] == 1
+        assert result["rejected"][0]["reason"] == "垃圾域/低价值聚合平台，不收"
+        assert "taobao" in result["rejected"][0]["url"]
+
+    def test_knowledge_rejected_on_garbage_domain(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://zhuanlan.zhihu.com/p/1"])
+        result = record_knowledge(store, [{
+            "name": "K1", "node": "AI训练GPU", "verified": True,
+            "category_path": "算力服务器-GPU服务器-AI训练GPU",
+            "source_type": "厂商文档", "granularity": "合集级",
+            "url": "https://zhuanlan.zhihu.com/p/1", "description": "d", "reason": "r"}],
+            evidence)
+        assert result["accepted"] == 0
+        assert "垃圾域" in result["rejected"][0]["reason"]
+
+    def test_platform_subdomain_patterns_match(self, tmp_path):
+        """平台级名单按子串匹配：blog.csdn.net 命中 csdn、www.jd.com 命中 jd.com。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://blog.csdn.net/x",
+                                             "https://www.jd.com/x",
+                                             "https://a.com/doc"])
+        result = record_sources(store, [
+            source_entry(url="https://blog.csdn.net/x", name="B"),
+            source_entry(url="https://www.jd.com/x", name="J"),
+            source_entry(),
+        ], evidence, NODES)
+        assert result["accepted"] == 1
+        assert len(result["rejected"]) == 2
+
+    def test_clean_domains_unaffected(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc"])
+        result = record_sources(store, [source_entry()], evidence, NODES)
+        assert result["accepted"] == 1
+
+    def test_aws_docs_not_matched_by_amazon_entry(self, tmp_path):
+        """钉桩：docs.aws.amazon.com 是合法厂商文档门户，不得被电商词条误伤。
+
+        子串匹配下 "amazon.com" 会命中它（2026-09-10 提交前审查实测：SOM厂商轮
+        交付物中即有该域名）——名单词条须为 www.amazon. 形态，只匹配电商主站。
+        """
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://docs.aws.amazon.com/x"])
+        result = record_sources(
+            store, [source_entry(url="https://docs.aws.amazon.com/x", name="AWS 文档")],
+            evidence, NODES)
+        assert result["accepted"] == 1
+        assert result["rejected"] == []
+
+    def test_verified_false_without_url_not_checked(self, tmp_path):
+        """verified=false 不带 URL——无域名可查，不受闸门影响。"""
+        store = tmp_path / "store.jsonl"
+        result = record_knowledge(store, [{
+            "name": "K1", "node": "AI训练GPU", "verified": False,
+            "note": "未找到官方入口"}], tmp_path / "no-evidence.jsonl")
+        assert result["accepted"] == 1

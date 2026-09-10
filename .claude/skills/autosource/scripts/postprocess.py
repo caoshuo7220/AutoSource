@@ -19,6 +19,10 @@ run_pipeline() 全链路：
 - 域名 + 名称联合去重；CSV 用标准库导出（UTF-8 BOM，转义交给标准库），
   写入时剥离 URL 尾部的引用序号锚点（#数字，markdown 引用记号）
 - 各节点候选数与体裁分布写 stats CSV（纯清单统计表：每节点一行 + 总计行）
+- 零提取审计与收尾护栏（2026-09-09）：增量/扩量零提取按结果域名分类
+  （已收/垃圾域/疑似漏收），enforce_quotas 时拦截配额不足（每节点增量搜索
+  ≥16）、拒收无留痕（zero_reason）、理由与域名证据矛盾——fold/finalize 路径
+  开启，旧 CLI 兼容路径关闭
 - 数据血缘（lineage.py）：从切片留痕与最终收录 join 生成溯源.csv，数据源清单
   加"来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
 - 按 run bundle 结构归档：交付物在运行目录根（数据源清单；分析报告由模型
@@ -70,14 +74,15 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from evidence import (RUN_DIR_RE, check_grounded, default_evidence_log,
-                      extract_strings, query_in_evidence, run_evidence_log,
-                      slice_evidence, strip_citation_anchors)
+                      extract_strings, line_query, query_in_evidence,
+                      result_urls, run_evidence_log, slice_evidence,
+                      strip_citation_anchors)
 from lineage import build_lineage, first_query_by_source, write_lineage_csv
 from report import finalize_report
 # 条目粒度契约与节点推导归存储层（store），编排层从这里取——依赖方向单向向下
 # （mcp_server → store/postprocess → evidence/lineage/report，无环）。
 from store import (GRANULARITY_LEVELS, canonicalize_source_type, leaf_node,
-                   load_store)
+                   is_garbage_domain, load_store)
 
 # 重导出（test_postprocess 的导入面）：query_in_evidence 本模块未用，仅作兼容出口。
 __all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicate",
@@ -95,7 +100,10 @@ class AutoSourceError(ValueError):
 
 SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明", "来源搜索"]
 STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
-JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失"]
+JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失", "零提取理由"]
+
+# 哨兵 1（2026-09-09 收尾护栏）：每节点增量发现搜索下限——配额缩水/谎报过不了收尾
+MIN_INCREMENTAL_SEARCHES = 16
 
 
 def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
@@ -301,10 +309,105 @@ def classify_query_scope(query: str, domain: str, nodes: list[str]) -> str:
     return "非框架内"
 
 
+def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list],
+                           kept_domains: set[str]) -> dict:
+    """零提取审计（哨兵 2/3 的数据面）：逐条分类结果域名并核对留痕理由。
+
+    zero_rows = [(node, query, zero_reason), ...]（增量/扩量轮提取为 0 的行）。
+    返回 {total, categorized, suspects, violations}：
+    - categorized：已收/垃圾域/混合/疑似漏收/无留痕URL 计数
+    - suspects：疑似漏收行（域名不在清单且非垃圾域）——审计清单，不拦截
+    - violations：客观矛盾——缺 zero_reason；理由声称已收但域名不在清单；
+      理由声称垃圾域但域名非垃圾域——enforce 时拦截（拒收必须留痕可核）
+    """
+    categorized: dict[str, int] = {}
+    suspects: list[tuple] = []
+    violations: list[tuple] = []
+
+    def bump(key: str) -> None:
+        categorized[key] = categorized.get(key, 0) + 1
+
+    for node, query, reason in zero_rows:
+        domains = {_domain(u) for u in urls_by_query.get(query, [])}
+        if not domains:
+            bump("无留痕URL")
+            if not reason:
+                violations.append((node, query, reason, "无 zero_reason"))
+            continue
+        kept_hits = sum(1 for d in domains if d in kept_domains)
+        garbage_hits = sum(1 for d in domains if is_garbage_domain(d))
+        if kept_hits == len(domains):
+            cat = "已收"
+        elif garbage_hits == len(domains):
+            cat = "垃圾域"
+        elif kept_hits + garbage_hits == len(domains):
+            cat = "混合"
+        else:
+            cat = "疑似漏收"
+        bump(cat)
+        if not reason:
+            violations.append((node, query, reason, "无 zero_reason"))
+        elif ("已收" in reason or "重复" in reason) and kept_hits == 0:
+            violations.append((node, query, reason,
+                               f"理由声称已收/重复，但结果域名 {sorted(domains)} 不在最终清单"))
+        elif "垃圾" in reason and garbage_hits == 0:
+            violations.append((node, query, reason,
+                               f"理由声称垃圾域，但结果域名 {sorted(domains)} 非垃圾域"))
+        if cat == "疑似漏收":
+            suspects.append((node, query, "; ".join(sorted(domains)), reason))
+    return {"total": len(zero_rows), "categorized": categorized,
+            "suspects": suspects, "violations": violations}
+
+
+def _check_node_quota(journal: list, nodes: list[str]) -> None:
+    """哨兵 1：每节点增量发现搜索 ≥ MIN_INCREMENTAL_SEARCHES。
+
+    仅对已启动增量发现的运行校验（存在增量行才检查）——纯清单验证运行
+    （零增量行）与防截断哨兵的豁免口径一致；扩量轮不计入基底配额。
+    """
+    counts = {n: 0 for n in nodes}
+    for j in journal:
+        if not isinstance(j, dict):
+            continue
+        if _phase_group(str(j.get("phase") or "")) != "增量":
+            continue
+        node = leaf_node(str(j.get("node") or ""), nodes)
+        if node:
+            counts[node] += 1
+    if sum(counts.values()) == 0:
+        return
+    short = [(n, counts[n]) for n in nodes if counts[n] < MIN_INCREMENTAL_SEARCHES]
+    if short:
+        raise AutoSourceError(
+            f"节点增量搜索未达标（每节点应 ≥{MIN_INCREMENTAL_SEARCHES} 次）："
+            + "；".join(f"{n} {c} 次（缺 {MIN_INCREMENTAL_SEARCHES - c}）" for n, c in short)
+            + "——补搜并补录 record_search 后重跑 finalize（运行目录未被重命名）")
+
+
+def _check_zero_reason_violations(audit: dict) -> None:
+    """哨兵 2/3 拦截：零提取拒收必须留痕（zero_reason）且与结果域名证据一致。"""
+    violations = audit["violations"]
+    if not violations:
+        return
+    raise AutoSourceError(
+        f"零提取留痕缺失或与证据矛盾（{len(violations)} 条）：拒收必须逐条说明理由且"
+        "可核对——该收的补 record_sources，确不收的补录 zero_reason（重传同"
+        "phase+node+query 行，末次覆盖）后重跑 finalize：\n"
+        + "\n".join(f"  - [{node}] {query}（{problem}）"
+                    for node, query, _reason, problem in violations))
+
+
 def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
                  evidence_log: Optional[str] = None,
-                 now: Optional[datetime] = None) -> dict:
-    """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。"""
+                 now: Optional[datetime] = None,
+                 enforce_quotas: bool = False) -> dict:
+    """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。
+
+    enforce_quotas（2026-09-09 收尾护栏）：fold/finalize 路径开启三哨兵——
+    ① 每节点增量搜索 ≥16；② 增量/扩量零提取必须带 zero_reason（拒收留痕）；
+    ③ 理由与结果域名证据一致（声称已收须域名在清单、声称垃圾域须命中黑名单）。
+    旧 CLI 兼容路径（历史轮次复盘重跑）缺省关闭，不拦。
+    """
     raw = Path(raw_path)
     if not raw.exists():
         raise FileNotFoundError(f"输入文件不存在: {raw_path}")
@@ -355,6 +458,13 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     evidence_strings = extract_strings(evidence) if journal else set()
 
     all_candidates = valid + merged
+    # 收录政策（2026-09-10）：垃圾域/低价值聚合平台收尾过滤——与入库即拒双层
+    # （历史数据与 CLI 路径不经入库闸门，此处兜底）。过滤在证据校验之前：
+    # 垃圾候选无需证据链背书、也不占用"URL 不在留痕"的误导性拒因。
+    candidates_pre_filter = len(all_candidates)
+    all_candidates = [s for s in all_candidates
+                      if not is_garbage_domain(_domain(str(s.get("url") or "")))]
+    garbage_filtered = candidates_pre_filter - len(all_candidates)
     # 体裁归一（封闭词表）：MCP 路径的 store 行入库时已归一一次，此处对三来源
     # 汇合（store/CLI raw/knowledge manifest）统一再归一——幂等，双入口口径一致
     # （knowledge 与 CLI 路径不经 record_sources）。表外词（落「其他」）在归一
@@ -381,6 +491,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     journal_queries: set[str] = set()
     journal_map: dict[str, tuple] = {}
     verification_claims = 0  # journal 声称的验证通过次数（验证搜索/扩量轮行）
+    zero_search_rows: list[tuple] = []  # 增量/扩量轮提取为 0 的行（零提取审计/哨兵 2/3）
     # 选题分类统计（2026-09-01 实体选题放开后的验证度量）：只统计增量发现/扩量轮行，
     # 验证搜索行按定义就是实体查询，已被 verified 字段覆盖、不参与分类
     in_framework = {"count": 0, "extracted": 0}
@@ -406,6 +517,9 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
                 extracted = int(j.get("extracted") or 0)
             except (TypeError, ValueError):
                 extracted = 0
+            if extracted <= 0:
+                zero_search_rows.append(
+                    (str(j.get("node") or ""), query, str(j.get("zero_reason") or "")))
             if classify_query_scope(query, domain, nodes) == "框架内":
                 in_framework["count"] += 1
                 in_framework["extracted"] += extracted
@@ -423,10 +537,29 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
             j.get("extracted", ""),
             "是" if verified_ok else "",
             missing,
+            j.get("zero_reason", ""),
         ])
 
     # 证据留痕切片（会话级 → 运行级）——血缘表与"来源搜索"列的归因基础
     sliced, slice_kept, slice_skipped = slice_evidence(evidence, journal_queries)
+
+    # 零提取审计与收尾护栏（2026-09-09）：按查询词从留痕取结果 URL 域名，
+    # 与最终清单/垃圾域黑名单交叉分类；enforce_quotas 时拦截客观矛盾
+    # （哨兵 1 配额、哨兵 2 拒收留痕、哨兵 3 理由与域名证据一致）
+    urls_by_query: dict[str, list] = {}
+    for line in sliced.splitlines():
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        q = line_query(payload)
+        if q:
+            urls_by_query.setdefault(q, []).extend(result_urls(payload))
+    kept_domains = {_domain(str(s.get("url") or "")) for s in kept}
+    zero_audit = _zero_extraction_audit(zero_search_rows, urls_by_query, kept_domains)
+    if enforce_quotas:
+        _check_node_quota(journal, nodes)
+        _check_zero_reason_violations(zero_audit)
 
     unverified = [
         (str(item.get("name") or "未命名"), str(item.get("note") or "未说明"))
@@ -435,8 +568,9 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     ]
 
     # 失败路径：搜索过（journal 非空）却 0 候选 → 疑似搜索工具异常，
-    # 中止并保留 raw.json 供人工检查（两路方案失败路径，见 docs/02 附录决策集）
-    if len(all_candidates) == 0 and journal_rows:
+    # 中止并保留 raw.json 供人工检查（两路方案失败路径，见 docs/02 附录决策集）。
+    # 按过滤前计数判断——全部候选被政策过滤是合法结果，不得误报工具异常。
+    if candidates_pre_filter == 0 and journal_rows:
         raise AutoSourceError(
             "搜索过（journal 非空）但候选为 0——疑似搜索工具异常，"
             "按方案中止处理；raw.json 已保留供人工检查")
@@ -453,7 +587,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     summary = {
         "domain": domain,
         "timestamp": timestamp,
-        "total_found": len(all_candidates),
+        "total_found": candidates_pre_filter,  # 过滤前计数：候选总数 = 过滤移除 + 最终收录（算术自洽）
         "removed_duplicates": removed,
         "ungrounded": ungrounded,
         "kept": len(kept),
@@ -478,6 +612,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "sources_broken": sources_broken,
+        "zero_audit": zero_audit,
+        "garbage_filtered": garbage_filtered,
     }
 
     base = Path(out_dir)
@@ -528,7 +664,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
 
 
 def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] = None,
-         now: Optional[datetime] = None) -> dict:
+         now: Optional[datetime] = None, enforce_quotas: bool = True) -> dict:
     """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/04）。
 
     store.jsonl 承载增量条目、搜索日志与清单核对结果（type=knowledge，2026-09-08
@@ -536,10 +672,15 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     承载 domain/nodes/model/知识清单声明态（阶段 0-1）。组装是确定性环节，由脚本
     完成——复用 run_pipeline() 全链路，逻辑一行不改，只换入口。
 
+    搜索日志按（phase, node, query）末次胜出组装（2026-09-09 收尾护栏配套）——
+    补录 zero_reason 时重传同键行即覆盖，append-only 语义不变。
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
     违约未调用 record_sources 时失败响亮，不再静默丢数据）。
     清单了结哨兵：声明清单项在 store 中无核对记录 → 拒绝折叠并点名（漏调
     record_knowledge 同样响亮；2026-09-08 前归档的 manifest 最终核对态走旧路径兜底）。
+    收尾护栏三哨兵（enforce_quotas，2026-09-09）：配额（每节点增量搜索 ≥16）、
+    拒收留痕（零提取必须带 zero_reason）、理由与域名证据一致——在 run_pipeline
+    内、目录重命名前拦截。
     失败发生在目录重命名之前——运行目录保持 run_ 原名，修正后可安全重跑（幂等）。
     成功后 store/manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）。
     """
@@ -563,10 +704,18 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     sources = [{k: v for k, v in r.items() if k not in ("type", "node", "ts", "source_type_raw")}
                for r in records if r.get("type") == "source"]
     searches = [r for r in records if r.get("type") == "search"]
-    journal = [{"phase": s.get("phase", ""), "node": s.get("node", ""),
-                "query": s.get("query", ""), "results": s.get("results", ""),
-                "extracted": s.get("extracted", ""), "verified": s.get("verified", "")}
-               for s in searches]
+    # 搜索日志按（phase, node, query）末次胜出组装（2026-09-09 收尾护栏配套）：
+    # 补录 zero_reason 时重传同键行即覆盖——append-only 语义不变，重复行不进 journal
+    journal_latest: dict[tuple, dict] = {}
+    for s in searches:
+        journal_latest[(str(s.get("phase") or ""), str(s.get("node") or ""),
+                        str(s.get("query") or ""))] = {
+            "phase": s.get("phase", ""), "node": s.get("node", ""),
+            "query": s.get("query", ""), "results": s.get("results", ""),
+            "extracted": s.get("extracted", ""), "verified": s.get("verified", ""),
+            "zero_reason": s.get("zero_reason", ""),
+        }
+    journal = list(journal_latest.values())
     extracted_total = 0
     for j in journal:
         # 防截断哨兵只对增量/扩量轮计数（2026-09-02 收窄触发域）：
@@ -634,7 +783,8 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     raw_path = run_dir_path / "raw.json"
     raw_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    summary = run_pipeline(str(raw_path), out_dir=out_dir, evidence_log=evidence_log, now=now)
+    summary = run_pipeline(str(raw_path), out_dir=out_dir, evidence_log=evidence_log,
+                           now=now, enforce_quotas=enforce_quotas)
 
     # run() 成功时目录已整体重命名——store/manifest 随目录移动，路径重新指向
     # 新目录后归档进 intermediate/ 并删除原件（2026-09-01 修复：此前 store 漏归档，
@@ -656,6 +806,9 @@ def summary_text(summary: dict) -> str:
              f"候选总数: {summary['total_found']}  去重移除: {summary['removed_duplicates']}"
              f"  证据校验移除: {summary['ungrounded']}"
              f"  最终收录: {summary['kept']}"]
+    if summary.get("garbage_filtered"):
+        lines.append(f"垃圾域过滤移除: {summary['garbage_filtered']} 条"
+                     "（名单见 store.GARBAGE_DOMAINS）")
     if summary["invalid"]:
         lines.append(f"无效记录(缺名称/URL): {summary['invalid']}")
     if summary["unmatched"]:
@@ -706,6 +859,18 @@ def summary_text(summary: dict) -> str:
         lines.append("未验证清单: 无")
     if summary["journal_count"]:
         lines.append(f"搜索日志: {summary['journal_count']} 次搜索（见 intermediate/搜索日志.csv）")
+    zero = summary.get("zero_audit")
+    if zero and zero["total"]:
+        cat_str = " / ".join(f"{k} {v}" for k, v in zero["categorized"].items()) \
+            if zero["categorized"] else "（分类无数据）"
+        lines.append(f"零提取审计: {zero['total']} 条零提取（{cat_str}）")
+        suspects = zero["suspects"]
+        if suspects:
+            lines.append("疑似漏收清单（结果域名不在清单且非垃圾域——供人工复核）:")
+            for node, query, domains, reason in suspects[:30]:
+                lines.append(f"  - [{node}] {query} | 域名: {domains} | 理由: {reason or '无'}")
+            if len(suspects) > 30:
+                lines.append(f"  …等共 {len(suspects)} 条（完整清单见搜索日志的零提取理由列）")
     if summary["outdir"]:
         if summary.get("lineage_rows"):
             lines.append(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")
