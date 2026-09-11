@@ -1753,13 +1753,15 @@ class TestFinalizeFold:
 
     FOLD_NODES = ["AI训练GPU", "图形渲染GPU", "服务器CPU"]
 
-    def _manifest(self, run_dir: Path, knowledge=None):
+    def _manifest(self, run_dir: Path, knowledge=None, vendors=None):
         data = {"domain": "算力服务器", "nodes": self.FOLD_NODES, "model": "test-model",
                 "knowledge": knowledge if knowledge is not None else [
                     {"name": "K1", "node": "AI训练GPU", "verified": True,
                      "category_path": "算力服务器-GPU服务器-AI训练GPU",
                      "source_type": "官方文档", "granularity": "合集级",
                      "url": "https://k.com/doc", "description": "kd", "reason": "kr"}]}
+        if vendors is not None:
+            data["vendors"] = vendors
         p = run_dir / "manifest.json"
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return p
@@ -1777,6 +1779,12 @@ class TestFinalizeFold:
                "results": 10, "extracted": extracted}
         row.update(kw)
         return row
+
+    def _knowledge_row(self, name, url, source_type="文档"):
+        return {"type": "knowledge", "ts": "t", "node": "AI训练GPU", "name": name,
+                "verified": True, "category_path": "算力服务器-GPU服务器-AI训练GPU",
+                "source_type": source_type, "source_type_raw": source_type,
+                "granularity": "合集级", "url": url, "description": "kd", "reason": "kr"}
 
     def _write_store(self, run_dir: Path, rows):
         p = run_dir / "store.jsonl"
@@ -1831,8 +1839,8 @@ class TestFinalizeFold:
 
     def test_fold_merges_verified_knowledge_records_from_store(self, tmp_path):
         """2026-09-08 架构修订：清单核对结果存 store（type=knowledge），fold 从
-        store 并入 verified 项——废除阶段 5 一次性转写 manifest（214051 实证漏写
-        60 个 verified 字段的事故类别）。manifest 只承载阶段 0-1 声明态清单
+        store 并入 verified 项——废除阶段 6 一次性转写 manifest（214051 实证漏写
+        60 个 verified 字段的事故类别）。manifest 只承载阶段 0-2 声明态清单
         （name/node/预期体裁，无 verified 字段）。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         self._manifest(run_dir, knowledge=[
@@ -1874,6 +1882,44 @@ class TestFinalizeFold:
         assert run_dir.exists()
         assert run_dir.name.startswith("run_")
         assert not (run_dir / "raw.json").exists()
+
+    def test_fold_vendors_field_declared_and_checked(self, tmp_path):
+        """2026-09-11 阶段 1（厂商官网）独立成段：manifest 两栏分装——knowledge 是
+        阶段 3 待验证的清单，vendors 是阶段 1 的厂商清单。收尾对账合并检查两栏。
+        防回潮：厂商项再混进 knowledge，会重新逼出"阶段 3 跳过厂商项"的补丁规则。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir,
+                       knowledge=[{"name": "K1", "node": "AI训练GPU", "预期体裁": "官方文档"}],
+                       vendors=[{"name": "Cisco 官网", "node": "AI训练GPU"},
+                                {"name": "华为 官网", "node": "AI训练GPU"}])
+        self._write_store(run_dir, [
+            self._search_row(phase="验证搜索", query="K1 官网", extracted=0),
+            self._knowledge_row("K1", "https://k.com/doc"),
+            self._knowledge_row("Cisco 官网", "https://cisco.com/", source_type="官网")])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"},
+                                             {"url": "https://cisco.com/", "name": "Cisco 官网"}])
+        # 华为 官网 声明了但没录 → 拒绝收尾并点名
+        with pytest.raises(ValueError, match="华为 官网"):
+            fold(str(run_dir), evidence_log=str(evidence),
+                 out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+
+    def test_fold_vendors_recorded_pass_and_merged(self, tmp_path):
+        """vendors 栏全部录毕 → 正常收尾，厂商官网页并入最终清单（收尾时清单由
+        store 核对记录重建，不依赖 manifest）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir,
+                       knowledge=[{"name": "K1", "node": "AI训练GPU", "预期体裁": "官方文档"}],
+                       vendors=[{"name": "Cisco 官网", "node": "AI训练GPU"}])
+        self._write_store(run_dir, [
+            self._search_row(phase="验证搜索", query="K1 官网", extracted=0),
+            self._knowledge_row("K1", "https://k.com/doc"),
+            self._knowledge_row("Cisco 官网", "https://cisco.com/", source_type="官网")])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"},
+                                             {"url": "https://cisco.com/", "name": "Cisco 官网"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["list_verified"] == "2/2"
+        assert summary["kept"] == 2
 
     def test_fold_manifest_carried_knowledge_still_works(self, tmp_path):
         """旧路径兜底：store 无 knowledge 记录、manifest 清单带核对字段
@@ -2150,7 +2196,8 @@ class TestZeroReasonSentry(_SentinelFoldBase):
 
 
 class TestZeroReasonContradiction(_SentinelFoldBase):
-    """哨兵 3：zero_reason 与结果域名证据矛盾拦截 + 疑似漏收审计清单。"""
+    """哨兵 3：zero_reason 与结果域名证据矛盾拦截（2026-09-11：分类计数与疑似漏收
+    审计清单随之删除——清单是"人工复核"输出，已下线）。"""
 
     def test_reason_claims_collected_but_domains_not_in_list_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
@@ -2182,29 +2229,19 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
         query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
         summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert not run_dir.exists()
-        assert summary["zero_audit"]["categorized"] == {"已收": QUOTA_N, "垃圾域": QUOTA_N}
-        assert summary["zero_audit"]["suspects"] == []
         from postprocess import summary_text
         assert "零提取审计" in summary_text(summary)
 
-    def test_suspects_tracked_but_not_dumped(self, tmp_path):
-        """疑似漏收（域名不在清单且非垃圾域）不拦截，但**不铺进汇总**（2026-09-10）：
-        该分类只是"无法自动核对"的兜底——模型按判据正常拒收的资讯/学术页也会落进来
-        （172015/180530 两轮实测：109 条疑似漏收里绝大多数是误报），铺开就是几百行
-        噪声。数据留在 summary["zero_audit"] 里供工具按需查，汇总只出计数。"""
+    def test_zero_reason_contradiction_not_flagged_when_clean(self, tmp_path):
+        """理由与域名证据一致（无矛盾）时 violations 为空——哨兵 2/3 不误报。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", QUOTA_N, zero_reason="无主题边界") + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
-        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(QUOTA_N)}
+        query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
         summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
-        assert not run_dir.exists()
-        assert summary["zero_audit"]["categorized"]["疑似漏收"] == QUOTA_N
-        assert len(summary["zero_audit"]["suspects"]) == QUOTA_N  # 数据仍在（供工具查）
-        from postprocess import summary_text
-        text = summary_text(summary)
-        assert "疑似漏收清单" not in text  # 防回潮：不得再铺开
-        assert "example.org" not in text
+        assert summary["zero_audit"]["violations"] == []
 
 
 class TestGarbageFilter(_SentinelFoldBase):

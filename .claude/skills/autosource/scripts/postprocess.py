@@ -3,7 +3,7 @@
 分工原则：LLM 只做语义判断（拆解/清单/搜索/提取），一切确定性环节由脚本保证。
 当前契约（docs/04 存储架构改造，2026-08-31 验收）：
 - 数据落盘走 MCP 四工具（store.jsonl，见 store.py），元数据走 manifest.json
-  （模型 Write 两次：阶段 0-1 声明版、阶段 5 最终核对态）
+  （模型 Write 两次：阶段 0-2 声明版、阶段 6 最终核对态）
 - 收尾由 finalize 工具调用本模块 fold()——读 store + manifest 组装等价
   raw.json 后复用 run_pipeline() 全链路（逻辑一行不改，只换入口）
 - 旧 raw.json CLI 路径保留兼容（历史轮次/排障）
@@ -19,8 +19,8 @@ run_pipeline() 全链路：
 - 域名 + 名称联合去重；CSV 用标准库导出（UTF-8 BOM，转义交给标准库），
   写入时剥离 URL 尾部的引用序号锚点（#数字，markdown 引用记号）
 - 各节点候选数与体裁分布写 stats CSV（纯清单统计表：每节点一行 + 总计行）
-- 零提取审计与收尾护栏（2026-09-09）：增量/扩量零提取按结果域名分类
-  （已收/垃圾域/疑似漏收），enforce_quotas 时拦截配额不足（每节点增量搜索
+- 零提取审计与收尾护栏（2026-09-09）：核对增量/扩量零提取的留痕理由与结果域名证据，
+  enforce_quotas 时拦截配额不足（每节点增量搜索
   ≥20）、拒收无留痕（zero_reason）、理由与域名证据矛盾——fold/finalize 路径
   开启，旧 CLI 兼容路径关闭
 - 数据血缘（lineage.py）：从切片留痕与最终收录 join 生成溯源.csv，数据源清单
@@ -35,7 +35,7 @@ store.py 与 mcp_server.py 按需引用，导入面经本模块重导出保持�
 用法:
     python postprocess.py --prepare                    # 流程开始：预留唯一运行目录并打印路径
     python postprocess.py <运行目录>/raw.json ...      # 旧 raw.json 契约（CLI 兼容路径；新契约由 finalize 折叠）
-    python postprocess.py --rename-report <输出目录>    # 阶段 6 最后：报告命名（内容由模型写入）
+    python postprocess.py --rename-report <输出目录>    # 阶段 7 最后：报告命名（内容由模型写入）
     python postprocess.py outputs/raw.json ...         # 兼容旧固定路径（父目录非 run_ 时走原逻辑）
     可选参数: [--evidence-log PATH] [--out-dir DIR] [--keep-raw]
 
@@ -111,7 +111,7 @@ MIN_INCREMENTAL_SEARCHES = 20
 def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
     """预留本次运行目录（run_{时间戳}/，同秒加 _N 后缀）并返回路径字符串。
 
-    流程开始时调用（--prepare）：目录在流程开头即存在，阶段 0-1 把 manifest.json
+    流程开始时调用（--prepare）：目录在流程开头即存在，阶段 0-2 把 manifest.json
     写入其中，收尾时 fold 组装等价 raw.json、脚本读领域词把目录重命名为最终交付
     目录。同时写入 .session_id 会话标记——hook 按标记把证据留痕写进本目录的
     evidence.jsonl（运行级归属，outputs/ 顶层零平铺文件）；收尾时随目录
@@ -322,40 +322,23 @@ def classify_query_scope(query: str, domain: str, nodes: list[str]) -> str:
 
 def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list],
                            kept_domains: set[str]) -> dict:
-    """零提取审计（哨兵 2/3 的数据面）：逐条分类结果域名并核对留痕理由。
+    """零提取审计（哨兵 2/3 的数据面）：核对留痕理由与结果域名证据。
 
     zero_rows = [(node, query, zero_reason), ...]（增量/扩量轮提取为 0 的行）。
-    返回 {total, categorized, suspects, violations}：
-    - categorized：已收/垃圾域/混合/疑似漏收/无留痕URL 计数
-    - suspects：疑似漏收行（域名不在清单且非垃圾域）——审计清单，不拦截
+    返回 {total, violations}：
     - violations：客观矛盾——缺 zero_reason；理由声称已收但域名不在清单；
       理由声称垃圾域但域名非垃圾域——enforce 时拦截（拒收必须留痕可核）
     """
-    categorized: dict[str, int] = {}
-    suspects: list[tuple] = []
     violations: list[tuple] = []
-
-    def bump(key: str) -> None:
-        categorized[key] = categorized.get(key, 0) + 1
 
     for node, query, reason in zero_rows:
         domains = {_domain(u) for u in urls_by_query.get(query, [])}
         if not domains:
-            bump("无留痕URL")
             if not reason:
                 violations.append((node, query, reason, "无 zero_reason"))
             continue
         kept_hits = sum(1 for d in domains if d in kept_domains)
         garbage_hits = sum(1 for d in domains if is_garbage_domain(d))
-        if kept_hits == len(domains):
-            cat = "已收"
-        elif garbage_hits == len(domains):
-            cat = "垃圾域"
-        elif kept_hits + garbage_hits == len(domains):
-            cat = "混合"
-        else:
-            cat = "疑似漏收"
-        bump(cat)
         if not reason:
             violations.append((node, query, reason, "无 zero_reason"))
         elif ("已收" in reason or "重复" in reason) and kept_hits == 0:
@@ -364,10 +347,7 @@ def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list
         elif "垃圾" in reason and garbage_hits == 0:
             violations.append((node, query, reason,
                                f"理由声称垃圾域，但结果域名 {sorted(domains)} 非垃圾域"))
-        if cat == "疑似漏收":
-            suspects.append((node, query, "; ".join(sorted(domains)), reason))
-    return {"total": len(zero_rows), "categorized": categorized,
-            "suspects": suspects, "violations": violations}
+    return {"total": len(zero_rows), "violations": violations}
 
 
 def _check_node_quota(journal: list, nodes: list[str]) -> None:
@@ -684,8 +664,8 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/04）。
 
     store.jsonl 承载增量条目、搜索日志与清单核对结果（type=knowledge，2026-09-08
-    架构修订：核对结果随验证过程落库，废除阶段 5 一次性转写 manifest）；manifest.json
-    承载 domain/nodes/model/知识清单声明态（阶段 0-1）。组装是确定性环节，由脚本
+    架构修订：核对结果随验证过程落库，废除阶段 6 一次性转写 manifest）；manifest.json
+    承载 domain/nodes/model/知识清单声明态（阶段 0-2）。组装是确定性环节，由脚本
     完成——复用 run_pipeline() 全链路，逻辑一行不改，只换入口。
 
     搜索日志按（phase, node, query）末次胜出组装（2026-09-09 收尾护栏配套）——
@@ -704,7 +684,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     manifest_path = run_dir_path / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"manifest.json 不存在: {manifest_path}（阶段 0-1 应先 Write manifest）")
+            f"manifest.json 不存在: {manifest_path}（阶段 0-2 应先 Write manifest）")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -743,10 +723,14 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
         except (TypeError, ValueError):
             pass
     knowledge_list = manifest.get("knowledge") if isinstance(manifest.get("knowledge"), list) else []
+    # 厂商清单（2026-09-11 阶段 1 独立成段）：与 knowledge 分栏声明——knowledge 是
+    # 阶段 3 待验证的清单，vendors 是阶段 1 已验完的厂商清单；对账时两栏合并，
+    # 厂商漏录同样拒绝收尾（分栏的用处：阶段 3 不必再写"厂商项跳过"的补丁规则）
+    vendors = manifest.get("vendors") if isinstance(manifest.get("vendors"), list) else []
     # 清单核对结果（2026-09-08 架构修订）：核对结果随验证过程经 record_knowledge
-    # 落库，fold 从 store 取末次记录与声明清单对账——废除"会话暂存 + 阶段 5
+    # 落库，fold 从 store 取末次记录与声明清单对账——废除"会话暂存 + 阶段 6
     # 一次性转写 manifest"（214051 实证漏写 60 个 verified 字段的事故类别）。
-    declared = knowledge_list
+    declared = knowledge_list + vendors
     declared_names = {str(k.get("name")) for k in declared
                       if isinstance(k, dict) and k.get("name")}
     knowledge_records = [r for r in records if r.get("type") == "knowledge"]
@@ -907,7 +891,7 @@ def main() -> None:
         pass
 
     parser = argparse.ArgumentParser(description="AutoSource 后处理流水线")
-    parser.add_argument("raw_json", nargs="?", help="raw.json 路径（阶段 5 写入运行目录内；--prepare 模式下省略）")
+    parser.add_argument("raw_json", nargs="?", help="raw.json 路径（阶段 6 写入运行目录内；--prepare 模式下省略）")
     parser.add_argument("--prepare", action="store_true",
                         help="预留本次运行目录（outputs/run_{时间戳}/，每次运行唯一）并打印路径——流程开始时调用")
     parser.add_argument("--evidence-log", default=None,
@@ -915,7 +899,7 @@ def main() -> None:
     parser.add_argument("--out-dir", default="outputs", help="输出根目录（默认 outputs）")
     parser.add_argument("--keep-raw", action="store_true", help="保留 raw.json 与证据留痕不删除")
     parser.add_argument("--rename-report", metavar="DIR",
-                        help="把 DIR/分析报告.md 重命名为 {目录名}_分析报告.md（报告内容由模型写入，文件名由脚本命名）——阶段 6 写报告后调用")
+                        help="把 DIR/分析报告.md 重命名为 {目录名}_分析报告.md（报告内容由模型写入，文件名由脚本命名）——阶段 7 写报告后调用")
     args = parser.parse_args()
 
     if args.prepare:

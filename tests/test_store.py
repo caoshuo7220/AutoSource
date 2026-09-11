@@ -129,7 +129,7 @@ class TestAppendLoad:
 
 class TestRecordKnowledge:
     """清单核对结果入库（2026-09-08 架构修订：验证结果随验证过程落库，废除
-    "会话暂存 + 阶段 5 一次性转写 manifest"——214051 实证漏写 60 个 verified
+    "会话暂存 + 阶段 6 一次性转写 manifest"——214051 实证漏写 60 个 verified
     字段，手工转写 65 条 JSON 是必然出错的事故类型，且与压缩丢失风险同源）。"""
 
     def _entry(self, **kw) -> dict:

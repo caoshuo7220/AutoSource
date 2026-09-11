@@ -7,7 +7,7 @@ coverage(run_dir)                  — 每节点"已收 vs 提取"只读计数�
 finalize(run_dir)                  — 收尾折叠（postprocess.fold），返回汇总文本
 
 run_dir 为初始化 --prepare 打印的运行目录（outputs/run_{时间戳}/）；
-manifest.json（阶段 0-1 由模型 Write）与 store.jsonl（本服务持有、模型不可见）
+manifest.json（阶段 0-2 由模型 Write）与 store.jsonl（本服务持有、模型不可见）
 都在 run_dir 内。分工：模型只传语义判断结果，持久化/校验/对账/折叠全部在本服务。
 
 模型最大单次输出 = record 批次（一个节点条目量 15-25KB）——写入截断在机制上
@@ -111,9 +111,9 @@ def _manifest_nodes(run_dir: Path) -> list[str]:
 def record_sources(run_dir: str, entries: list) -> str:
     """把一批新增数据源条目落库（入库即验）。
 
-    何时调用：每完成一批搜索并提取新条目后调用一次——阶段 3 每节点基底 16 次
-    搜索完成后一批、扩充 4 次完成后再落一次；阶段 4 每节点收敛后一批；阶段 2 不需要
-    （清单核对结果走 record_knowledge，见 SKILL 阶段 2/4）。条目字段：name/category_path/source_type/
+    何时调用：每完成一批搜索并提取新条目后调用一次——阶段 4 每节点基底 16 次
+    搜索完成后一批、扩充 4 次完成后再落一次；阶段 5 每节点收敛后一批；阶段 3 不需要
+    （清单核对结果走 record_knowledge，见 SKILL 阶段 3/5）。条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
     垃圾域/低价值聚合平台（store.GARBAGE_DOMAINS 平台级名单）入库即拒——新闻门户、
@@ -135,7 +135,7 @@ def record_sources(run_dir: str, entries: list) -> str:
 def record_search(run_dir: str, entries: list) -> str:
     """把一批搜索日志落库（替代 raw.json 的 journal 字段）。
 
-    何时调用：阶段 2 每 ~10-15 次验证搜索一批；阶段 3/4 每节点完成时一批。
+    何时调用：阶段 3 每 ~10-15 次验证搜索一批；阶段 4/5 每节点完成时一批。
     每项 {phase, node, query, results, extracted, zero_reason?}——query 必须照抄实际
     发出的查询词（脚本在收尾时逐字比对证据留痕，不在则标注"证据缺失"）。
     zero_reason（2026-09-09 收尾护栏）：增量/扩量搜索提取为 0 时必填拒收理由
@@ -153,15 +153,16 @@ def record_search(run_dir: str, entries: list) -> str:
 @mcp.tool()
 def record_knowledge(run_dir: str, entries: list) -> str:
     """把一批知识清单核对结果落库（2026-09-08 架构修订：核对结果随验证过程落库，
-    废除"会话暂存 + 阶段 5 一次性转写 manifest"——手工转写 65 条 JSON 曾漏写 60
+    废除"会话暂存 + 阶段 6 一次性转写 manifest"——手工转写 65 条 JSON 曾漏写 60
     个 verified 字段）。
 
-    何时调用：阶段 2 每验证 ~10-15 项后一批（与 record_search 同节奏）；阶段 4
-    扩量轮定案项一批。每项 {name, node, verified, ...}：
+    何时调用：阶段 1 每 ~10-15 个厂商官网核对后一批；阶段 3 每验证 ~10-15 项后
+    一批（与 record_search 同节奏）；阶段 5 扩量轮定案项一批。每项
+    {name, node, verified, ...}：
     - verified=true：带 category_path/source_type/granularity/url/description/
       reason，URL 逐字照抄搜索结果（入库即验证据链，不在则当场拒绝）
-    - verified=false：带 note（"疑似无效机构"/"未找到官方入口"），不带 URL
-    同名重录 = 状态更新（收尾折叠取末次）。清单项全部了结是阶段 4 的终止条件——
+    - verified=false：带 note（"疑似无效机构"/"未找到官方入口"/"未找到官网"/"仅找到单篇载体"），不带 URL
+    同名重录 = 状态更新（收尾折叠取末次）。清单项全部了结是阶段 5 的终止条件——
     收尾时声明清单中无核对记录的项会拒绝折叠并点名。
 
     返回 JSON：{"accepted": 入库数, "rejected": [{index, name, reason}],
@@ -177,7 +178,7 @@ def record_knowledge(run_dir: str, entries: list) -> str:
 def coverage(run_dir: str) -> str:
     """查每节点"已收 vs 提取"的缺口（只读，不改数据）。
 
-    何时调用：阶段 4 扩量判断与收尾前自查。missing 是粗略缺口信号（提取数含
+    何时调用：阶段 5 扩量判断与收尾前自查。missing 是粗略缺口信号（提取数含
     去重前与跨节点顺路发现、已收数是幂等去重后的入库数，两口径天然有差），
     小额 missing 不触发补搜；接近该节点一整批提取量才怀疑漏调 record_sources。
     只测条数缺失；体裁/来源维度是否单一由模型在会话内判断（依据是它刚提取的内容）。
@@ -195,7 +196,7 @@ def finalize(run_dir: str) -> str:
     """收尾折叠：读 store + manifest → 复用 postprocess 全链路（证据终检/清单
     并入/去重/CSV/stats/溯源/搜索日志/目录重命名/归档）→ 返回汇总文本。
 
-    何时调用：阶段 6 收尾、全部搜索与记录完成后调用一次。之后写分析报告并
+    何时调用：阶段 7 收尾、全部搜索与记录完成后调用一次。之后写分析报告并
     运行 --rename-report（报告流程不变）。
 
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 时拒绝折叠并报错（模型漏调
@@ -204,7 +205,6 @@ def finalize(run_dir: str) -> str:
     收尾护栏三哨兵（2026-09-09）：① 配额——每节点增量搜索 ≥20 次，不足拒绝
     并点名；② 拒收留痕——增量/扩量零提取搜索必须带 zero_reason 理由；
     ③ 理由与证据一致——声称已收须域名在清单、声称垃圾域须命中垃圾域黑名单。
-    疑似漏收（域名不在清单且非垃圾域）进汇总审计清单，不拦截。
     失败发生在目录重命名前，修正后可安全重跑。成功时 store/manifest 归档进 intermediate/。
     """
     _ensure_healthy(run_dir)

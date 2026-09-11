@@ -2,8 +2,8 @@
 
 store 承载三类记录：增量发现条目（type=source）、搜索日志（type=search）、
 清单核对结果（type=knowledge，2026-09-08 架构修订：验证结果随验证过程落库，
-废除"会话暂存 + 阶段 5 一次性转写 manifest"——214051 实证漏写 60 个 verified
-字段的事故类别；manifest 只承载阶段 0-1 声明态清单，收尾折叠时由 postprocess.fold
+废除"会话暂存 + 阶段 6 一次性转写 manifest"——214051 实证漏写 60 个 verified
+字段的事故类别；manifest 只承载阶段 0-2 声明态清单，收尾折叠时由 postprocess.fold
 把 store 核对记录与声明对账并入）。
 分工原则：LLM 只做语义判断，持久化与校验全部由本模块（脚本）保证。
 
@@ -401,7 +401,7 @@ def record_search(store_path: Path, entries: list) -> int:
 
 def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> dict:
     """清单核对结果批量入库（2026-09-08 架构修订：清单核对结果不再"会话暂存 +
-    阶段 5 一次性转写 manifest"——214051 实证漏写 60 个 verified 字段，65 条
+    阶段 6 一次性转写 manifest"——214051 实证漏写 60 个 verified 字段，65 条
     JSON 手工转写是必然出错的事故类型，且与压缩丢失风险同源；改为随验证过程
     分批落库，与增量条目/搜索日志同一机制）。
 
