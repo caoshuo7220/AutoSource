@@ -327,6 +327,12 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
             rejected.append({"index": i, "name": name, "url": url,
                              "reason": "垃圾域/低价值聚合平台，不收"})
             continue
+        if nodes and leaf_node(str(e.get("category_path") or ""), nodes) is None:
+            rejected.append({"index": i, "name": name, "url": url,
+                             "reason": "category_path 未匹配任何声明节点——应填**节点名本身**"
+                                       "（如「工业以太网交换机」），不带条目名、不用 / 分隔"
+                                       "（172015 轮实测：填成「节点/条目名」致 108 条全部归不到节点）"})
+            continue
         if not evidence_ok:
             rejected.append({"index": i, "name": name, "url": url,
                              "reason": f"证据留痕不存在: {evidence_path}"

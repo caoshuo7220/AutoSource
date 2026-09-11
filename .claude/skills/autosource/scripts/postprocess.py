@@ -21,7 +21,7 @@ run_pipeline() 全链路：
 - 各节点候选数与体裁分布写 stats CSV（纯清单统计表：每节点一行 + 总计行）
 - 零提取审计与收尾护栏（2026-09-09）：增量/扩量零提取按结果域名分类
   （已收/垃圾域/疑似漏收），enforce_quotas 时拦截配额不足（每节点增量搜索
-  ≥16）、拒收无留痕（zero_reason）、理由与域名证据矛盾——fold/finalize 路径
+  ≥20）、拒收无留痕（zero_reason）、理由与域名证据矛盾——fold/finalize 路径
   开启，旧 CLI 兼容路径关闭
 - 数据血缘（lineage.py）：从切片留痕与最终收录 join 生成溯源.csv，数据源清单
   加"来源搜索"列（首次出现查询词）——行级溯源全部确定性推导，LLM 零新增职责
@@ -103,7 +103,9 @@ STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失", "零提取理由"]
 
 # 哨兵 1（2026-09-09 收尾护栏）：每节点增量发现搜索下限——配额缩水/谎报过不了收尾
-MIN_INCREMENTAL_SEARCHES = 16
+# 2026-09-10：16 → 20（基底 16 + 扩充固定 4）——16 时模型读着校验线把预算定到 16、
+# 扩充批整体跳过（思考块实证），固定 4 次扩充必须有同等强度的校验才落得下去
+MIN_INCREMENTAL_SEARCHES = 20
 
 
 def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
@@ -134,13 +136,22 @@ def _domain(url: str) -> str:
 
 
 def deduplicate(sources: list[dict]) -> list[dict]:
-    """按域名 + 名称去重，保留首次出现，镜像站（不同域名）保留。"""
+    """按域名 + 名称去重，保留首次出现，镜像站（不同域名）保留。
+
+    URL 剥离引用序号锚点后相同同样判重（2026-09-11）：同一入口被
+    record_sources 与 record_knowledge 各记一次、两次名称措辞不同时，
+    (域名,名称) 键不命中——200054 轮交付清单因此虚高 116 条/16%；且输出 CSV
+    剥离纯数字锚点，只在原始串上判重会留下两行完全相同的 URL。
+    """
     seen: set[tuple[str, str]] = set()
+    seen_urls: set[str] = set()
     result: list[dict] = []
     for s in sources:
+        url = strip_citation_anchors(s["url"])
         key = (_domain(s["url"]), s["name"])
-        if key not in seen:
+        if key not in seen and url not in seen_urls:
             seen.add(key)
+            seen_urls.add(url)
             result.append(s)
     return result
 
@@ -404,7 +415,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。
 
     enforce_quotas（2026-09-09 收尾护栏）：fold/finalize 路径开启三哨兵——
-    ① 每节点增量搜索 ≥16；② 增量/扩量零提取必须带 zero_reason（拒收留痕）；
+    ① 每节点增量搜索 ≥20；② 增量/扩量零提取必须带 zero_reason（拒收留痕）；
     ③ 理由与结果域名证据一致（声称已收须域名在清单、声称垃圾域须命中黑名单）。
     旧 CLI 兼容路径（历史轮次复盘重跑）缺省关闭，不拦。
     """
@@ -445,8 +456,9 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     # 证据校验：候选 URL 必须逐字出现在证据留痕中（PostToolUse hook 系统记录）。
     # 运行级归属优先（run_*/evidence.jsonl，hook 按会话标记写入），否则回退
     # 会话级共享路径（旧流程/手动调用）
-    log_path = Path(evidence_log) if evidence_log else (
-        run_evidence_log(raw.parent) or Path(default_evidence_log()))
+    run_scoped_log = None if evidence_log else run_evidence_log(raw.parent)
+    log_path = (Path(evidence_log) if evidence_log
+                else (run_scoped_log or Path(default_evidence_log())))
     if (valid or merged or journal) and not log_path.exists():
         raise FileNotFoundError(
             f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
@@ -540,8 +552,12 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
             j.get("zero_reason", ""),
         ])
 
-    # 证据留痕切片（会话级 → 运行级）——血缘表与"来源搜索"列的归因基础
-    sliced, slice_kept, slice_skipped = slice_evidence(evidence, journal_queries)
+    # 证据留痕切片（会话级 → 运行级）——血缘表与"来源搜索"列的归因基础。
+    # 运行级留痕即本运行专属、不混入其他运行，全量归档不切片——切片会连带丢掉
+    # 模型漏记账的搜索留痕（2026-09-11 实证：200054 轮记账漏 37%，交付清单
+    # 29% 的 URL 归档后无法溯源）；会话级共享留痕仍按本运行查询词切片。
+    sliced, slice_kept, slice_skipped = slice_evidence(
+        evidence, None if run_scoped_log else journal_queries)
 
     # 零提取审计与收尾护栏（2026-09-09）：按查询词从留痕取结果 URL 域名，
     # 与最终清单/垃圾域黑名单交叉分类；enforce_quotas 时拦截客观矛盾
@@ -678,7 +694,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     违约未调用 record_sources 时失败响亮，不再静默丢数据）。
     清单了结哨兵：声明清单项在 store 中无核对记录 → 拒绝折叠并点名（漏调
     record_knowledge 同样响亮；2026-09-08 前归档的 manifest 最终核对态走旧路径兜底）。
-    收尾护栏三哨兵（enforce_quotas，2026-09-09）：配额（每节点增量搜索 ≥16）、
+    收尾护栏三哨兵（enforce_quotas，2026-09-09）：配额（每节点增量搜索 ≥20）、
     拒收留痕（零提取必须带 zero_reason）、理由与域名证据一致——在 run_pipeline
     内、目录重命名前拦截。
     失败发生在目录重命名之前——运行目录保持 run_ 原名，修正后可安全重跑（幂等）。
@@ -852,7 +868,7 @@ def summary_text(summary: dict) -> str:
     if summary["journal_skipped"]:
         lines.append(f"警告: {summary['journal_skipped']} 条 journal 记录结构损坏被跳过")
     if summary["unverified"]:
-        lines.append("未验证清单（人工交接单）:")
+        lines.append("未验证清单:")
         for name, note in summary["unverified"]:
             lines.append(f"  - {name}（{note}）")
     else:
@@ -861,16 +877,8 @@ def summary_text(summary: dict) -> str:
         lines.append(f"搜索日志: {summary['journal_count']} 次搜索（见 intermediate/搜索日志.csv）")
     zero = summary.get("zero_audit")
     if zero and zero["total"]:
-        cat_str = " / ".join(f"{k} {v}" for k, v in zero["categorized"].items()) \
-            if zero["categorized"] else "（分类无数据）"
-        lines.append(f"零提取审计: {zero['total']} 条零提取（{cat_str}）")
-        suspects = zero["suspects"]
-        if suspects:
-            lines.append("疑似漏收清单（结果域名不在清单且非垃圾域——供人工复核）:")
-            for node, query, domains, reason in suspects[:30]:
-                lines.append(f"  - [{node}] {query} | 域名: {domains} | 理由: {reason or '无'}")
-            if len(suspects) > 30:
-                lines.append(f"  …等共 {len(suspects)} 条（完整清单见搜索日志的零提取理由列）")
+        lines.append(f"零提取审计: {zero['total']} 条零提取，全部带拒收理由"
+                     "（构成与明细见 intermediate/搜索日志.csv 的零提取理由列）")
     if summary["outdir"]:
         if summary.get("lineage_rows"):
             lines.append(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")

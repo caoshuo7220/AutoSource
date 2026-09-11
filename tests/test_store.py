@@ -296,6 +296,23 @@ class TestRecordSources:
         assert records[0]["node"] == "AI训练GPU"
         assert records[1]["node"] == "无线网-Wi-Fi"
 
+    def test_category_path_unmatched_node_rejected(self, tmp_path):
+        """2026-09-10 入库即验扩展：category_path 必须匹配声明节点。
+
+        172015 轮模型填成"节点名/条目名"（如 `工业以太网交换机/Westermo 官网`），
+        108 条全部归不到节点、stats 每节点 0 —— 整份交付物的节点维度报废。
+        错格式当场拒绝并提示正确写法。
+        """
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc"])
+        bad = source_entry()
+        bad["category_path"] = "算力服务器/A 文档"
+        result = record_sources(store, [bad], evidence, NODES)
+        assert result["accepted"] == 0
+        assert "节点名本身" in result["rejected"][0]["reason"]
+        ok = source_entry(category_path="无线网-Wi-Fi")
+        assert record_sources(store, [ok], evidence, NODES)["accepted"] == 1
+
     def test_ts_stamped_on_accepted_rows(self, tmp_path):
         """docs/04 §3.1：store 每行由脚本盖时间戳（模型无时钟）——入库记录必须带 ts。"""
         store = tmp_path / "store.jsonl"

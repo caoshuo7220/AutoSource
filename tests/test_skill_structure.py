@@ -94,17 +94,19 @@ def test_model_field_optional_contract():
 
 
 def test_incremental_search_count_per_node():
-    """增量发现每节点基底 16 次（固定 4 + 自由 8 + 实体 4），扩充有界化（09-08 修订：
-    09-07 SOM 轮无限制扩充 489 次撞 1M 上下文墙——扩充改为至多 2 批、批级有效新增 ≥2 才继续、
-    每节点上限 24 次；实体配额 4 为 09-08 用户决策恢复（09-02 曾 4→2、空出并入自由 8→10，
-    现自由回 8、基底 16 不变）。角度池独立成组（六类分行），并新增易失效角度说明。"""
-    assert "每节点**至少 16 次**搜索" in SKILL_MD
-    assert "**固定 4 次实体选题**" in SKILL_MD
-    assert "**扩充（第 1 批必跑，至多 2 批，每节点上限 24 次）**" in SKILL_MD
-    assert "必须先执行第 1 批扩充" in SKILL_MD  # 2026-09-08：首轮实测模型 0 批扩充（把增产并入阶段 4 扩量轮）——第 1 批改必跑，消灭"要不要扩"的决策空间
-    assert "有效新增 0-3 条" in SKILL_MD
+    """增量发现每节点固定 20 次（基底 16 = 固定 4 + 自由 8 + 实体 4，扩充固定 4）。
+    扩充演进：09-01 起按产出不限次数 → 09-07 SOM 轮 489 次撞墙后 09-08 有界化（至多
+    2 批 + 续批判定 + 上限 24）→ 09-10 改固定 4 次（实证 24 次轮的扩充批被整体跳过：
+    模型读着 finalize 的 ≥16 校验线把预算定到 16，续批判定给了"不扩"的决策空间）；
+    实体配额 4 为 09-08 用户决策恢复（09-02 曾 4→2、空出并入自由 8→10，现自由回 8、
+    基底 16 不变）。角度池独立成组（六类分行），并新增易失效角度说明。"""
+    assert "每节点**固定 20 次**搜索（基底 16 次 + 扩充 4 次）" in SKILL_MD
+    assert "**实体 4 次**（本节点搜索过程中新发现的实体）" in SKILL_MD
+    assert "**扩充 4 次**（角度池或实体选题均可）" in SKILL_MD
+    assert "基底 16 次完成后固定执行" in SKILL_MD  # 2026-09-10：固定 4 次——消灭"要不要扩"的决策空间（09-08 必跑第 1 批仍被整体跳过）
+    assert "续批条件" not in SKILL_MD  # 防回潮：批级续批判定已废（模型曾据此跳过扩充）
     assert "扩充不得并入扩量轮执行" in SKILL_MD  # 阶段 3 扩充与阶段 4 扩量轮语义区分（模型曾混淆跳过扩充）
-    assert "**自由 8 次**（**仅中文搜索词**）" in SKILL_MD  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文
+    assert "**自由 8 次**（仅中文搜索词）" in SKILL_MD  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文
     assert "**自由 8 次**" in SKILL_MD
     assert "**角度池**" in SKILL_MD
     assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in SKILL_MD  # 2026-09-09 重构：易失效角度与英文后缀两条事故规则合并上移通用纪律（模式化收敛，阶段 3 留指针）
@@ -146,19 +148,102 @@ def test_storage_contract_mcp_tools():
 def test_finalize_guards_quota_zero_reason_and_evidence():
     """2026-09-09 收尾护栏三哨兵钉桩（155658 轮复盘落地）：① 每节点增量搜索
     ≥16（配额谎报过不了收尾）；② 增量/扩量零提取必填 zero_reason（拒收留痕）；
-    ③ 理由与结果域名证据一致。以及配套的两处纪律：宁多勿缺授权
+    ③ 理由与结果域名证据一致。以及配套的两处纪律：符合判据一律收录
     （打掉"怕清单变杂"的自创拒收借口）、上下文不停靠（打掉停靠与缩水借口）。
     防回潮：这些文本是脚本哨兵的 SKILL 侧契约（postprocess.run_pipeline
     enforce_quotas），删文案会重新打开模型谎报/静默拒收的口子。"""
     assert "**收尾护栏**" in SKILL_MD
-    assert "增量搜索不足 16 次拒绝并点名" in SKILL_MD
+    assert "增量搜索不足 20 次拒绝并点名" in SKILL_MD
     assert "`zero_reason`" in SKILL_MD
     assert "声称已收但域名不在清单" in SKILL_MD
-    assert "**宁多勿缺**" in SKILL_MD
-    assert "符合判据的机构信息载体就收" in SKILL_MD
+    assert "**符合判据的一律收录**" in SKILL_MD
+    assert '不得以"清单会变杂""数量太多""同类已有"为由拒收' in SKILL_MD
     assert "不得以上下文长为由停靠" in SKILL_MD
     assert "不得谎报次数" in SKILL_MD
     assert "末次覆盖" in SKILL_MD  # 补录机制：重传同 phase+node+query 行
+
+
+def test_manifest_knowledge_no_granularity_field():
+    """2026-09-10 文本矛盾修复①：knowledge 字段契约与粒度条打架——字段条写
+    "只含 name/node/预期体裁"，粒度条又要求"声明 granularity"，模型 thinking
+    原话「Hmm, conflict.」后放弃声明、各行其是。定案：粒度与 source_type 同
+    规矩（验证时按实际形态确定），manifest 不声明 granularity。"""
+    assert "manifest 不声明 `granularity`" in SKILL_MD
+    assert "声明 `granularity`（默认合集级）" not in SKILL_MD
+
+
+def test_single_carrier_not_auto_passed():
+    """2026-09-10 文本矛盾修复②③：合集级项只搜到单篇载体时——旧文"以该单篇
+    验证通过"使其不再进扩量轮（扩量轮范围只含未验证项），却又要求"扩量轮换
+    角度专找入口"（范围条款自禁）；且激励倒挂（搜到单篇的不再找入口、什么都
+    没搜到的反被追着换角度找两次）。定案：不算通过 → 按未通过落库 → 扩量轮
+    找入口 → 定案时才以单篇通过。"""
+    assert "**不算通过**" in SKILL_MD
+    assert 'note="仅找到单篇载体"' in SKILL_MD
+    assert "扩量轮换角度专找入口" in SKILL_MD
+    assert '含 note="仅找到单篇载体"的合集级项' in SKILL_MD  # 扩量轮范围①显式纳入
+    assert "**以该单篇通过**（granularity 单篇级）" in SKILL_MD  # 定案条款（阶段 4）
+    assert "**以该单篇验证通过**" not in SKILL_MD  # 防回潮：阶段 2 不得直接判通过
+
+
+def test_unverified_note_values_on_the_spot():
+    """2026-09-10 文本矛盾修复④：阶段 2 未通过项的 note 没有合法取值（两个定案
+    值在阶段 4 才出现）——模型据此决定"不落库、攒到定案再记"，撞墙后 16 项全丢
+    （收尾被清单了结哨兵拦下，靠人工补录救回）。定案：三个取值当场落库，禁止攒。"""
+    assert "note 按当次搜索结果如实取一个" in SKILL_MD
+    assert "不得攒到定案时再记" in SKILL_MD
+    for value in ["未找到官方入口", "仅找到单篇载体", "疑似无效机构"]:
+        assert value in SKILL_MD
+
+
+def test_single_paper_patent_collected_not_rejected():
+    """2026-09-10 判据-执行矛盾修复（用户决策：单篇论文专利肯定要收）——180530 轮
+    实证：49% 零提取里论文/专利类 20 条，理由均为"非机构成体系载体"整批拒收，
+    而判据①明写"论文、专利……单篇同样收录"（模型按"平台准入"标题句的"机构发布的
+    信息载体"盖过了它）。修法：标题句补"单篇技术文件同等收录"、易失效词形把
+    论文/专利移出（其目标就是单篇内容页）、零提取理由禁止"非成体系载体"。"""
+    assert "**成体系载体与单篇技术文件同等收录**" in SKILL_MD
+    assert "**论文、专利角度不受此限**" in SKILL_MD
+    assert '"非成体系载体""只有单篇没有入口"不构成拒收理由' in SKILL_MD
+    assert "论文、专利、标准角度词单独使用" not in SKILL_MD  # 防回潮：论文/专利已移出易失效词形
+
+
+def test_category_path_and_vendor_site_query_contract():
+    """2026-09-10 两条契约（172015 轮实证）：
+    ① `category_path` 写法——模型填成"节点名/条目名"致 108 条全部归不到节点、
+       stats 每节点 0（交付物节点维度报废）→ 契约写死"填节点名本身"，入库即验拒绝；
+    ② 厂商官网项的查询词模板——`{厂商} 文档` 返回深链，首页作为深链前缀会被证据链
+       边界匹配正确拒绝（防截短），首页必须由"官网类"查询独立召回（模型自己在
+       过程中摸到 `{vendor} official website` 有效，但已烧掉大量搜索）。"""
+    assert "**`category_path` 写法**" in SKILL_MD
+    assert "**不带条目名、不用 `/` 分隔**" in SKILL_MD
+    assert "**厂商官网项的首轮查询词固定用 `{厂商名} 官网` / `{vendor} official website`**" in SKILL_MD
+
+
+def test_vendor_official_site_mandatory_and_entry_form():
+    """2026-09-10 厂商官网必收 + 入口形态否定清单（用户决策）——112053 轮实测：
+    606 条里指向根域名的只有 5 条、33 家厂商 0 家有官网条目（判据把首页当"纯导流页"
+    排除，而同一判据却给平台开了"领域专属入口可收"的口子）；且 79 条"官网"里 23 条
+    形态不合格（新闻页 15 / 跟踪参数 4 / 机构介绍页 4 / 打印版 1）。
+    防回潮：删这组文案会重新打开"官网一条没有 + 新闻页冒充入口"。"""
+    assert "**厂商官网首页 / 根域名（含语言首页）可收，且每个厂商必收一条**" in SKILL_MD
+    assert "主题边界看机构、不看页面" in SKILL_MD
+    assert "**厂商项的官网首页必收一条**" in SKILL_MD
+    assert "**以下不算入口**" in SKILL_MD
+    for bad in ["帮助页", "FAQ", "政策条款页", "单篇 PDF", "新闻公告页", "课程页", "机构介绍页"]:
+        assert bad in SKILL_MD
+    assert "`?utm_`" in SKILL_MD
+    assert "官网首页与其文档门户是两个独立条目" in SKILL_MD
+
+
+def test_cross_reference_names_unified():
+    """2026-09-10 引用漂移治理：同一段落三种引法（"平台准入" / 通用纪律"提取规则"的
+    平台准入段），且与该文件既有惯例（通用纪律"搜索词构造"、通用纪律"易失效词形"
+    ——直接引加粗段落名）不一致；改标题时无人会同步这些散文引用。统一为
+    通用纪律"<段落名>"，钉桩防再漂移。"""
+    assert SKILL_MD.count('通用纪律"平台准入"') >= 3
+    assert SKILL_MD.count('通用纪律"收录判据"') >= 2
+    assert '"提取规则"的' not in SKILL_MD  # 不再用节名前缀作引用（漂移源）
 
 
 def test_criterion_institution_carrier_and_exclusions():
@@ -432,7 +517,7 @@ def test_contradiction_and_wording_cleanup():
     assert "以上约束只管本类" in SKILL_MD
     assert "历史清单是上轮结果的基线，照搬会继承上轮的遗漏与偏差" in SKILL_MD
     assert "数据集只是其中一类，不应占主导" not in SKILL_MD
-    assert '见通用纪律"提取规则"的平台准入段' in SKILL_MD
+    assert '见通用纪律"平台准入"' in SKILL_MD  # 2026-09-10 引用名统一（原"提取规则"的平台准入段）
     for bad in ["乱搜", "掺长尾垃圾", "不死循环", "纪律保留", "不花一次搜索"]:
         assert bad not in SKILL_MD
     # 厂商/产品名规则单一归属：并入通用纪律词类清单第 4 条，阶段 3 改指针，图标移除
@@ -467,13 +552,6 @@ def test_skill_no_multilang_audit_promise():
     仍残留"脚本会对最终清单做确定性审计（同域名剥语言码路径段…）"的悬空承诺——脚本已无
     此实现，模型会期待一个永不出现的 stdout 提示（2026-09-02 审查发现）。钉死承诺句不再出现。"""
     assert "同域名剥语言码路径段后相同的组计数" not in SKILL_MD
-
-
-def test_docs_01_skill_layer_quota_sync():
-    """docs/01 分层表的增量发现组合与 SKILL 当前配额一致——2026-09-02 实体 4→2、
-    自由 8→10 后该行未同步（文档人工同步反复漂移的又一例），钉进测试强制下次配额调整一并改。"""
-    docs01 = (ROOT / "docs" / "01-交付手册.md").read_text(encoding="utf-8")
-    assert "固定 4 + 自由 8 + 实体 4 = 基底 16 次/节点，扩充至多 2 批" in docs01
 
 
 def test_quote_style_unified_straight():

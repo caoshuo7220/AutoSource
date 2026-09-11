@@ -125,6 +125,27 @@ class TestDeduplicate:
         ]
         assert len(deduplicate(sources)) == 2
 
+    def test_same_url_different_name_deduped(self):
+        """URL 相同即同一资源，名称措辞不同不构成两个条目（2026-09-11 实证：
+        200054 轮同一入口被 record_sources 与 record_knowledge 各记一次、两次
+        措辞不同，(域名,名称) 键不命中——交付清单虚高 116 条/16%）。"""
+        sources = [
+            {"name": "Arista 产品文档中心", "url": "https://a.com/docs"},
+            {"name": "Arista Networks 官方文档", "url": "https://a.com/docs"},
+        ]
+        result = deduplicate(sources)
+        assert len(result) == 1
+        assert result[0]["name"] == "Arista 产品文档中心"
+
+    def test_same_url_differing_only_by_citation_anchor_deduped(self):
+        """引用序号锚点不改变资源指向：剥离后同 URL 同样判重——输出 CSV 会剥离
+        纯数字锚点，只在原始串上判重会在交付清单里留下两行完全相同的 URL。"""
+        sources = [
+            {"name": "A", "url": "https://a.com/doc.pdf#2#1"},
+            {"name": "B", "url": "https://a.com/doc.pdf#3"},
+        ]
+        assert len(deduplicate(sources)) == 1
+
 
 class TestLeafNode:
     NODES = ["AI训练GPU", "A-B", "B"]
@@ -1675,6 +1696,33 @@ class TestRunScopedEvidence:
         assert not (outdir / ".session_id").exists()
         assert (outdir / "intermediate" / "evidence_log.jsonl").exists()
 
+    def test_run_scoped_evidence_archived_whole(self, tmp_path):
+        """运行级留痕即本运行专属：全量归档，不按记账查询词切片。
+
+        2026-09-11 实证（200054 轮）：模型实做 345 次搜索只记账 217 条，
+        切片把未记账搜索的留痕一并删掉，交付清单 29% 的 URL 归档后无法溯源。
+        运行级留痕不混入其他运行的搜索，无需切片。
+        """
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        data = base_data()
+        data["journal"] = [{"phase": "增量发现", "node": "AI训练GPU",
+                            "query": "GPU 排名 数据库", "results": 10, "extracted": 2}]
+        write_raw(run_dir, data)
+        (run_dir / "evidence.jsonl").write_text(
+            json.dumps({"tool_name": "WebSearch", "tool_input": {"query": "GPU 排名 数据库"},
+                        "tool_response": {"results": [{"url": "https://a.com/doc"}]}},
+                       ensure_ascii=False) + "\n" +
+            json.dumps({"tool_name": "WebSearch", "tool_input": {"query": "漏记的验证搜索"},
+                        "tool_response": {"results": [{"url": "https://b.com/data"}]}},
+                       ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        summary = run_pipeline(str(run_dir / "raw.json"), out_dir=str(tmp_path / "outputs"),
+                               now=FIXED_NOW)
+        archived = (Path(summary["outdir"]) / "intermediate" / "evidence_log.jsonl").read_text(
+            encoding="utf-8")
+        assert "GPU 排名 数据库" in archived
+        assert "漏记的验证搜索" in archived
+
     def test_run_evidence_log_prefers_run_dir(self, tmp_path):
         run_dir = tmp_path / "run_2026-01-01-000000"
         run_dir.mkdir()
@@ -1945,6 +1993,11 @@ def write_evidence_map(tmp_path: Path, query_urls: dict[str, list[str]],
     return p
 
 
+# 每节点增量搜索配额（钉桩：与 postprocess.MIN_INCREMENTAL_SEARCHES 对齐，改常量须同步）
+# 2026-09-10：16 → 20（基底 16 + 扩充固定 4）
+QUOTA_N = 20
+
+
 class _SentinelFoldBase:
     """三个收尾护栏（2026-09-09）共用夹具：fold 路径（enforce_quotas 缺省开启）。"""
 
@@ -1989,33 +2042,33 @@ class _SentinelFoldBase:
 
 
 class TestQuotaSentry(_SentinelFoldBase):
-    """哨兵 1：每节点增量搜索 ≥16——配额缩水/谎报过不了收尾。"""
+    """哨兵 1：每节点增量搜索 ≥QUOTA_N（20 = 基底 16 + 扩充固定 4）——配额缩水/谎报过不了收尾。"""
 
     def test_node_shortfall_raises_with_names(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
             self._searches("图形渲染GPU", 8, base="g", zero_reason="垃圾域")
         with pytest.raises(ValueError, match="增量搜索未达标") as ei:
             self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
-        assert "图形渲染GPU 8 次（缺 8）" in str(ei.value)
+        assert "图形渲染GPU 8 次（缺 12）" in str(ei.value)
         assert run_dir.exists() and run_dir.name.startswith("run_")
 
-    def test_exact_sixteen_per_node_passes(self, tmp_path):
+    def test_exact_quota_per_node_passes(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         summary = self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert not run_dir.exists()  # 正常重命名收尾
-        assert summary["zero_audit"]["total"] == 32
+        assert summary["zero_audit"]["total"] == QUOTA_N * 2
 
     def test_expansion_rows_do_not_rescue_shortfall(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 14, zero_reason="垃圾域") + \
+            self._searches("AI训练GPU", QUOTA_N - 2, zero_reason="垃圾域") + \
             self._searches("AI训练GPU", 4, base="x", phase="扩量轮", zero_reason="垃圾域")
-        with pytest.raises(ValueError, match="AI训练GPU 14 次（缺 2）"):
+        with pytest.raises(ValueError, match="AI训练GPU 18 次（缺 2）"):
             self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert run_dir.exists()
 
@@ -2051,29 +2104,29 @@ class TestZeroReasonSentry(_SentinelFoldBase):
     def test_zero_extraction_without_reason_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 15, zero_reason="垃圾域") + \
-            [self._search_row(query="q15", extracted=0)] + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+            self._searches("AI训练GPU", QUOTA_N - 1, zero_reason="垃圾域") + \
+            [self._search_row(query="q19", extracted=0)] + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         with pytest.raises(ValueError, match="零提取留痕缺失或与证据矛盾") as ei:
             self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
-        assert "q15" in str(ei.value)
+        assert "q19" in str(ei.value)
         assert run_dir.exists()
 
     def test_verification_search_zero_extraction_exempt(self, tmp_path):
         """验证搜索的 extracted 只记顺路新源——零提取是合法结果，不需要理由。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
             [self._search_row(phase="验证搜索", query="K1 官网", extracted=0)] + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert not run_dir.exists()
 
     def test_positive_extraction_needs_no_reason(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, extracted=1) + \
-            self._searches("图形渲染GPU", 16, base="g", extracted=1)
+            self._searches("AI训练GPU", QUOTA_N, extracted=1) + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", extracted=1)
         self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert not run_dir.exists()
 
@@ -2081,19 +2134,19 @@ class TestZeroReasonSentry(_SentinelFoldBase):
         """补录机制：同 phase+node+query 重传 = 末次覆盖（append-only 语义）。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 15, zero_reason="垃圾域") + \
-            [self._search_row(query="q15", extracted=0),          # 缺理由
-             self._search_row(query="q15", extracted=0, zero_reason="无主题边界")] + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
+            self._searches("AI训练GPU", QUOTA_N - 1, zero_reason="垃圾域") + \
+            [self._search_row(query="q19", extracted=0),          # 缺理由
+             self._search_row(query="q19", extracted=0, zero_reason="无主题边界")] + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         summary = self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert not run_dir.exists()
-        assert summary["journal_count"] == 32  # 16+16，重复行合并为一条
+        assert summary["journal_count"] == QUOTA_N * 2  # 20+20，重复行合并为一条
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         csv_rows = read_csv_rows(journal_csv)
-        assert len(csv_rows) == 33  # header + 32
-        q15_rows = [r for r in csv_rows if r[2] == "q15"]
-        assert len(q15_rows) == 1  # 重复行合并
-        assert q15_rows[0][7] == "无主题边界"  # 末次覆盖后的理由进了 CSV
+        assert len(csv_rows) == QUOTA_N * 2 + 1  # header + 40
+        q19_rows = [r for r in csv_rows if r[2] == "q19"]
+        assert len(q19_rows) == 1  # 重复行合并
+        assert q19_rows[0][7] == "无主题边界"  # 末次覆盖后的理由进了 CSV
 
 
 class TestZeroReasonContradiction(_SentinelFoldBase):
@@ -2102,9 +2155,9 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
     def test_reason_claims_collected_but_domains_not_in_list_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="已收") + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
-        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(16)}
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(QUOTA_N)}
         with pytest.raises(ValueError, match="理由声称已收") as ei:
             self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert "q0" in str(ei.value)
@@ -2113,9 +2166,9 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
     def test_reason_claims_garbage_but_domains_clean_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="垃圾域") + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
-        query_urls = {f"q{i}": [f"https://www.cisco.com/doc{i}"] for i in range(16)}
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://www.cisco.com/doc{i}"] for i in range(QUOTA_N)}
         with pytest.raises(ValueError, match="理由声称垃圾域"):
             self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert run_dir.exists()
@@ -2123,32 +2176,35 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
     def test_consistent_reasons_pass_and_audit_reported(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="已收") + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
-        query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(16)}
-        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(16)})
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
         summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert not run_dir.exists()
-        assert summary["zero_audit"]["categorized"] == {"已收": 16, "垃圾域": 16}
+        assert summary["zero_audit"]["categorized"] == {"已收": QUOTA_N, "垃圾域": QUOTA_N}
         assert summary["zero_audit"]["suspects"] == []
         from postprocess import summary_text
         assert "零提取审计" in summary_text(summary)
 
-    def test_suspects_audit_listed_without_blocking(self, tmp_path):
-        """疑似漏收（域名不在清单且非垃圾域）不拦截——进审计清单供人工复核。"""
+    def test_suspects_tracked_but_not_dumped(self, tmp_path):
+        """疑似漏收（域名不在清单且非垃圾域）不拦截，但**不铺进汇总**（2026-09-10）：
+        该分类只是"无法自动核对"的兜底——模型按判据正常拒收的资讯/学术页也会落进来
+        （172015/180530 两轮实测：109 条疑似漏收里绝大多数是误报），铺开就是几百行
+        噪声。数据留在 summary["zero_audit"] 里供工具按需查，汇总只出计数。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
-            self._searches("AI训练GPU", 16, zero_reason="无主题边界") + \
-            self._searches("图形渲染GPU", 16, base="g", zero_reason="垃圾域")
-        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(16)}
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="无主题边界") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(QUOTA_N)}
         summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert not run_dir.exists()
-        assert summary["zero_audit"]["categorized"]["疑似漏收"] == 16
-        assert len(summary["zero_audit"]["suspects"]) == 16
+        assert summary["zero_audit"]["categorized"]["疑似漏收"] == QUOTA_N
+        assert len(summary["zero_audit"]["suspects"]) == QUOTA_N  # 数据仍在（供工具查）
         from postprocess import summary_text
         text = summary_text(summary)
-        assert "疑似漏收清单" in text
-        assert "example.org" in text
+        assert "疑似漏收清单" not in text  # 防回潮：不得再铺开
+        assert "example.org" not in text
 
 
 class TestGarbageFilter(_SentinelFoldBase):
@@ -2159,8 +2215,8 @@ class TestGarbageFilter(_SentinelFoldBase):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row(),
                 self._source_row(name="B", url="https://shuma.taobao.com/item/1")] + \
-            self._searches("AI训练GPU", 16, extracted=1) + \
-            self._searches("图形渲染GPU", 16, base="g", extracted=1)
+            self._searches("AI训练GPU", QUOTA_N, extracted=1) + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", extracted=1)
         self._manifest(run_dir)
         self._write_store(run_dir, rows)
         evidence = write_evidence_map(tmp_path, {},
@@ -2177,8 +2233,8 @@ class TestGarbageFilter(_SentinelFoldBase):
         结果，不得误报"疑似搜索工具异常"）。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row(url="https://shuma.taobao.com/item/1")] + \
-            self._searches("AI训练GPU", 16, extracted=1) + \
-            self._searches("图形渲染GPU", 16, base="g", extracted=1)
+            self._searches("AI训练GPU", QUOTA_N, extracted=1) + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", extracted=1)
         self._manifest(run_dir)
         self._write_store(run_dir, rows)
         evidence = write_evidence_map(tmp_path, {})
@@ -2186,3 +2242,4 @@ class TestGarbageFilter(_SentinelFoldBase):
                        out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
         assert summary["kept"] == 0
         assert summary["garbage_filtered"] == 1
+

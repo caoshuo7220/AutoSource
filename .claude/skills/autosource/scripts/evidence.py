@@ -156,11 +156,13 @@ def result_urls(payload: dict) -> list[str]:
     return urls
 
 
-def slice_evidence(evidence: str, queries: set[str]) -> tuple[str, int, int]:
+def slice_evidence(evidence: str, queries: Optional[set[str]] = None) -> tuple[str, int, int]:
     """按本运行查询词集合切片证据留痕（会话级 → 运行级）。
 
     只保留 tool_input.query（缺省时取 tool_response.query）命中本运行查询词
-    集合的行；损坏行跳过计数。返回 (切片文本, 保留行数, 跳过行数)。
+    集合的行；损坏行跳过计数。queries 为 None 时全量保留——运行级留痕
+    （run_*/evidence.jsonl）本就是本运行专属、不混入其他运行，切片只会连带
+    丢掉模型漏记账的搜索（2026-09-11 实证）。返回 (切片文本, 保留行数, 跳过行数)。
     journal 缺行则对应搜索不进切片（如实标注，见 02 日志）。
     """
     kept: list[str] = []
@@ -171,8 +173,8 @@ def slice_evidence(evidence: str, queries: set[str]) -> tuple[str, int, int]:
         except ValueError:
             skipped += 1
             continue
-        query = line_query(payload)
-        if query and query in queries:
+        q = line_query(payload)
+        if queries is None or (q and q in queries):
             kept.append(line)
     return ("\n".join(kept) + "\n" if kept else ""), len(kept), skipped
 
