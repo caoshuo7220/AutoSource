@@ -28,10 +28,10 @@
     {"id": "storage-assembly-self-check", "summary": "五个 MCP 工具每次调用前自检装配层，故障则按失败路径中止", "level": "enforced", "anchors": [{"section": "分工与边界", "marker": "存储机制自检"}], "impl": ["python:mcp_server.py:self_check", "python:mcp_server.py:_ensure_healthy"], "test": "tests/test_mcp_server.py::TestSelfCheck::test_missing_evidence_flagged_with_path"},
     {"id": "search-failure-aborts", "summary": "搜索大范围失败时停止、不产出交付物、向用户显式声明失败", "level": "enforced", "anchors": [{"section": "失败路径（搜索工具异常）", "marker": "向用户显式声明失败状态"}], "impl": ["python:postprocess.py:run_pipeline"], "test": "tests/test_postprocess.py::test_journal_with_zero_candidates_aborts"},
     {"id": "dedup-url-and-name-domain", "summary": "收尾按 URL（剥离引用锚点）与 域名+名称 联合去重", "level": "enforced", "anchors": [{"section": "提取规则", "marker": "脚本去重机制"}], "impl": ["python:postprocess.py:deduplicate"], "test": "tests/test_postprocess.py::TestDeduplicate::test_same_url_differing_only_by_citation_anchor_deduped"},
-    {"id": "data-write-via-mcp-only", "summary": "数据落盘只走五个 MCP 工具，禁止自创脚本或 Write 数据文件组装", "level": "enforced-no-test", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "数据落盘只走 MCP 工具"}], "impl": ["settings:permissions.allow", "store:record_sources"], "test": ""},
-    {"id": "dev-tools-blocked-in-run", "summary": "运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令", "level": "enforced-no-test", "anchors": [{"section": "分工与边界", "marker": "唯一合法的 Bash"}], "impl": ["settings:permissions.allow"], "test": ""},
-    {"id": "manifest-write-once-no-edit", "summary": "manifest 整体 Write 一次，禁止 Edit（outputs 只放行 Write）", "level": "enforced-no-test", "anchors": [{"section": "阶段 2 · 知识清单（零搜索）", "marker": "必须整体 Write"}], "impl": ["settings:permissions.allow"], "test": ""},
-    {"id": "no-manual-evidence-check", "summary": "禁止手工核对证据（grep / shell 循环 / 自创脚本）", "level": "enforced-no-test", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "禁止手工核对证据"}], "impl": ["settings:permissions.allow"], "test": ""},
+    {"id": "data-write-via-mcp-only", "summary": "数据落盘只走五个 MCP 工具，禁止自创脚本或 Write 数据文件组装", "level": "advisory", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "数据落盘只走 MCP 工具"}], "impl": [], "test": ""},
+    {"id": "dev-tools-blocked-in-run", "summary": "运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令", "level": "advisory", "anchors": [{"section": "分工与边界", "marker": "唯一合法的 Bash"}], "impl": [], "test": ""},
+    {"id": "manifest-write-once-no-edit", "summary": "manifest 整体 Write 一次，禁止 Edit（outputs 只放行 Write）", "level": "advisory", "anchors": [{"section": "阶段 2 · 知识清单（零搜索）", "marker": "必须整体 Write"}], "impl": [], "test": ""},
+    {"id": "no-manual-evidence-check", "summary": "禁止手工核对证据（grep / shell 循环 / 自创脚本）", "level": "advisory", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "禁止手工核对证据"}], "impl": [], "test": ""},
     {"id": "no-read-historical-outputs", "summary": "禁止读取 outputs 下历史运行产物（防自锚定）", "level": "advisory", "anchors": [{"section": "阶段 0 · 领域拆解", "marker": "历史运行的产物"}], "impl": [], "test": ""},
     {"id": "must-collect-matching", "summary": "符合判据的一律收录，不得以清单会变杂等理由拒收", "level": "advisory", "anchors": [{"section": "提取规则", "marker": "符合判据的一律收录"}], "impl": [], "test": ""},
     {"id": "no-news-media", "summary": "新闻、资讯、媒体文章、个人内容一律不收录", "level": "advisory", "anchors": [{"section": "提取规则", "marker": "平台准入"}], "impl": [], "test": ""},
@@ -41,6 +41,7 @@
     {"id": "context-no-parking", "summary": "不得以上下文长为由停靠、缩减配额或谎报进度", "level": "advisory", "anchors": [{"section": "AutoSource — 数据源自动发现", "marker": "上下文增长是常态"}], "impl": [], "test": ""},
     {"id": "extraction-rate-self-check", "summary": "入库前自查提取率，明显低于 1 条/搜时回头重审零提取结果", "level": "advisory", "anchors": [{"section": "阶段 4 · 增量发现", "marker": "入库前自查"}], "impl": [], "test": ""},
     {"id": "both-parts-of-results", "summary": "搜索返回的链接列表与摘要正文两部分都要过目", "level": "advisory", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "两部分"}], "impl": [], "test": ""},
-    {"id": "report-shown-verbatim", "summary": "finalize 返回文本原样展示给用户作为最终汇总", "level": "advisory", "anchors": [{"section": "阶段 7 · 收尾", "marker": "原样展示给用户"}], "impl": [], "test": ""}
+    {"id": "report-shown-verbatim", "summary": "finalize 返回文本原样展示给用户作为最终汇总", "level": "advisory", "anchors": [{"section": "阶段 7 · 收尾", "marker": "原样展示给用户"}], "impl": [], "test": ""},
+    {"id": "no-confirmation-stop-in-run", "summary": "运行中不得出现需要用户确认的停顿——白名单外的一切操作必须是拒绝，不是询问", "level": "advisory", "anchors": [{"section": "AutoSource — 数据源自动发现", "marker": "没有交接停靠点"}], "impl": [], "test": ""}
   ]
 }
