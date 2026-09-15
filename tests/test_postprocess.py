@@ -1195,6 +1195,8 @@ class TestArchives:
         # 脚本在根目录只写数据源清单（分析报告.md 由模型收尾时写入）；
         # stats.csv 随排障材料入 intermediate/（2026-08-31：根目录只留两个交付物——清单+报告）
         root_files = {p.name for p in outdir.iterdir() if p.is_file()}
+        # 运行核对.json 由 fold 路径写出（docs/06 第 2 期）；本用例走 CLI 兼容路径
+        # run_pipeline，不产出该文件
         assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv"}
         assert (intermediate / "算力服务器_2026-08-13-183045_stats.csv").exists()
         # 会话临时文件仍按现状删除
@@ -1996,7 +1998,8 @@ class TestFinalizeFold:
                        evidence_log=str(tmp_path / "不存在.jsonl"), now=FIXED_NOW)
         outdir = Path(summary["outdir"])
         root_files = {p.name for p in outdir.iterdir() if p.is_file()}
-        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv"}
+        # 2026-09-15（docs/06 第 2 期）：fold 路径在根写出「运行核对.json」
+        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv", "运行核对.json"}
         assert (outdir / "intermediate" / "store_input.jsonl").read_text(encoding="utf-8") \
             == store_text
         assert (outdir / "intermediate" / "manifest_input.json").exists()
@@ -2374,3 +2377,53 @@ class TestGarbageFilter(_SentinelFoldBase):
         assert summary["kept"] == 0
         assert summary["garbage_filtered"] == 1
 
+class TestRunAttestation(_SentinelFoldBase):
+    """2026-09-15（docs/06 第 2 期）：收尾在运行目录根写出「运行核对.json」——
+    由脚本从 store 与流水线 summary 直接算出，不经过模型；只记录事实、不做拦截。"""
+
+    def _fold_clean(self, tmp_path):
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
+        return self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+
+    def test_attestation_written_with_facts(self, tmp_path):
+        summary = self._fold_clean(tmp_path)
+        outdir = Path(summary["outdir"])
+        path = outdir / "运行核对.json"
+        assert path.exists()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["domain"] == "算力服务器"
+        assert data["sources"]["kept"] == summary["kept"]
+        assert data["quota"]["required_per_node"] == QUOTA_N
+        assert data["quota"]["per_node"] == {"AI训练GPU": QUOTA_N, "图形渲染GPU": QUOTA_N}
+        assert data["zero_extraction"]["count"] == 2 * QUOTA_N
+        assert {r["zero_reason"] for r in data["zero_extraction"]["rows"]} == {"已收", "垃圾域"}
+        assert data["knowledge"]["declared"] == 0
+        assert data["knowledge"]["missing"] == []
+        assert len(data["script_fingerprint"]) == 12
+        assert data["generated_at"]
+
+    def test_kept_matches_deliverable_rows(self, tmp_path):
+        """核对文件上的数字必须与交付物对得上——这是"不用读报告就能判断"的前提。"""
+        summary = self._fold_clean(tmp_path)
+        outdir = Path(summary["outdir"])
+        data = json.loads((outdir / "运行核对.json").read_text(encoding="utf-8"))
+        csv_path = next(outdir.glob("*_数据源清单.csv"))
+        assert data["sources"]["kept"] == len(read_csv_rows(csv_path)) - 1
+
+    def test_attestation_failure_does_not_block_delivery(self, tmp_path, monkeypatch):
+        """自证工具不得成为新的报废来源：写不出来也要照常出交付物。"""
+        import postprocess as pp
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pp, "_write_run_attestation", _boom)
+        summary = self._fold_clean(tmp_path)
+        outdir = Path(summary["outdir"])
+        assert not (outdir / "运行核对.json").exists()
+        assert list(outdir.glob("*_数据源清单.csv"))

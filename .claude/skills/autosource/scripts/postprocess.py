@@ -63,6 +63,7 @@ raw.json 结构（fold 组装等价结构；CLI 兼容路径由调用方提供�
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -683,6 +684,79 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     return summary
 
 
+def _scripts_fingerprint() -> str:
+    """skill 脚本集合的指纹（docs/06 第 2 期；docs/06 §1.1 补齐项 2）。
+
+    回答"这一轮由哪个版本的脚本产出"——不是防篡改（脚本自己也算得出）。
+    """
+    h = hashlib.sha256()
+    for path in sorted(Path(__file__).resolve().parent.glob("*.py")):
+        h.update(path.name.encode("utf-8"))
+        h.update(path.read_bytes())
+    return h.hexdigest()[:12]
+
+
+def _write_run_attestation(outdir: Path, payload: dict) -> Path:
+    """写出本轮运行核对文件（docs/06 第 2 期）。
+
+    只记录事实、不做拦截；调用方必须兜住异常——自证工具不得成为新的报废来源。
+    """
+    path = outdir / "运行核对.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _build_run_attestation(summary: dict, journal: list, records: list, nodes: list,
+                           declared_names: set, domain: str) -> dict:
+    """组装运行核对内容：全部来自 fold 已装配的数据与流水线 summary，不经过模型。"""
+    def _count(value):
+        return len(value) if isinstance(value, (list, tuple, set, dict)) else value
+
+    incremental = [j for j in journal
+                   if _phase_group(str(j.get("phase") or "")) in ("增量", "扩量")]
+    per_node = {n: 0 for n in nodes}
+    zero_rows = []
+    for j in incremental:
+        node = leaf_node(str(j.get("node") or ""), nodes)
+        if node:
+            per_node[node] += 1
+        try:
+            extracted = int(j.get("extracted"))
+        except (TypeError, ValueError):
+            continue
+        if extracted == 0:
+            zero_rows.append({"node": str(j.get("node") or ""),
+                              "query": str(j.get("query") or ""),
+                              "zero_reason": str(j.get("zero_reason") or "")})
+    recorded = {str(r.get("name") or "") for r in records
+                if r.get("type") == "knowledge" and r.get("name")}
+    return {
+        "domain": domain,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "script_fingerprint": _scripts_fingerprint(),
+        "sources": {
+            "kept": _count(summary.get("kept")),
+            "candidates_before_filter": _count(summary.get("total_found")),
+            "removed_duplicates": _count(summary.get("removed_duplicates")),
+            "ungrounded_urls": _count(summary.get("ungrounded")),
+            "garbage_filtered": _count(summary.get("garbage_filtered")),
+            "rejected": summary.get("rejected", []),
+        },
+        "knowledge": {
+            "declared": len(declared_names),
+            "recorded": len([n for n in declared_names if n in recorded]),
+            "missing": sorted(n for n in declared_names if n not in recorded),
+            "verified": _count(summary.get("list_verified")),
+            "unverified": _count(summary.get("unverified")),
+            "incomplete": _count(summary.get("incomplete")),
+        },
+        "zero_extraction": {"count": len(zero_rows), "rows": zero_rows},
+        "quota": {"required_per_node": MIN_INCREMENTAL_SEARCHES, "per_node": per_node},
+        "journal": {"rows": _count(summary.get("journal_count")),
+                    "skipped": _count(summary.get("journal_skipped"))},
+    }
+
+
 def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] = None,
          now: Optional[datetime] = None, enforce_quotas: bool = True) -> dict:
     """finalize 折叠：读 store + manifest，组装等价 raw.json 后走完整流水线（docs/04）。
@@ -819,6 +893,12 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     manifest_path = outdir / "manifest.json"
     shutil.move(str(store_path), intermediate / "store_input.jsonl")
     shutil.move(str(manifest_path), intermediate / "manifest_input.json")
+    try:
+        _write_run_attestation(outdir, _build_run_attestation(
+            summary, journal, records, [str(n) for n in manifest["nodes"]],
+            declared_names, str(manifest.get("domain") or "")))
+    except Exception as e:  # 自证工具不得成为新的报废来源（docs/06 第 2 期）
+        print(f"警告: 运行核对文件生成失败（交付不受影响）: {e}", file=sys.stderr)
     summary["store_bad_lines"] = bad_lines
     return summary
 
