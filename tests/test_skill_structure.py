@@ -289,6 +289,16 @@ def test_knowledge_recorded_via_record_knowledge_not_manifest():
     assert "**阶段 6 · 重写 manifest" not in SKILL_MD
 
 
+def test_knowledge_entry_name_copied_verbatim_from_manifest():
+    """清单核对落库的 name 必须逐字来自 manifest（181607 轮实测）。
+
+    该轮 35 项按自拟措辞落库（manifest「Arista EOS 文档中心」→ 落库「Arista EOS
+    产品文档门户」），了结哨兵按名精确对账判为漏录、首次 finalize 被拒；按原名
+    补录后重跑通过。文档里只有"同名重录 = 状态更新"，从未说明 name 的来源。
+    """
+    assert "`name` 逐字照抄 manifest 里的名称" in SKILL_MD
+
+
 def test_skill_genre_free_label_no_taxonomy_leak():
     """source_type 字段语义与机制隔离（2026-09-08 终版）：SKILL 只给模型字段语义
     （内容形态标签，不填机构名/领域名/网址）；词表 12 类、归一、表外词审计等脚本
@@ -379,9 +389,12 @@ def test_search_response_two_parts_both_valid_evidence():
     代码侧早已按两来源设计：check_grounded 比对整份留痕、lineage 有"摘要文本提取"
     回退路径（162501 轮溯源.csv 里 113 行标注）。SKILL 侧原先只字未提，模型只能
     自己摸索：120118 轮只从结构化结果取 → 官网入口占比 4%；162501 轮摸到摘要 →
-    81%（官网类 45% 的入口只存在于摘要中）。钉桩防回退。"""
+    81%（官网类 45% 的入口只存在于摘要中）。2026-09-14 补"两部分都要过目 /
+    摘要里的 URL 一样要提取"——101223 轮厂商阶段 43 家里 37 家的记录 URL 只出现在
+    链接列表、0 家只出现在摘要，摘要里写明的根域名一条未被取用。钉桩防回退。"""
     assert "每次搜索返回**两部分**" in SKILL_MD
-    assert "**两部分都是合法证据来源。**" in SKILL_MD
+    assert "**两部分都是搜索返回的结果，同样重要，都要过目**" in SKILL_MD
+    assert "摘要正文里的 URL 与链接列表里的一样要提取" in SKILL_MD
 
 
 def test_verification_query_component_pool():

@@ -218,6 +218,25 @@ class TestCheckGroundedBoundaries:
         assert kept == []
         assert len(rejected) == 1
 
+    def test_markdown_bold_around_url_kept(self):
+        """摘要把官网地址写成 `**www.example.com**`——加粗记号不是 URL 的一部分。
+
+        2026-09-14（171459 轮 IDC 实证）：`*` 属 RFC 3986 sub-delims、在 URL_CHARS
+        内，加粗记号让边界匹配失败；该轮摘要只写了 `**www.idc.com**`，链接块里
+        只有带跟踪参数的子页——两条路都堵死，官网入口收不进来。
+        """
+        evidence = "根据搜索结果，IDC 的官方网站是 **www.idc.com**。"
+        kept, rejected = check_grounded([{"url": "www.idc.com"}], evidence)
+        assert len(kept) == 1
+        assert rejected == []
+
+    def test_markdown_bold_does_not_weaken_truncation_guard(self):
+        """剥加粗记号不放松截短保护——父路径仍拒。"""
+        evidence = "入口 **https://a.com/doc/123** 见上"
+        kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
+        assert kept == []
+        assert len(rejected) == 1
+
     def test_extension_prefix_truncation_rejected(self):
         # 截短到扩展名前(doc vs doc.html)同样拒绝
         evidence = '{"results":[{"url":"https://a.com/manual.pdf"}]}'
@@ -230,6 +249,36 @@ class TestCheckGroundedBoundaries:
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
         assert len(kept) == 1
         assert rejected == []
+
+    def test_url_form_variant_kept(self):
+        """去 scheme / 去尾斜杠的等价写法放行（2026-09-15 实测）。
+
+        scheme 与尾斜杠不属于资源身份——摘要是生成式散文，同一 URL 在不同句子
+        里写法不同（留痕写 `www.example.com`，模型抄成 `https://www.example.com/`）。
+        该轮 861 条提交里 50 条被拒，其中 10 条属这一类。
+
+        方向是单向的：只归一**候选自己带的**渲染装饰（去 scheme、去尾斜杠）。
+        反向（候选裸域名、留痕带 scheme）实测仅 1 条收益，且那等于让更短的串
+        通过，故不做——候选写短了本就该拒。
+        """
+        kept, _ = check_grounded([{"url": "https://www.example.com/"}],
+                                 "官网是 www.example.com。")
+        assert len(kept) == 1
+        kept, _ = check_grounded([{"url": "https://www.example.com/"}],
+                                 "见面页：www.example.com")
+        assert len(kept) == 1
+
+    def test_form_variants_do_not_weaken_truncation_guard(self):
+        """变体归一不放松截短保护——取父路径 / 去参数仍然拒。
+
+        归一化只动 scheme 与尾斜杠，路径、主机、query 一个字符不动。
+        """
+        kept, rejected = check_grounded([{"url": "https://a.com/doc"}],
+                                        '{"url":"https://a.com/doc/1"}')
+        assert kept == [] and len(rejected) == 1
+        kept, rejected = check_grounded([{"url": "https://a.com/doc"}],
+                                        '{"url":"https://a.com/doc?dgcid=1"}')
+        assert kept == [] and len(rejected) == 1
 
     def test_numeric_fragment_truncation_kept(self):
         # 截短到纯数字引用锚点之前不再拒绝（2026-08-27 交换机 274 轮 10 条实证）
@@ -2142,6 +2191,51 @@ class TestQuotaSentry(_SentinelFoldBase):
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
         assert summary["kept"] == 2
+
+
+class TestSingleDocZeroReport(_SentinelFoldBase):
+    """待复核提示：零提取但结果含单篇详情页——**只进收尾输出、不拦截**（2026-09-14）。
+
+    171459 轮实证：9 次专利搜索零提取，结果里 59 条是单篇专利页（Google Patents /
+    国家知识产权局全文 / 万方专利页…），摘要里还列了 85 个专利公开号，模型写的理由
+    是"结果均为专利检索聚合平台页…无机构发布的成体系载体"——与两者都矛盾。判据落在
+    URL 形态这个客观事实上，但"已收/重复"的核实按域名粗查、跨平台重复会误判，误报
+    代价是整轮交不出交付物，故先只报不拦。
+    """
+
+    def test_single_doc_zero_row_reported_not_blocked(self, tmp_path):
+        from postprocess import summary_text
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N - 1, zero_reason="垃圾域") + \
+            [self._search_row(query="q19", extracted=0,
+                              zero_reason="结果均为专利检索聚合平台页，无成体系载体")] + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
+        query_urls["q19"] = ["https://patents.google.com/patent/CN115412475A/en",
+                             "https://www.patentguru.com/cn/inventor/x"]
+        summary = self._fold(tmp_path, run_dir, rows, query_urls,
+                             evidence_sources=rows[:1])
+        assert not run_dir.exists()  # 不拦截：正常收尾
+        assert summary["zero_audit"]["single_doc_zero"] == [("AI训练GPU", "q19")]
+        txt = summary_text(summary)
+        assert "待复核" in txt and "含单篇详情页 1 行" in txt
+
+    def test_aggregator_only_zero_row_not_reported(self, tmp_path):
+        """结果是纯聚合/检索页时不报——这条只针对单篇详情页形态。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N - 1, zero_reason="垃圾域") + \
+            [self._search_row(query="q19", extracted=0, zero_reason="结果均为检索聚合页")] + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
+        query_urls["q19"] = ["https://www.patentguru.com/cn/inventor/x",
+                             "https://s.wanfangdata.com.cn/patent?q=x"]
+        summary = self._fold(tmp_path, run_dir, rows, query_urls,
+                             evidence_sources=rows[:1])
+        assert summary["zero_audit"]["single_doc_zero"] == []
 
 
 class TestZeroReasonSentry(_SentinelFoldBase):

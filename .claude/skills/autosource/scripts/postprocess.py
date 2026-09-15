@@ -15,7 +15,7 @@ run_pipeline() 全链路：
   入库即验由 store.record_sources 承担（当场拒绝、可修正重传）；收尾终检兜底
 - 粒度声明归一化与计数（不拒绝——产量优先，粒度/子站问题由后续子站合并处理）
 - 知识清单：verified=true 且字段齐全的清单项并入 sources（LLM 不手工复制）；
-  清单验证率（自洽性指标）与未验证清单进 stdout
+  清单验证率（自洽性指标）进 stdout
 - 域名 + 名称联合去重；CSV 用标准库导出（UTF-8 BOM，转义交给标准库），
   写入时剥离 URL 尾部的引用序号锚点（#数字，markdown 引用记号）
 - 各节点候选数与体裁分布写 stats CSV（纯清单统计表：每节点一行 + 总计行）
@@ -106,6 +106,21 @@ JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提�
 # 2026-09-10：16 → 20（基底 16 + 扩充固定 4）——16 时模型读着校验线把预算定到 16、
 # 扩充批整体跳过（思考块实证），固定 4 次扩充必须有同等强度的校验才落得下去
 MIN_INCREMENTAL_SEARCHES = 20
+
+# 单篇文档详情页形态（专利/论文）：零提取行的结果里出现这类 URL，说明该批有该收的
+# 单篇技术文件（SKILL 通用纪律「零提取只能出自三类情形」；论文、专利角度命中即按
+# 单篇级收录）。**只用于收尾输出的提示行，不作拦截**——理由里"已收/重复"的核实
+# 是按域名粗查的，跨平台重复（同一专利收在 izhuanli 而结果里是 patents.google.com）
+# 会误判，而误报的代价是整轮交不出交付物。名单性质同 GARBAGE_DOMAINS：一条一行、
+# 渐进收敛，新平台补进来即可。
+SINGLE_DOC_URL = re.compile(
+    r"patents\.google\.com/patent/"          # Google Patents 单篇
+    r"|patentimages\.storage\.googleapis\.com/"   # 国家知识产权局专利全文
+    r"|espacenet\.com/patent/|data\.epo\.org/gpi/"
+    r"|freepatentsonline\.com|patents\.justia\.com/patent/"
+    r"|cnipa\.gov\.cn/patent/|\.wanfangdata\.com\.cn/patent/"
+    r"|ieeexplore\.ieee\.org/document/|arxiv\.org/(?:abs|pdf)/",   # 单篇论文
+    re.IGNORECASE)
 
 
 def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
@@ -325,14 +340,22 @@ def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list
     """零提取审计（哨兵 2/3 的数据面）：核对留痕理由与结果域名证据。
 
     zero_rows = [(node, query, zero_reason), ...]（增量/扩量轮提取为 0 的行）。
-    返回 {total, violations}：
+    返回 {total, violations, single_doc_zero}：
     - violations：客观矛盾——缺 zero_reason；理由声称已收但域名不在清单；
       理由声称垃圾域但域名非垃圾域——enforce 时拦截（拒收必须留痕可核）
+    - single_doc_zero：零提取但结果里含单篇文档详情页的行 [(node, query)]——
+      **只进收尾输出、不拦截**（2026-09-14：判据落在 URL 形态这个客观事实上，
+      但"已收/重复"的核实是按域名粗查的，跨平台重复时收的那条在别的域名下会
+      误判；误报代价是整轮无法收尾，故先只报不拦，跑准了再谈升格）
     """
     violations: list[tuple] = []
+    single_doc_zero: list[tuple] = []
 
     for node, query, reason in zero_rows:
-        domains = {_domain(u) for u in urls_by_query.get(query, [])}
+        result_urls = urls_by_query.get(query, [])
+        if any(SINGLE_DOC_URL.search(u) for u in result_urls):
+            single_doc_zero.append((node, query))
+        domains = {_domain(u) for u in result_urls}
         if not domains:
             if not reason:
                 violations.append((node, query, reason, "无 zero_reason"))
@@ -347,7 +370,8 @@ def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list
         elif "垃圾" in reason and garbage_hits == 0:
             violations.append((node, query, reason,
                                f"理由声称垃圾域，但结果域名 {sorted(domains)} 非垃圾域"))
-    return {"total": len(zero_rows), "violations": violations}
+    return {"total": len(zero_rows), "violations": violations,
+            "single_doc_zero": single_doc_zero}
 
 
 def _check_node_quota(journal: list, nodes: list[str]) -> None:
@@ -851,18 +875,19 @@ def summary_text(summary: dict) -> str:
         lines.append(f"警告: store.jsonl 有 {summary['store_bad_lines']} 行损坏被跳过")
     if summary["journal_skipped"]:
         lines.append(f"警告: {summary['journal_skipped']} 条 journal 记录结构损坏被跳过")
-    if summary["unverified"]:
-        lines.append("未验证清单:")
-        for name, note in summary["unverified"]:
-            lines.append(f"  - {name}（{note}）")
-    else:
-        lines.append("未验证清单: 无")
     if summary["journal_count"]:
         lines.append(f"搜索日志: {summary['journal_count']} 次搜索（见 intermediate/搜索日志.csv）")
     zero = summary.get("zero_audit")
     if zero and zero["total"]:
         lines.append(f"零提取审计: {zero['total']} 条零提取，全部带拒收理由"
                      "（构成与明细见 intermediate/搜索日志.csv 的零提取理由列）")
+    sd = zero.get("single_doc_zero") if zero else None
+    if sd:
+        nodes = sorted({n for n, _ in sd})
+        shown = "、".join(nodes[:4])
+        more = f" 等 {len(nodes)} 个节点" if len(nodes) > 4 else ""
+        lines.append(f"待复核: 零提取但结果含单篇详情页 {len(sd)} 行（{shown}{more}）"
+                     "——该批有可收的单篇专利/论文，核对零提取理由列")
     if summary["outdir"]:
         if summary.get("lineage_rows"):
             lines.append(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")

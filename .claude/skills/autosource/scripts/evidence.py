@@ -82,16 +82,51 @@ def contains_bounded(needle: str, haystack: str, boundary_chars) -> bool:
     return False
 
 
+def _form_variants(url: str) -> list[str]:
+    """同一资源的等价写法：去 scheme、去尾斜杠，以及两者的组合。
+
+    scheme 与尾斜杠不属于资源身份（`https://x.com/`、`x.com`、`x.com/` 是同一份
+    资源），只是渲染差异——摘要是生成式散文，同一 URL 在不同句子里写法不同。
+    归一化只作用于这两样：**路径、主机、query 一个字符不动**，所以截短（取父路径）
+    与去参数（`?…`）仍然被拒。
+
+    不纳入的形态：`www.` 有无（身份存疑，且 2026-09-15 实测零收益）、大小写归一
+    （同上）、留痕的 JSON 转义解码（仅多救 1 条，代价是每次校验解析全量留痕）。
+    """
+    variants = [url]
+    bare = re.sub(r"^https?://", "", url)
+    if bare != url:
+        variants.append(bare)
+    for v in list(variants):
+        if v.endswith("/"):
+            variants.append(v[:-1])
+    return list(dict.fromkeys(variants))
+
+
 def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list[dict]]:
     """证据校验：URL 必须作为完整 URL 出现在证据留痕中。返回 (通过, 被拒)。
 
     按 RFC 3986 字符集做边界匹配，截短为父路径/裸域名不放行。防的是意外
     编造（转写错误/凭记忆补 URL）；留痕文件本身无写保护，不防对抗性篡改。
+
+    比对前剥掉 Markdown 加粗记号 `**`（2026-09-14）：搜索摘要习惯把官网地址
+    写成 `**https://www.example.com/**`，而 `*` 属 RFC 3986 sub-delims、在
+    URL_CHARS 内——加粗记号会让边界匹配失败，把"摘要里唯一写明的入口"判成
+    未留痕（171459 轮 IDC 实证：摘要写 `**www.idc.com**`，链接块里只有带跟踪
+    参数的子页，两条路都堵死 → 官网入口收不进来）。剥除只作用于加粗记号本身，
+    截短保护不变（`https://a.com/doc` 对 `https://a.com/doc/1` 仍拒）。
+
+    整串找不到时再试等价写法（见 _form_variants）——2026-09-15 实测：861 条
+    提交里 50 条被拒，其中 10 条（20%）是 scheme/尾斜杠这一类渲染差异，模型
+    抄对了却不被认；其余 40 条是抄短（去参数/取父路径），**按规则拒绝，不受本
+    次归一化影响**。
     """
+    evidence = evidence.replace("**", "")
     kept: list[dict] = []
     rejected: list[dict] = []
     for s in sources:
-        if contains_bounded(str(s.get("url") or ""), evidence, URL_CHARS):
+        url = str(s.get("url") or "")
+        if any(contains_bounded(v, evidence, URL_CHARS) for v in _form_variants(url)):
             kept.append(s)
         else:
             rejected.append(s)
