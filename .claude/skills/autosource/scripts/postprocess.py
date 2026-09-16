@@ -697,18 +697,18 @@ def _scripts_fingerprint() -> str:
 
 
 def _write_run_attestation(outdir: Path, payload: dict) -> Path:
-    """写出本轮运行核对文件（docs/06 第 2 期）。
+    """写出本轮运行验收单（docs/06 第 2 期）。
 
     只记录事实、不做拦截；调用方必须兜住异常——自证工具不得成为新的报废来源。
     """
-    path = outdir / "运行核对.json"
+    path = outdir / f"{outdir.name}_运行验收单.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
 def _build_run_attestation(summary: dict, journal: list, records: list, nodes: list,
                            declared_names: set, domain: str) -> dict:
-    """组装运行核对内容：全部来自 fold 已装配的数据与流水线 summary，不经过模型。"""
+    """组装运行验收单内容：全部来自 fold 已装配的数据与流水线 summary，不经过模型。"""
     def _count(value):
         return len(value) if isinstance(value, (list, tuple, set, dict)) else value
 
@@ -898,7 +898,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
             summary, journal, records, [str(n) for n in manifest["nodes"]],
             declared_names, str(manifest.get("domain") or "")))
     except Exception as e:  # 自证工具不得成为新的报废来源（docs/06 第 2 期）
-        print(f"警告: 运行核对文件生成失败（交付不受影响）: {e}", file=sys.stderr)
+        print(f"警告: 运行验收单生成失败（交付不受影响）: {e}", file=sys.stderr)
     summary["store_bad_lines"] = bad_lines
     return summary
 

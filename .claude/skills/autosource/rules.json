@@ -1,9 +1,9 @@
 {
-  "purpose": "SKILL.md 的义务型规则登记表：每条规则标注它是否由机器保证、执行点在哪。docs/06 第 1 期。",
+  "purpose": "SKILL.md 的义务型规则登记表：每条规则标注它是否由机器保证、执行点在哪。",
   "level_definitions": {
     "enforced": "有执行点，违反会被拒绝或强制中断，且有机制类用例覆盖",
     "enforced-no-test": "有执行点，违反会被拒绝或强制中断，但没有机制类用例",
-    "advisory": "只有文本、没有执行点——登记在此是为了承认它拦不住"
+    "advisory": "只有文本、没有执行点——登记在此是为了承认无法拦截"
   },
   "impl_kinds": ["python", "settings", "hook", "store", "mcp"],
   "updated": "2026-09-15",

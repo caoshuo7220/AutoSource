@@ -1195,7 +1195,7 @@ class TestArchives:
         # 脚本在根目录只写数据源清单（分析报告.md 由模型收尾时写入）；
         # stats.csv 随排障材料入 intermediate/（2026-08-31：根目录只留两个交付物——清单+报告）
         root_files = {p.name for p in outdir.iterdir() if p.is_file()}
-        # 运行核对.json 由 fold 路径写出（docs/06 第 2 期）；本用例走 CLI 兼容路径
+        # {目录名}_运行验收单.json 由 fold 路径写出（docs/06 第 2 期）；本用例走 CLI 兼容路径
         # run_pipeline，不产出该文件
         assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv"}
         assert (intermediate / "算力服务器_2026-08-13-183045_stats.csv").exists()
@@ -1998,8 +1998,9 @@ class TestFinalizeFold:
                        evidence_log=str(tmp_path / "不存在.jsonl"), now=FIXED_NOW)
         outdir = Path(summary["outdir"])
         root_files = {p.name for p in outdir.iterdir() if p.is_file()}
-        # 2026-09-15（docs/06 第 2 期）：fold 路径在根写出「运行核对.json」
-        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv", "运行核对.json"}
+        # 2026-09-15（docs/06 第 2 期）：fold 路径在根写出「{目录名}_运行验收单.json」
+        assert root_files == {"算力服务器_2026-08-13-183045_数据源清单.csv",
+                              "算力服务器_2026-08-13-183045_运行验收单.json"}
         assert (outdir / "intermediate" / "store_input.jsonl").read_text(encoding="utf-8") \
             == store_text
         assert (outdir / "intermediate" / "manifest_input.json").exists()
@@ -2378,7 +2379,7 @@ class TestGarbageFilter(_SentinelFoldBase):
         assert summary["garbage_filtered"] == 1
 
 class TestRunAttestation(_SentinelFoldBase):
-    """2026-09-15（docs/06 第 2 期）：收尾在运行目录根写出「运行核对.json」——
+    """2026-09-15（docs/06 第 2 期）：收尾在运行目录根写出「{目录名}_运行验收单.json」——
     由脚本从 store 与流水线 summary 直接算出，不经过模型；只记录事实、不做拦截。"""
 
     def _fold_clean(self, tmp_path):
@@ -2393,7 +2394,7 @@ class TestRunAttestation(_SentinelFoldBase):
     def test_attestation_written_with_facts(self, tmp_path):
         summary = self._fold_clean(tmp_path)
         outdir = Path(summary["outdir"])
-        path = outdir / "运行核对.json"
+        path = outdir / f"{outdir.name}_运行验收单.json"
         assert path.exists()
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["domain"] == "算力服务器"
@@ -2408,10 +2409,10 @@ class TestRunAttestation(_SentinelFoldBase):
         assert data["generated_at"]
 
     def test_kept_matches_deliverable_rows(self, tmp_path):
-        """核对文件上的数字必须与交付物对得上——这是"不用读报告就能判断"的前提。"""
+        """验收单上的数字必须与交付物对得上——这是"不用读报告就能判断"的前提。"""
         summary = self._fold_clean(tmp_path)
         outdir = Path(summary["outdir"])
-        data = json.loads((outdir / "运行核对.json").read_text(encoding="utf-8"))
+        data = json.loads((outdir / f"{outdir.name}_运行验收单.json").read_text(encoding="utf-8"))
         csv_path = next(outdir.glob("*_数据源清单.csv"))
         assert data["sources"]["kept"] == len(read_csv_rows(csv_path)) - 1
 
@@ -2425,5 +2426,5 @@ class TestRunAttestation(_SentinelFoldBase):
         monkeypatch.setattr(pp, "_write_run_attestation", _boom)
         summary = self._fold_clean(tmp_path)
         outdir = Path(summary["outdir"])
-        assert not (outdir / "运行核对.json").exists()
+        assert not (outdir / f"{outdir.name}_运行验收单.json").exists()
         assert list(outdir.glob("*_数据源清单.csv"))
