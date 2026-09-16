@@ -151,11 +151,20 @@ def test_finalize_guards_quota_zero_reason_and_evidence():
     ③ 理由与结果域名证据一致。以及配套的两处纪律：符合判据一律收录
     （打掉"怕清单变杂"的自创拒收借口）、上下文不停靠（打掉停靠与缩水借口）。
     防回潮：这些文本是脚本哨兵的 SKILL 侧契约（postprocess.run_pipeline
-    enforce_quotas），删文案会重新打开模型谎报/静默拒收的口子。"""
+    enforce_quotas），删文案会重新打开模型谎报/静默拒收的口子。
+
+    2026-09-16（docs/06 第 5 期文本收口）：两条断言随文案改写——
+    ① "增量搜索不足 20 次拒绝并点名"：哨兵的触发条件细节与恢复指令已由
+       postprocess 报错文案承担（逐条核过五条哨兵的报错，均带节点点名与恢复
+       步骤），SKILL 侧改钉"不合规的收尾会被拒绝并点名"这一后果声明；
+    ② "声称已收但域名不在清单"：哨兵 3 的具体判据同理由报错承担，SKILL 侧
+       改钉哨兵名"理由与结果域名证据"。
+    两处的义务本句未删：配额在"固定 20 次"（rules.json 锚点 node-search-quota），
+    zero_reason 在阶段 4 记录时机与本节。"""
     assert "**收尾护栏**" in SKILL_MD
-    assert "增量搜索不足 20 次拒绝并点名" in SKILL_MD
+    assert "不合规的收尾会被拒绝并点名" in SKILL_MD
     assert "`zero_reason`" in SKILL_MD
-    assert "声称已收但域名不在清单" in SKILL_MD
+    assert "理由与结果域名证据" in SKILL_MD
     assert "**符合判据的一律收录**" in SKILL_MD
     assert '不得以"清单会变杂""数量太多""同类已有"为由拒收' in SKILL_MD
     assert "不得以上下文长为由停靠" in SKILL_MD
@@ -618,11 +627,18 @@ def test_conciseness_review_cleanup():
     是设计算术、非执行指令，机制结论（写入截断在机制上不可能发生）原保留（防回到写大文件
     老路，与阶段 4 可执行批量规则分工）——2026-09-08 用户删除该结论句（判断冗余：
     数据落盘只走 MCP 工具等强约束已足够），钉桩断言同步改为不在；② 弹窗机制解释单一归属——
-    55 行落盘规则保留细节版（含 build_xxx.py 实例），57 行证据核对只留"这是脚本的职责"。"""
+    55 行落盘规则保留细节版（含 build_xxx.py 实例），57 行证据核对只留"这是脚本的职责"；
+    ③ 2026-09-16 用户删除该细节版括注（现 49 行），与 09-16 删除的 98 行"读取被权限拦截"
+    从句同一口径——见 docs/06 第 1 期"靠询问的拦截不算机制"：白名单对越界命令的效果是
+    弹窗询问，而弹窗意味着运行停下来等人，与「流程中间没有交接停靠点」冲突；禁读规则
+    2026-09-08 移除后 98 行的说法更与配置事实相反。义务本句未删——落盘规则本身（禁止
+    自创脚本 / Write 数据文件组装）原样保留，删的只是机制叙述。"""
     assert "离截断边界约 10 倍" not in SKILL_MD
     assert "写入截断在机制上不可能发生" not in SKILL_MD
     assert "越界命令会被权限白名单拦截弹窗" not in SKILL_MD
-    assert "执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗" in SKILL_MD
+    assert "执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗" not in SKILL_MD
+    assert "禁止自创脚本 / Write 数据文件组装" in SKILL_MD
+    assert "读取被权限拦截属护栏按设计工作，不是缺陷" not in SKILL_MD
 
 
 def test_skill_no_multilang_audit_promise():
