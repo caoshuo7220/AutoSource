@@ -690,3 +690,20 @@ def test_script_dependency_direction():
     pp_src = (SCRIPTS_DIR / "postprocess.py").read_text(encoding="utf-8")
     assert "from store import" in pp_src
     assert "延迟导入避免循环依赖" not in pp_src
+
+
+def test_phases_3_to_5_forbid_mid_phase_user_interaction():
+    """阶段 3/4/5 不得中途与用户交互（2026-09-16 运行 142548 实证）。
+
+    该轮在阶段 4 跑到 41/220 次搜索时停下，产出一份"运行状态报告"并列出三个
+    选项请用户选（含"收窄领域"），倾向缩减范围。原文未使用失败路径的任何措辞
+    （无"本次运行失败"、无"运行目录保持为空残留"），属主动上报+征询决策；
+    被追问后当场承认"the stop wasn't justified"并继续跑完，交付 473 条。
+
+    通用纪律已有"流程中间没有交接停靠点……不得停靠、缩减配额"，但三个阶段
+    均无落点，模型在该处读到的是"阶段 0/2 有『无需等待用户确认』、3/4/5 沉默"。
+    """
+    for phase, nxt in (("阶段 3", "4"), ("阶段 4", "5"), ("阶段 5", "6")):
+        assert (f"**阶段中途不与用户交互**：不产出状态汇报、不请用户选择方向"
+                f"（含\"是否继续 / 是否缩小领域\"）——本阶段做完即进入阶段 {nxt}"
+                in SKILL_MD), phase
