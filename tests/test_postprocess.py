@@ -873,72 +873,11 @@ class TestJournal:
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         assert journal_csv.read_bytes()[:3] == BOM
         rows = read_csv_rows(journal_csv)
-        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失", "零提取理由"]
+        assert rows[0] == ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失", "零提取理由"]
         assert len(rows) == 3
         assert rows[1][2] == "IEEE 802.3 official"
-        assert rows[1][5] == ""  # 验证通过列：非验证行留空
-        assert rows[1][6] == "否"  # 证据缺失列：未缺失显式填否
-        assert rows[1][7] == ""  # 零提取理由列：非零提取行留空
-
-    def test_verification_count_mismatch_flagged(self, tmp_path):
-        """2026-09-01 钉进测试：journal verified 计数与清单验证通过数的一致性校验
-        ——方向性判定：仅当声称数 < 实际并入数（漏填）时警告；≥ 视为正常
-        （一次搜索验证多入口 / 复验会多记，不误报）。"""
-        data = base_data()
-        kn1 = {"name": "机构A", "node": "AI训练GPU", "verified": True,
-               "category_path": "算力服务器-GPU服务器-AI训练GPU",
-               "source_type": "官方文档", "granularity": "合集级",
-               "url": "https://a.com/doc", "description": "d", "reason": "r"}
-        kn2 = {"name": "机构B", "node": "AI训练GPU", "verified": True,
-               "category_path": "算力服务器-GPU服务器-AI训练GPU",
-               "source_type": "官方文档", "granularity": "合集级",
-               "url": "https://k.com/doc", "description": "d", "reason": "r"}
-        data["knowledge"] = [kn1, kn2]  # merged=2
-        data["journal"] = [{"phase": "验证搜索", "node": "AI训练GPU",
-                            "query": "机构A 官网", "results": 10,
-                            "extracted": 0, "verified": True}]  # claims=1 < 2
-        raw = write_raw(tmp_path, data)
-        ev = write_evidence(tmp_path, ["https://a.com/doc", "https://k.com/doc"])
-        import io
-        from contextlib import redirect_stdout
-        from postprocess import _print_summary
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
-                          evidence_log=str(ev))
-            _print_summary(summary)
-        assert summary["verification_mismatch"] == (1, 2)
-        out = buf.getvalue()
-        assert "验证通过标记数与清单验证通过数不一致" in out
-        assert "声称 1 次 < 清单实际并入 2 项（差 1）" in out  # 2026-09-02：警告带数字，复盘一眼看到差距
-
-    def test_verification_overclaim_not_flagged(self, tmp_path):
-        """声称数 ≥ 实际并入数（一次搜索验证多个入口/复验多记）不误报。"""
-        data = base_data()
-        kn = {"name": "机构A", "node": "AI训练GPU", "verified": True,
-              "category_path": "算力服务器-GPU服务器-AI训练GPU",
-              "source_type": "官方文档", "granularity": "合集级",
-              "url": "https://a.com/doc", "description": "d", "reason": "r"}
-        data["knowledge"] = [kn]  # merged=1
-        data["journal"] = [
-            {"phase": "验证搜索", "node": "AI训练GPU", "query": "机构A 官网",
-             "results": 10, "extracted": 0, "verified": True},
-            {"phase": "扩量轮", "node": "AI训练GPU", "query": "机构A 官方文档",
-             "results": 10, "extracted": 0, "verified": True},
-        ]  # claims=2 >= 1
-        raw = write_raw(tmp_path, data)
-        ev = write_evidence(tmp_path, ["https://a.com/doc"])
-        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
-                      evidence_log=str(ev))
-        assert summary["verification_mismatch"] is None
-
-    def test_verification_count_consistent_no_warning(self, tmp_path):
-        data = base_data()
-        raw = write_raw(tmp_path, data)
-        ev = write_evidence_queries(tmp_path, [], data["sources"])
-        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
-                      evidence_log=str(ev))
-        assert summary["verification_mismatch"] is None
+        assert rows[1][5] == "否"  # 证据缺失列：未缺失显式填否
+        assert rows[1][6] == ""  # 零提取理由列：非零提取行留空
 
 
     def test_journal_query_missing_flagged(self, tmp_path):
@@ -951,7 +890,7 @@ class TestJournal:
 
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
-        assert rows[1][6] == "是"
+        assert rows[1][5] == "是"
 
     def test_no_journal_no_csv(self, tmp_path):
         data = base_data()
@@ -1016,7 +955,7 @@ class TestJournal:
 
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
         rows = read_csv_rows(journal_csv)
-        assert rows[1][6] == "是"
+        assert rows[1][5] == "是"
 
 
 class TestQueryScope:
@@ -1058,7 +997,6 @@ class TestQueryScope:
         ev = write_evidence(tmp_path, ["https://a.com/doc"])
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(ev))
-        assert summary["verification_mismatch"] is None  # claims=1 == merged=1，缩写不误报
         assert summary["in_framework"] == {"count": 1, "extracted": 2}
         assert summary["out_framework"]["count"] == 1
         assert summary["out_framework"]["extracted"] == 8
@@ -2151,6 +2089,7 @@ class TestQuotaSentry(_SentinelFoldBase):
         with pytest.raises(ValueError, match="增量搜索未达标") as ei:
             self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert "图形渲染GPU 8 次（缺 12）" in str(ei.value)
+        assert "phase 填「增量发现」" in str(ei.value)  # 2026-09-17：补搜填哪个 phase 由报错承担（115926 实证白跑一轮）
         assert run_dir.exists() and run_dir.name.startswith("run_")
 
     def test_exact_quota_per_node_passes(self, tmp_path):
@@ -2290,7 +2229,7 @@ class TestZeroReasonSentry(_SentinelFoldBase):
         assert len(csv_rows) == QUOTA_N * 2 + 1  # header + 40
         q19_rows = [r for r in csv_rows if r[2] == "q19"]
         assert len(q19_rows) == 1  # 重复行合并
-        assert q19_rows[0][7] == "无主题边界"  # 末次覆盖后的理由进了 CSV
+        assert q19_rows[0][6] == "无主题边界"  # 末次覆盖后的理由进了 CSV
 
 
 class TestZeroReasonContradiction(_SentinelFoldBase):

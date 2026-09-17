@@ -113,7 +113,8 @@ class TestMcpProtocol:
         run_dir.mkdir()
         (run_dir / "manifest.json").write_text(json.dumps(
             {"domain": "交换机", "nodes": ["数据中心交换机"], "model": "t",
-             "knowledge": []}, ensure_ascii=False), encoding="utf-8")
+             "knowledge": [{"name": "K", "node": "数据中心交换机"}]},
+            ensure_ascii=False), encoding="utf-8")
         (run_dir / "evidence.jsonl").write_text(json.dumps(
             {"tool_name": "WebSearch", "tool_input": {"query": "q1"},
              "tool_response": {"results": [{"url": "https://a.com/doc"}]}},

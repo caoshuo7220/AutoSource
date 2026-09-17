@@ -101,7 +101,7 @@ class AutoSourceError(ValueError):
 
 SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒度", "访问地址", "简要说明", "来源搜索"]
 STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
-JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "验证通过", "证据缺失", "零提取理由"]
+JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失", "零提取理由"]
 
 # 哨兵 1（2026-09-09 收尾护栏）：每节点增量发现搜索下限——配额缩水/谎报过不了收尾
 # 2026-09-10：16 → 20（基底 16 + 扩充固定 4）——16 时模型读着校验线把预算定到 16、
@@ -397,7 +397,8 @@ def _check_node_quota(journal: list, nodes: list[str]) -> None:
         raise AutoSourceError(
             f"节点增量搜索未达标（每节点应 ≥{MIN_INCREMENTAL_SEARCHES} 次）："
             + "；".join(f"{n} {c} 次（缺 {MIN_INCREMENTAL_SEARCHES - c}）" for n, c in short)
-            + "——补搜并补录 record_search 后重跑 finalize（运行目录未被重命名）")
+            + "——补搜并补录 record_search（phase 填「增量发现」）"
+              "后重跑 finalize（运行目录未被重命名）")
 
 
 def _check_zero_reason_violations(audit: dict) -> None:
@@ -507,10 +508,9 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     journal_skipped = 0
     journal_queries: set[str] = set()
     journal_map: dict[str, tuple] = {}
-    verification_claims = 0  # journal 声称的验证通过次数（验证搜索/扩量轮行）
     zero_search_rows: list[tuple] = []  # 增量/扩量轮提取为 0 的行（零提取审计/哨兵 2/3）
     # 选题分类统计（2026-09-01 实体选题放开后的验证度量）：只统计增量发现/扩量轮行，
-    # 验证搜索行按定义就是实体查询，已被 verified 字段覆盖、不参与分类
+    # 验证搜索行按定义就是实体查询、不参与分类
     in_framework = {"count": 0, "extracted": 0}
     out_framework = {"count": 0, "extracted": 0, "by_node": {}}
     for j in journal:
@@ -523,12 +523,6 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
             journal_queries.add(query)
             journal_map.setdefault(query, (phase, str(j.get("node") or ""), j.get("results", "")))
         missing = "是" if (query and query not in evidence_strings) else "否"
-        # verified：一个字段一个事实——验证通过与顺路新源（extracted）分开记账
-        # （2026-09-01 两轮口径不一致治理：交换机轮把验证通过计入 extracted）
-        raw_verified = j.get("verified", "")
-        verified_ok = raw_verified is True or str(raw_verified).strip().lower() in ("true", "1", "是")
-        if verified_ok and _phase_group(phase) in ("验证", "扩量"):
-            verification_claims += 1
         if _phase_group(phase) in ("增量", "扩量"):
             try:
                 extracted = int(j.get("extracted") or 0)
@@ -552,7 +546,6 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
             query,
             j.get("results", ""),
             j.get("extracted", ""),
-            "是" if verified_ok else "",
             missing,
             j.get("zero_reason", ""),
         ])
@@ -619,8 +612,6 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "per_node": node_stats["per_node"],
         "outdir": "",
         "list_verified": list_verified,
-        "verification_mismatch": (verification_claims, len(merged))
-                                 if verification_claims < len(merged) else None,
         "in_framework": in_framework,
         "out_framework": out_framework,
         "knowledge_missing": not knowledge,
@@ -929,12 +920,6 @@ def summary_text(summary: dict) -> str:
         lines.append(f"表外词兜底: {sum(summary['unmapped_types'].values())} 条（{detail}）"
                      "——落『其他』，高频词可补别名进 store.SOURCE_TYPE_ALIASES")
     lines.append(f"清单核对: 验证通过 {summary['list_verified']} 项")
-    mismatch = summary.get("verification_mismatch")
-    if mismatch:
-        claims, merged = mismatch
-        lines.append("警告: 搜索日志验证通过标记数与清单验证通过数不一致——"
-                     f"journal 声称 {claims} 次 < 清单实际并入 {merged} 项"
-                     f"（差 {merged - claims}）：verified 记账漏填（复盘时注意）")
     if summary.get("in_framework") is not None:
         f, o = summary["in_framework"], summary["out_framework"]
         f_avg = f"{f['extracted'] / f['count']:.1f}" if f["count"] else "0"

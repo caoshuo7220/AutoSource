@@ -24,13 +24,14 @@ store 承载三类记录：增量发现条目（type=source）、搜索日志（
 store.jsonl 由脚本持有，模型不可见；每行一条（脚本盖 ts，模型无时钟——docs/04 §3.1）、
 追加原子，崩溃最多丢最后一个批次。
 """
+import difflib
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from evidence import check_grounded
+from evidence import check_grounded, nearest_forms
 
 # 垃圾域与低价值聚合平台黑名单（2026-09-10 收录政策收紧）：入库即拒 + 收尾过滤双层。
 # 只收录"平台级"域名（反复出现的大平台，子串匹配一条覆盖全部子域），长尾单站垃圾
@@ -299,6 +300,19 @@ def _existing_urls(store_path: Path) -> set[str]:
     return urls
 
 
+def _grounded_hint(url: str, evidence: str) -> str:
+    """证据拒收时的差异提示：留痕里同主机出现过的写法，或"该主机一条都没有"。
+
+    前半句让模型照抄即可改对；后半句说明这条 URL 未被搜到、必须去搜（拼凑或凭
+    记忆写的 URL 只落在这里）。2026-09-17 运行 115926 实证：拒收只报"不在留痕中"
+    时，模型反复试错无效，最后去读 evidence.py 源码才定位差异。
+    """
+    forms = nearest_forms(url, evidence)
+    if forms:
+        return "；留痕里同一主机出现过的写法：" + " | ".join(f[:120] for f in forms)
+    return "；留痕里没有该主机的任何 URL——不能凭记忆写，须搜到后再录"
+
+
 def record_sources(store_path: Path, entries: list, evidence_path: Path,
                    nodes: list[str]) -> dict:
     """批次入库即验：逐条校验后追加进 store。返回 {accepted, skipped, rejected, unmapped}。
@@ -343,7 +357,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
         kept, rej = check_grounded([e], evidence)
         if rej:
             rejected.append({"index": i, "name": name, "url": url,
-                             "reason": "URL 不在证据留痕中"})
+                             "reason": "URL 不在证据留痕中" + _grounded_hint(url, evidence)})
             continue
         if url in existing_urls:
             skipped += 1
@@ -394,7 +408,6 @@ def record_search(store_path: Path, entries: list) -> int:
             "query": str(e.get("query") or ""),
             "results": e.get("results", ""),
             "extracted": e.get("extracted", ""),
-            "verified": e.get("verified", ""),
             "zero_reason": str(e.get("zero_reason") or ""),
             "ts": ts,
         })
@@ -422,6 +435,15 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
     evidence_ok = evidence_path.exists()
     evidence = evidence_path.read_text(encoding="utf-8", errors="replace") if evidence_ok else ""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 名称对账前移（2026-09-17）：manifest 与 store 同在运行目录，收尾折叠按名精确
+    # 对账——名称写错原本要等 finalize 才被点名（115926 实证：模型改写过名称，收尾
+    # 漏录 9 项、白跑一轮）。manifest 不存在时（阶段 1 的行前清单核对）不校验。
+    declared: Optional[set] = None
+    _mp = store_path.parent / "manifest.json"
+    if _mp.exists():
+        _m = json.loads(_mp.read_text(encoding="utf-8"))
+        declared = {str(x.get("name", "")).strip()
+                    for x in (_m.get("vendors") or []) + (_m.get("knowledge") or [])}
 
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
@@ -431,6 +453,14 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
         node = str(e.get("node") or "")
         if not name or not node:
             rejected.append({"index": i, "name": name, "reason": "缺 name/node"})
+            continue
+        if declared is not None and name not in declared:
+            near = difflib.get_close_matches(name, declared, n=1)
+            rejected.append({
+                "index": i, "name": name,
+                "reason": "名称不在 manifest 声明清单中"
+                          + (f"，最相近的是「{near[0]}」" if near else "")
+                          + "——name 必须逐字照抄 manifest"})
             continue
         verified = bool(e.get("verified"))
         url = str(e.get("url") or "") if verified else ""
@@ -450,7 +480,7 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
             kept, rej = check_grounded([e], evidence)
             if rej:
                 rejected.append({"index": i, "name": name,
-                                 "reason": "URL 不在证据留痕中"})
+                                 "reason": "URL 不在证据留痕中" + _grounded_hint(url, evidence)})
                 continue
         raw_type = str(e.get("source_type") or "").strip()
         source_type = canonicalize_source_type(raw_type)

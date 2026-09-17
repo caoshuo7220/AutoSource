@@ -175,6 +175,34 @@ class TestRecordKnowledge:
         assert result["accepted"] == 0
         assert result["rejected"][0]["reason"] == "verified=true 缺 url"
 
+    def test_name_not_in_manifest_rejected_with_suggestion(self, tmp_path):
+        """2026-09-17：名称对账前移到入库时（manifest 与 store 同目录）。
+
+        收尾折叠按名精确对账，名称写错原本要等 finalize 才点名——115926 实证：
+        模型把「HPE Aruba Networking 技术文档门户」写成"……技术文档库"，收尾漏录
+        9 项、白跑一轮。"""
+        store = tmp_path / "store.jsonl"
+        (tmp_path / "manifest.json").write_text(json.dumps(
+            {"nodes": NODES,
+             "knowledge": [{"name": "HPE Aruba Networking 技术文档门户",
+                            "node": "AI训练GPU"}]}, ensure_ascii=False), encoding="utf-8")
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(
+            store, [self._entry(name="HPE Aruba Networking 技术文档库")], evidence)
+        assert result["accepted"] == 0
+        reason = result["rejected"][0]["reason"]
+        assert "不在 manifest 声明清单中" in reason
+        assert "最相近的是「HPE Aruba Networking 技术文档门户」" in reason
+
+    def test_no_manifest_skips_name_check(self, tmp_path):
+        """manifest 不存在时不校验名称——阶段 1 的行前清单核对先于 manifest 写入，
+        厂商名单本来就是 manifest 的来源（115926 实测：首个 record_knowledge 落库
+        在 manifest 写盘之前）。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [self._entry(name="任意名称")], evidence)
+        assert result["accepted"] == 1
+
     def test_verified_url_not_in_evidence_rejected(self, tmp_path):
         store = tmp_path / "store.jsonl"
         evidence = write_evidence(tmp_path, ["https://other.com/x"])
@@ -284,6 +312,29 @@ class TestRecordSources:
         assert result["accepted"] == 0
         assert "证据留痕" in result["rejected"][0]["reason"]
 
+    def test_ungrounded_url_hint_points_at_same_host_form(self, tmp_path):
+        """2026-09-17：拒收消息给出"留痕里同一主机出现过的写法"——模型照抄即可改对。
+
+        115926 实证：只报"不在留痕中"时模型反复试错无效，最后去读 evidence.py 源码
+        才定位到差异（http/https 写法、`**` 剥离）。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc/index.html"])
+        result = record_sources(store, [source_entry(url="https://a.com/other")],
+                                evidence, NODES)
+        assert result["accepted"] == 0
+        reason = result["rejected"][0]["reason"]
+        assert "留痕里同一主机出现过的写法" in reason
+        assert "https://a.com/doc/index.html" in reason
+
+    def test_ungrounded_url_hint_says_host_absent(self, tmp_path):
+        """留痕里该主机一条都没有 → 说明这条 URL 未被搜到，不能凭记忆写。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc"])
+        result = record_sources(store, [source_entry(url="https://ghost.com/x")],
+                                evidence, NODES)
+        assert result["accepted"] == 0
+        assert "没有该主机的任何 URL" in result["rejected"][0]["reason"]
+
     def test_node_field_derived_from_category_path(self, tmp_path):
         store = tmp_path / "store.jsonl"
         evidence = write_evidence(tmp_path, ["https://a.com/doc", "https://b.com/doc"])
@@ -331,16 +382,6 @@ class TestRecordSearch:
         records, _ = load_store(store)
         assert records[0]["type"] == "search"
         assert records[0]["query"] == "GPU 排名 数据库"
-
-    def test_search_verified_field_roundtrip(self, tmp_path):
-        """2026-09-01：验证搜索日志拆分 verified/extracted 两字段——store 透传不丢失。"""
-        store = tmp_path / "store.jsonl"
-        assert record_search(store, [{"phase": "验证搜索", "node": "n", "query": "q",
-                                      "results": 10, "extracted": 0,
-                                      "verified": True}]) == 1
-        records, _ = load_store(store)
-        assert records[0]["verified"] is True
-        assert records[0]["extracted"] == 0
 
     def test_search_zero_reason_roundtrip(self, tmp_path):
         """2026-09-09 收尾护栏配套：零提取理由 zero_reason 透传不丢失（哨兵 2/3 数据面）。"""

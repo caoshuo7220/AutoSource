@@ -103,6 +103,26 @@ def _form_variants(url: str) -> list[str]:
     return list(dict.fromkeys(variants))
 
 
+def nearest_forms(candidate: str, evidence: str, limit: int = 3) -> list[str]:
+    """留痕里与候选同主机的 URL 写法（去重、按出现顺序）；无同主机返回 []。
+
+    供拒收消息定位差异（2026-09-17，运行 115926 实证：模型被"URL 不在证据留痕中"
+    连拒后只能去读本模块源码才搞明白差在哪）：留痕里有同主机写法 → 抄错了，照抄
+    即可；一条都没有 → 该 URL 未被搜到，不能凭记忆写。
+    """
+    host = re.sub(r"^https?://", "", candidate).split("/")[0].split(":")[0].lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in re.findall(r"https?://[^\s\"'<>\\]+", evidence.replace("**", "")):
+        u = u.rstrip(".,);")
+        if u in seen:
+            continue
+        if re.sub(r"^https?://", "", u).split("/")[0].split(":")[0].lower() == host:
+            seen.add(u)
+            out.append(u)
+    return out[:limit]
+
+
 def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list[dict]]:
     """证据校验：URL 必须作为完整 URL 出现在证据留痕中。返回 (通过, 被拒)。
 
