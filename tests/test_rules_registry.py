@@ -30,12 +30,20 @@ MECHANISM_TEST_FILES = {
 
 REGISTRY_DATA = json.loads(REGISTRY.read_text(encoding="utf-8"))
 ENTRIES = REGISTRY_DATA["entries"]
-SKILL_TEXT = SKILL_MD.read_text(encoding="utf-8")
-SECTIONS = {
-    re.sub(r"^#+\s*", "", line).strip()
-    for line in SKILL_TEXT.splitlines()
-    if line.startswith("#")
-}
+DEFAULT_DOC = "SKILL.md"
+
+
+def _doc_text(rel: str) -> str:
+    """锚点声明所在文件的文本（按锚点的 file 字段取，缺省 SKILL.md）。"""
+    return (SKILL_DIR / rel).read_text(encoding="utf-8")
+
+
+def _sections(text: str) -> set:
+    return {
+        re.sub(r"^#+\s*", "", line).strip()
+        for line in text.splitlines()
+        if line.startswith("#")
+    }
 
 
 def _defined_symbols(path: Path) -> set:
@@ -65,11 +73,19 @@ def test_registry_levels_and_required_fields():
             assert not e["test"], f"{e['id']} 标了 {e['level']}，不该填用例"
 
 
-def test_anchors_resolve_in_skill_md():
+def test_anchors_resolve_in_declared_doc():
+    """锚点按 file 字段落到对应文件（缺省 SKILL.md）：章节与特征词都在该文件内。
+
+    2026-09-17 拆分后：规则正文分居 SKILL.md 与 6 个 references 文件，锚点必须
+    跟着声明落点走——只查全文会让"规则搬到了没人读的文件里"照样通过。
+    """
     for e in ENTRIES:
         for a in e["anchors"]:
-            assert a["section"] in SECTIONS, f"{e['id']}：SKILL.md 里没有章节「{a['section']}」"
-            assert a["marker"] in SKILL_TEXT, f"{e['id']}：找不到特征词「{a['marker']}」"
+            rel = a.get("file") or DEFAULT_DOC
+            assert (SKILL_DIR / rel).is_file(), f"{e['id']}：锚点指向的文件不存在 {rel}"
+            text = _doc_text(rel)
+            assert a["section"] in _sections(text), f"{e['id']}：{rel} 里没有章节「{a['section']}」"
+            assert a["marker"] in text, f"{e['id']}：{rel} 里找不到特征词「{a['marker']}」"
 
 
 def test_impl_targets_exist():

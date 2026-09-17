@@ -6,7 +6,24 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 SKILL_DIR = ROOT / ".claude" / "skills" / "autosource"
 SCRIPTS_DIR = SKILL_DIR / "scripts"
-SKILL_MD = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+REF_DIR = SKILL_DIR / "references"
+
+# 2026-09-17 拆分：SKILL.md 退化为路由（总则 + 分工边界 + 参数 + 阶段文件地图），
+# 阶段细则搬到 references/ 下、进入该阶段前才 Read。断言分两类：
+#   - 行为类：指向规则真正落地的那个文件（下文的 REF_* 常量），搬错文件就红；
+#   - 文风/全局类：在 DOC（运行时实际会读到的全套文本）上查。
+# DOC 顺序固定 = 路由 → 通用纪律 → 0-2 → 3 → 4 → 5 → 6-7，与运行时读取顺序一致。
+SKILL_ROUTER = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+REF_DISCIPLINE = (REF_DIR / "通用纪律.md").read_text(encoding="utf-8")
+REF_0_2 = (REF_DIR / "阶段0-2-初始化与清单.md").read_text(encoding="utf-8")
+REF_3 = (REF_DIR / "阶段3-验证搜索.md").read_text(encoding="utf-8")
+REF_4 = (REF_DIR / "阶段4-增量发现.md").read_text(encoding="utf-8")
+REF_5 = (REF_DIR / "阶段5-覆盖评估与扩量.md").read_text(encoding="utf-8")
+REF_6_7 = (REF_DIR / "阶段6-7-自检与收尾.md").read_text(encoding="utf-8")
+
+DOC = "\n".join([
+    SKILL_ROUTER, REF_DISCIPLINE, REF_0_2, REF_3, REF_4, REF_5, REF_6_7,
+])
 
 
 def test_skill_anatomy_single_skill_with_scripts():
@@ -27,44 +44,44 @@ def test_no_stale_autosource_search_skill():
 def test_merged_skill_has_linear_phases():
     """合并后的线性流程：阶段 0-7 齐全，收尾为最后阶段（无中间停靠点）。"""
     for i in range(8):
-        assert f"## 阶段 {i} ·" in SKILL_MD
-    assert SKILL_MD.rindex("## 阶段 7 · 收尾") > SKILL_MD.rindex("## 阶段 6 ·")
+        assert f"## 阶段 {i} ·" in DOC
+    assert DOC.rindex("## 阶段 7 · 收尾") > DOC.rindex("## 阶段 6 ·")
 
 
 def test_skill_references_only_scripts_paths():
     """SKILL.md 只引用 scripts/ 下的脚本路径，不残留旧路径、不引用已删除的搜索层。"""
-    assert ".claude/skills/autosource/scripts/postprocess.py" in SKILL_MD
-    assert ".claude/skills/autosource/postprocess.py" not in SKILL_MD
-    assert "/autosource-search" not in SKILL_MD
+    assert ".claude/skills/autosource/scripts/postprocess.py" in DOC
+    assert ".claude/skills/autosource/postprocess.py" not in DOC
+    assert "/autosource-search" not in DOC
 
 
 def test_skill_uses_unified_granularity_terms():
     """清单条目粒度术语统一为 合集级/单篇级（2026-08-21 决策 + 2026-08-24 统一），
     不再使用"体系级"这一遗留叫法。"""
-    assert "体系级" not in SKILL_MD
-    assert "合集级" in SKILL_MD
+    assert "体系级" not in DOC
+    assert "合集级" in DOC
 
 
 def test_skill_has_no_phantom_t_filter():
     """-t 类型过滤参数已删除（2026-08-24 审查）：description 与参数表不得再宣传。
     按参数形态断言（-t "…"），避免误伤 allowed-tools 等含 "-t" 子串的正常词。"""
-    assert "-t \"" not in SKILL_MD
-    assert "类型过滤" not in SKILL_MD
+    assert "-t \"" not in DOC
+    assert "类型过滤" not in DOC
 
 
 def test_skill_has_no_phantom_c_parameter():
     """-c 预设分类路径参数已删除（a3cecd9 结构重构丢掉了"用户未指定 -c 时执行"的流程接线，
     参数表行成悬空契约，README/docs 仍宣传）——用户决策：删参数。
     与 -t 删除同款做法：按参数形态断言（-c "…"），只匹配参数表形态。"""
-    assert "-c \"" not in SKILL_MD
-    assert "预设分类" not in SKILL_MD
+    assert "-c \"" not in DOC
+    assert "预设分类" not in DOC
 
 
 def test_skill_frontmatter_tools_no_agent():
     """frontmatter allowed-tools 为运行所需最小集，不含未被流程使用的 Agent。
     五个 MCP 工具（.mcp.json 注册的 autosource-store）与正文强依赖对齐，一并声明
     （2026-09-08 架构修订起为五工具：record_knowledge 清单核对批次）。"""
-    frontmatter = SKILL_MD.split("---")[1]
+    frontmatter = DOC.split("---")[1]
     assert "allowed-tools" in frontmatter
     assert "Agent" not in frontmatter
     for tool in ["mcp__autosource-store__record_sources",
@@ -78,8 +95,8 @@ def test_skill_frontmatter_tools_no_agent():
 def test_failure_path_output_contract():
     """失败路径输出契约：failed: true 是两层架构时代的层间状态 token，单 skill
     直接对用户说话后无载体定义——改为用户可见的失败声明措辞。"""
-    assert "failed: true" not in SKILL_MD
-    assert "本次运行失败" in SKILL_MD
+    assert "failed: true" not in DOC
+    assert "本次运行失败" in REF_DISCIPLINE
 
 
 def test_model_field_optional_contract():
@@ -88,9 +105,9 @@ def test_model_field_optional_contract():
     输入块混入"模型名"行易被误当搜索输入；模型自报名字不可靠（代理环境下系统提示的
     模型标识可为假名），填错比留空更糟（虚假溯源）。修法：阶段 3 输入块删模型名行，
     阶段 6 约束与示例标注可选、会话未明确提供时留空。"""
-    assert "模型名: 当前实际使用的模型名" not in SKILL_MD
-    assert "会话未明确提供可靠模型名时留空" in SKILL_MD
-    assert '"model": "会话提供的模型名（未提供时留空）"' in SKILL_MD
+    assert "模型名: 当前实际使用的模型名" not in DOC
+    assert "会话未明确提供可靠模型名时留空" in REF_0_2
+    assert '"model": "会话提供的模型名（未提供时留空）"' in REF_0_2
 
 
 def test_incremental_search_count_per_node():
@@ -100,17 +117,17 @@ def test_incremental_search_count_per_node():
     模型读着 finalize 的 ≥16 校验线把预算定到 16，续批判定给了"不扩"的决策空间）；
     实体配额 4 为 09-08 用户决策恢复（09-02 曾 4→2、空出并入自由 8→10，现自由回 8、
     基底 16 不变）。角度池独立成组（六类分行），并新增易失效角度说明。"""
-    assert "每节点**固定 20 次**搜索（基底 16 次 + 扩充 4 次）" in SKILL_MD
-    assert "**实体 4 次**（本节点搜索过程中新发现的实体）" in SKILL_MD
-    assert "**扩充 4 次**（角度池或实体选题均可）" in SKILL_MD
-    assert "基底 16 次完成后固定执行" in SKILL_MD  # 2026-09-10：固定 4 次——消灭"要不要扩"的决策空间（09-08 必跑第 1 批仍被整体跳过）
-    assert "续批条件" not in SKILL_MD  # 防回潮：批级续批判定已废（模型曾据此跳过扩充）
-    assert "扩充不得并入扩量轮执行" in SKILL_MD  # 阶段 4 扩充与阶段 5 扩量轮语义区分（模型曾混淆跳过扩充）
-    assert "**自由 8 次**（仅中文搜索词）" in SKILL_MD  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文
-    assert "**自由 8 次**" in SKILL_MD
-    assert "**角度池**" in SKILL_MD
-    assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in SKILL_MD  # 2026-09-09 重构：易失效角度与英文后缀两条事故规则合并上移通用纪律（模式化收敛，阶段 4 留指针）
-    assert "directory / registry / collection 这类泛化目录词" in SKILL_MD  # 2026-08-27：directory 实证命中率低，降级为泛化目录词
+    assert "每节点**固定 20 次**搜索（基底 16 次 + 扩充 4 次）" in REF_4
+    assert "**实体 4 次**（本节点搜索过程中新发现的实体）" in REF_4
+    assert "**扩充 4 次**（角度池或实体选题均可）" in REF_4
+    assert "基底 16 次完成后固定执行" in REF_4  # 2026-09-10：固定 4 次——消灭"要不要扩"的决策空间（09-08 必跑第 1 批仍被整体跳过）
+    assert "续批条件" not in DOC  # 防回潮：批级续批判定已废（模型曾据此跳过扩充）
+    assert "扩充不得并入扩量轮执行" in REF_4  # 阶段 4 扩充与阶段 5 扩量轮语义区分（模型曾混淆跳过扩充）
+    assert "**自由 8 次**（仅中文搜索词）" in REF_4  # 2026-09-01 决策：自由保持仅中文，只有扩充放开中英文
+    assert "**自由 8 次**" in REF_4
+    assert "**角度池**" in REF_4
+    assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in REF_4  # 2026-09-09 重构：易失效角度与英文后缀两条事故规则合并上移通用纪律（模式化收敛，阶段 4 留指针）
+    assert "directory / registry / collection 这类泛化目录词" in REF_4  # 2026-08-27：directory 实证命中率低，降级为泛化目录词
 
 
 def test_prepare_run_dir_contract():
@@ -119,13 +136,13 @@ def test_prepare_run_dir_contract():
     raw.json 契约已取消（docs/04 存储改造：sources/journal 走 store，元数据走 manifest）。
     2026-09-08 架构修订：manifest 只写一次（阶段 0-2 声明版），阶段 6 不再重写——
     清单核对结果随验证过程走 record_knowledge（钉桩断言语义同步，防阶段 6 重写回潮）。"""
-    assert "postprocess.py --prepare" in SKILL_MD
-    assert "Write **manifest.json**（阶段 0-2 声明版）到初始化" in SKILL_MD
-    assert "整轮只写这一次" in SKILL_MD
-    assert "outputs/raw.json" not in SKILL_MD  # 固定路径契约已废止
-    assert "raw.json" not in SKILL_MD  # raw.json 契约整体取消（docs/04）
-    assert "## 初始化 · 预留运行目录" in SKILL_MD
-    assert "阶段 0 前" not in SKILL_MD
+    assert "postprocess.py --prepare" in REF_0_2
+    assert "Write **manifest.json**（阶段 0-2 声明版）到初始化" in REF_0_2
+    assert "整轮只写这一次" in REF_0_2
+    assert "outputs/raw.json" not in DOC  # 固定路径契约已废止
+    assert "raw.json" not in DOC  # raw.json 契约整体取消（docs/04）
+    assert "## 初始化 · 预留运行目录" in REF_0_2
+    assert "阶段 0 前" not in DOC
 
 
 def test_storage_contract_mcp_tools():
@@ -135,14 +152,14 @@ def test_storage_contract_mcp_tools():
     一次性转写 manifest），清单了结哨兵与防截断哨兵并列。"""
     for tool in ["record_sources", "record_search", "record_knowledge",
                  "coverage", "finalize"]:
-        assert tool in SKILL_MD
-    assert "manifest.json" in SKILL_MD
-    assert "**必须整体 Write，禁止 Edit**" in SKILL_MD
-    assert "基底 16 次搜索完成后" in SKILL_MD
-    assert "**防截断哨兵**" in SKILL_MD
-    assert "数据落盘只走 MCP 工具" in SKILL_MD
-    assert "存储机制自检" in SKILL_MD  # 装配层故障时五工具硬失败的行为说明（mcp_server.self_check）
-    assert "model = " not in SKILL_MD  # 防误用：禁止模型用 Write 写数据文件组装
+        assert tool in DOC
+    assert "manifest.json" in DOC
+    assert "**必须整体 Write，禁止 Edit**" in REF_0_2
+    assert "基底 16 次搜索完成后" in REF_4
+    assert "**防截断哨兵**" in REF_6_7
+    assert "数据落盘只走 MCP 工具" in REF_DISCIPLINE
+    assert "存储机制自检" in SKILL_ROUTER  # 装配层故障时五工具硬失败的行为说明（mcp_server.self_check）
+    assert "model = " not in DOC  # 防误用：禁止模型用 Write 写数据文件组装
 
 
 def test_finalize_guards_quota_zero_reason_and_evidence():
@@ -161,15 +178,15 @@ def test_finalize_guards_quota_zero_reason_and_evidence():
        改钉哨兵名"理由与结果域名证据"。
     两处的义务本句未删：配额在"固定 20 次"（rules.json 锚点 node-search-quota），
     zero_reason 在阶段 4 记录时机与本节。"""
-    assert "**收尾护栏**" in SKILL_MD
-    assert "不合规的收尾会被拒绝并点名" in SKILL_MD
-    assert "`zero_reason`" in SKILL_MD
-    assert "理由与结果域名证据" in SKILL_MD
-    assert "**符合判据的一律收录**" in SKILL_MD
-    assert '不得以"清单会变杂""数量太多""同类已有"为由拒收' in SKILL_MD
-    assert "不得以上下文长为由停靠" in SKILL_MD
-    assert "不得谎报次数" in SKILL_MD
-    assert "末次覆盖" in SKILL_MD  # 补录机制：重传同 phase+node+query 行
+    assert "**收尾护栏**" in REF_6_7
+    assert "不合规的收尾会被拒绝并点名" in REF_6_7
+    assert "`zero_reason`" in DOC
+    assert "理由与结果域名证据" in REF_6_7
+    assert "**符合判据的一律收录**" in REF_DISCIPLINE
+    assert '不得以"清单会变杂""数量太多""同类已有"为由拒收' in REF_DISCIPLINE
+    assert "不得以上下文长为由停靠" in SKILL_ROUTER
+    assert "不得谎报次数" in REF_4
+    assert "末次覆盖" in REF_DISCIPLINE  # 补录机制：重传同 phase+node+query 行
 
 
 def test_manifest_knowledge_no_granularity_field():
@@ -177,8 +194,8 @@ def test_manifest_knowledge_no_granularity_field():
     "只含 name/node/预期体裁"，粒度条又要求"声明 granularity"，模型 thinking
     原话「Hmm, conflict.」后放弃声明、各行其是。定案：粒度与 source_type 同
     规矩（验证时按实际形态确定），manifest 不声明 granularity。"""
-    assert "manifest 不声明 `granularity`" in SKILL_MD
-    assert "声明 `granularity`（默认合集级）" not in SKILL_MD
+    assert "manifest 不声明 `granularity`" in REF_0_2
+    assert "声明 `granularity`（默认合集级）" not in DOC
 
 
 def test_single_carrier_not_auto_passed():
@@ -187,22 +204,22 @@ def test_single_carrier_not_auto_passed():
     角度专找入口"（范围条款自禁）；且激励倒挂（搜到单篇的不再找入口、什么都
     没搜到的反被追着换角度找两次）。定案：不算通过 → 按未通过落库 → 扩量轮
     找入口 → 定案时才以单篇通过。"""
-    assert "**不算通过**" in SKILL_MD
-    assert 'note="仅找到单篇载体"' in SKILL_MD
-    assert "扩量轮换角度专找入口" in SKILL_MD
-    assert '含 note="仅找到单篇载体"的合集级项' in SKILL_MD  # 扩量轮范围①显式纳入
-    assert "**以该单篇通过**（granularity 单篇级）" in SKILL_MD  # 定案条款（阶段 5）
-    assert "**以该单篇验证通过**" not in SKILL_MD  # 防回潮：阶段 3 不得直接判通过
+    assert "**不算通过**" in REF_3
+    assert 'note="仅找到单篇载体"' in DOC
+    assert "扩量轮换角度专找入口" in REF_3
+    assert '含 note="仅找到单篇载体"的合集级项' in DOC  # 扩量轮范围①显式纳入
+    assert "**以该单篇通过**（granularity 单篇级）" in REF_5  # 定案条款（阶段 5）
+    assert "**以该单篇验证通过**" not in DOC  # 防回潮：阶段 3 不得直接判通过
 
 
 def test_unverified_note_values_on_the_spot():
     """2026-09-10 文本矛盾修复④：阶段 3 未通过项的 note 没有合法取值（两个定案
     值在阶段 5 才出现）——模型据此决定"不落库、攒到定案再记"，撞墙后 16 项全丢
     （收尾被清单了结哨兵拦下，靠人工补录救回）。定案：三个取值当场落库，禁止攒。"""
-    assert "note 按当次搜索结果如实取一个" in SKILL_MD
-    assert "不得攒到定案时再记" in SKILL_MD
+    assert "note 按当次搜索结果如实取一个" in REF_3
+    assert "不得攒到定案时再记" in REF_3
     for value in ["未找到官方入口", "仅找到单篇载体", "疑似无效机构"]:
-        assert value in SKILL_MD
+        assert value in DOC
 
 
 def test_single_paper_patent_collected_not_rejected():
@@ -211,10 +228,10 @@ def test_single_paper_patent_collected_not_rejected():
     而判据①明写"论文、专利……单篇同样收录"（模型按"平台准入"标题句的"机构发布的
     信息载体"盖过了它）。修法：标题句补"单篇技术文件同等收录"、易失效词形把
     论文/专利移出（其目标就是单篇内容页）、零提取理由禁止"非成体系载体"。"""
-    assert "**成体系载体与单篇技术文件同等收录**" in SKILL_MD
-    assert "**论文、专利角度不受此限**" in SKILL_MD
-    assert '"非成体系载体""只有单篇没有入口"不构成拒收理由' in SKILL_MD
-    assert "论文、专利、标准角度词单独使用" not in SKILL_MD  # 防回潮：论文/专利已移出易失效词形
+    assert "**成体系载体与单篇技术文件同等收录**" in REF_DISCIPLINE
+    assert "**论文、专利角度不受此限**" in REF_4
+    assert '"非成体系载体""只有单篇没有入口"不构成拒收理由' in REF_DISCIPLINE
+    assert "论文、专利、标准角度词单独使用" not in DOC  # 防回潮：论文/专利已移出易失效词形
 
 
 def test_category_path_and_vendor_site_query_contract():
@@ -224,10 +241,10 @@ def test_category_path_and_vendor_site_query_contract():
     ② 厂商官网搜索独立成阶段 1（2026-09-11）——实证（180530 与 120118 两轮对比）：
        干净的 `{厂商名} 官网` 拿到 31 条厂商根域名；掺入节点词/体裁词后只拿到 2-3 条，
        结果被推向子页面。查询词因此收窄为唯一形态。"""
-    assert "**`category_path` 写法**" in SKILL_MD
-    assert "**不带条目名、不用 `/` 分隔**" in SKILL_MD
-    assert "固定 `{厂商名} 官网`，不加其他词、不做英文版" in SKILL_MD
-    assert "{vendor} official website" not in SKILL_MD
+    assert "**`category_path` 写法**" in REF_DISCIPLINE
+    assert "**不带条目名、不用 `/` 分隔**" in REF_DISCIPLINE
+    assert "固定 `{厂商名} 官网`，不加其他词、不做英文版" in REF_0_2
+    assert "{vendor} official website" not in DOC
 
 
 def test_vendor_official_site_mandatory_and_entry_form():
@@ -236,15 +253,15 @@ def test_vendor_official_site_mandatory_and_entry_form():
     排除，而同一判据却给平台开了"领域专属入口可收"的口子）；且 79 条"官网"里 23 条
     形态不合格（新闻页 15 / 跟踪参数 4 / 机构介绍页 4 / 打印版 1）。
     防回潮：删这组文案会重新打开"官网一条没有 + 新闻页冒充入口"。"""
-    assert "**厂商官网首页 / 根域名（含语言首页）可收，且每个厂商必收一条**" in SKILL_MD
-    assert "主题边界看机构、不看页面" in SKILL_MD
-    assert "## 阶段 1 · 厂商清单与官网搜索" in SKILL_MD
-    assert "命中官网首页 / 根域名（含语言首页）即通过" in SKILL_MD
-    assert "**以下不算入口**" in SKILL_MD
+    assert "**厂商官网首页 / 根域名（含语言首页）可收，且每个厂商必收一条**" in REF_DISCIPLINE
+    assert "主题边界看机构、不看页面" in REF_DISCIPLINE
+    assert "## 阶段 1 · 厂商清单与官网搜索" in REF_0_2
+    assert "命中官网首页 / 根域名（含语言首页）即通过" in REF_0_2
+    assert "**以下不算入口**" in REF_3
     for bad in ["帮助页", "FAQ", "政策条款页", "单篇 PDF", "新闻公告页", "课程页", "机构介绍页"]:
-        assert bad in SKILL_MD
-    assert "`?utm_`" in SKILL_MD
-    assert "官网首页与其文档门户是两个独立条目" in SKILL_MD
+        assert bad in DOC
+    assert "`?utm_`" in REF_3
+    assert "官网首页与其文档门户是两个独立条目" in REF_DISCIPLINE
 
 
 def test_cross_reference_names_unified():
@@ -253,9 +270,9 @@ def test_cross_reference_names_unified():
     散文引用。统一为 通用纪律"<段落名>"，钉桩防再漂移。
     （2026-09-11 搜索词构造下沉后，"搜索词构造"/"易失效词形"两节已不在通用纪律下，
     交叉引用只剩"平台准入"与"收录判据"两处。）"""
-    assert SKILL_MD.count('通用纪律"平台准入"') >= 3
-    assert SKILL_MD.count('通用纪律"收录判据"') >= 2
-    assert '"提取规则"的' not in SKILL_MD  # 不再用节名前缀作引用（漂移源）
+    assert DOC.count('通用纪律"平台准入"') >= 3
+    assert DOC.count('通用纪律"收录判据"') >= 2
+    assert '"提取规则"的' not in DOC  # 不再用节名前缀作引用（漂移源）
 
 
 def test_criterion_institution_carrier_and_exclusions():
@@ -264,15 +281,15 @@ def test_criterion_institution_carrier_and_exclusions():
     垃圾域与低价值聚合平台由脚本名单入库即拒；提取率标尺按实况重校准（2-4 条/10）。
     防回潮：2110 条里 794 条媒体+530 条噪声的成因就是旧判据（"有主题边界就收"），
     删这些文案会重新打开新闻洪水与垃圾域收录的口子。"""
-    assert "机构发布的信息载体" in SKILL_MD
-    assert "新闻、资讯与媒体文章不属于收录对象" in SKILL_MD
-    assert "新闻、资讯、媒体文章、个人内容一律不收录" in SKILL_MD
-    assert "百科词条、问答、个人博客与论坛帖不收" in SKILL_MD
-    assert "GARBAGE_DOMAINS" in SKILL_MD
-    assert "机构信息载体通常占 2-4 条" in SKILL_MD
-    assert "行业媒体文章、技术新闻" not in SKILL_MD  # 旧目标句的新闻类收录对象，不得回潮
-    assert "收录数量不是质量指标" not in SKILL_MD  # 旧"宁多勿缺"口径（无限全收），已按机构载体限定
-    assert "博客 / 资讯平台" not in SKILL_MD  # 角度池的新闻/博客角度已移除（其产出全不收录）
+    assert "机构发布的信息载体" in REF_DISCIPLINE
+    assert "新闻、资讯与媒体文章不属于收录对象" in SKILL_ROUTER
+    assert "新闻、资讯、媒体文章、个人内容一律不收录" in REF_DISCIPLINE
+    assert "百科词条、问答、个人博客与论坛帖不收" in REF_DISCIPLINE
+    assert "GARBAGE_DOMAINS" in REF_DISCIPLINE
+    assert "机构信息载体通常占 2-4 条" in REF_DISCIPLINE
+    assert "行业媒体文章、技术新闻" not in DOC  # 旧目标句的新闻类收录对象，不得回潮
+    assert "收录数量不是质量指标" not in DOC  # 旧"宁多勿缺"口径（无限全收），已按机构载体限定
+    assert "博客 / 资讯平台" not in DOC  # 角度池的新闻/博客角度已移除（其产出全不收录）
 
 
 def test_scripts_include_store_and_mcp_server():
@@ -288,14 +305,14 @@ def test_knowledge_recorded_via_record_knowledge_not_manifest():
     手工转写 65 条 JSON 曾漏写 60 个 verified 字段（finalize 如实报 0/65 后
     模型违规手动收尾）。断言：manifest 只写一次、阶段 6 为了结自检、
     暂存会话表述不残留、清单了结哨兵在场（防回潮到转写方案）。"""
-    assert "## 阶段 6 · 清单了结自检" in SKILL_MD
-    assert "record_knowledge" in SKILL_MD
-    assert "清单核对结果**不进 manifest 转写**" in SKILL_MD
-    assert "整轮只写这一次" in SKILL_MD
-    assert "**清单了结哨兵**" in SKILL_MD
-    assert "暂存会话" not in SKILL_MD  # 转写方案的标志词，不得回潮
-    assert "阶段 6 随 manifest 重写落盘" not in SKILL_MD
-    assert "**阶段 6 · 重写 manifest" not in SKILL_MD
+    assert "## 阶段 6 · 清单了结自检" in REF_6_7
+    assert "record_knowledge" in DOC
+    assert "清单核对结果**不进 manifest 转写**" in SKILL_ROUTER
+    assert "整轮只写这一次" in REF_0_2
+    assert "**清单了结哨兵**" in REF_6_7
+    assert "暂存会话" not in DOC  # 转写方案的标志词，不得回潮
+    assert "阶段 6 随 manifest 重写落盘" not in DOC
+    assert "**阶段 6 · 重写 manifest" not in DOC
 
 
 def test_knowledge_entry_name_copied_verbatim_from_manifest():
@@ -305,7 +322,7 @@ def test_knowledge_entry_name_copied_verbatim_from_manifest():
     产品文档门户」），了结哨兵按名精确对账判为漏录、首次 finalize 被拒；按原名
     补录后重跑通过。文档里只有"同名重录 = 状态更新"，从未说明 name 的来源。
     """
-    assert "`name` 逐字照抄 manifest 里的名称" in SKILL_MD
+    assert "`name` 逐字照抄 manifest 里的名称" in REF_DISCIPLINE
 
 
 def test_skill_genre_free_label_no_taxonomy_leak():
@@ -314,12 +331,12 @@ def test_skill_genre_free_label_no_taxonomy_leak():
     机制不出现在 SKILL——词表作为提取筛子的两版尝试均致产量暴跌（每搜提取
     0.85→0.20、store 类型 22→5 类），机制细节告知模型只会诱发保守提取。
     2026-09-09 重构：数据源类型小节并入标注段，断言同步。"""
-    assert "**标注**" in SKILL_MD
-    assert "内容形态标签" in SKILL_MD
-    assert "不填机构名、领域名或网址" in SKILL_MD
-    assert "SOURCE_TYPES" not in SKILL_MD  # 脚本机制词不泄漏进 SKILL（分类归 store.py）
-    assert "归一" not in SKILL_MD
-    assert "词表" not in SKILL_MD
+    assert "**标注**" in REF_DISCIPLINE
+    assert "内容形态标签" in REF_DISCIPLINE
+    assert "不填机构名、领域名或网址" in REF_DISCIPLINE
+    assert "SOURCE_TYPES" not in DOC  # 脚本机制词不泄漏进 SKILL（分类归 store.py）
+    assert "归一" not in DOC
+    assert "词表" not in DOC
 
 
 def test_termination_condition_aligned_with_finalization():
@@ -327,20 +344,20 @@ def test_termination_condition_aligned_with_finalization():
     仍薄弱节点继续、非薄弱节点停止，连续一轮无新增即收敛。
     总条件为"非薄弱或已收敛"——收敛是正规退出路径，避免体裁单一等客观上仍薄弱的节点
     使"所有节点非薄弱"字面条件永不满足（与 08-25"全部验证通过"同类病）。"""
-    assert "两栏清单项（vendors + knowledge）全部了结（验证通过或已定案）" in SKILL_MD
-    assert "非薄弱或已收敛" in SKILL_MD
-    assert "扩量轮按节点独立判断，不再全局共享轮数" in SKILL_MD
-    assert "某节点在一轮扩量中无任何新增有效来源时，该节点视为收敛并停止" in SKILL_MD
-    assert "连续两轮无进展" not in SKILL_MD
-    assert "仍薄弱且未收敛的节点继续扩量" in SKILL_MD  # 2026-09-02 消歧：收敛优先于薄弱
-    assert "仍薄弱的节点继续扩量" not in SKILL_MD
+    assert "两栏清单项（vendors + knowledge）全部了结（验证通过或已定案）" in REF_5
+    assert "非薄弱或已收敛" in REF_5
+    assert "扩量轮按节点独立判断，不再全局共享轮数" in REF_5
+    assert "某节点在一轮扩量中无任何新增有效来源时，该节点视为收敛并停止" in REF_5
+    assert "连续两轮无进展" not in DOC
+    assert "仍薄弱且未收敛的节点继续扩量" in REF_5  # 2026-09-02 消歧：收敛优先于薄弱
+    assert "仍薄弱的节点继续扩量" not in DOC
 
 
 def test_source_role_dimension_and_coverage_check():
     """来源角色维度 + 覆盖评估：角度池含来源角色类，薄弱判定含来源维度单一。"""
-    assert "来源角色" in SKILL_MD
-    assert "来源维度单一" in SKILL_MD
-    assert "**薄弱判定**" in SKILL_MD
+    assert "来源角色" in DOC
+    assert "来源维度单一" in REF_5
+    assert "**薄弱判定**" in REF_5
 
 
 def test_vendor_phase_own_query_form_no_side_extraction():
@@ -351,15 +368,15 @@ def test_vendor_phase_own_query_form_no_side_extraction():
     「厂商官网项固定搜 {厂商名} 官网」那条规则因清单里压根没有官网项而从未触发。
     定案：厂商单独成阶段、查询词收窄为唯一形态、只服务官网一个目的（不做顺路提取）。
     防回潮：删这组文案会退回"官网标签被文档深链占据"。"""
-    assert "## 阶段 1 · 厂商清单与官网搜索" in SKILL_MD
-    assert SKILL_MD.rindex("## 阶段 1 ·") < SKILL_MD.rindex("## 阶段 2 · 知识清单")
-    assert "固定 `{厂商名} 官网`，不加其他词、不做英文版" in SKILL_MD
-    assert 'note="未找到官网"' in SKILL_MD
-    assert "厂商清单写进 manifest 的 `vendors` 数组" in SKILL_MD
+    assert "## 阶段 1 · 厂商清单与官网搜索" in REF_0_2
+    assert DOC.rindex("## 阶段 1 ·") < DOC.rindex("## 阶段 2 · 知识清单")
+    assert "固定 `{厂商名} 官网`，不加其他词、不做英文版" in REF_0_2
+    assert 'note="未找到官网"' in DOC
+    assert "厂商清单写进 manifest 的 `vendors` 数组" in REF_0_2
     # manifest 两栏分装：knowledge = 阶段 3 待验证清单；vendors = 阶段 1 厂商清单
     # （2026-09-11 B 方案）——厂商项混进 knowledge 会重新逼出"阶段 3 跳过厂商项"的补丁
-    assert '`{domain, nodes, model, vendors, knowledge}`' in SKILL_MD
-    assert "预期体裁为\"官网\"的厂商项由阶段 1 处理" not in SKILL_MD
+    assert '`{domain, nodes, model, vendors, knowledge}`' in DOC
+    assert "预期体裁为\"官网\"的厂商项由阶段 1 处理" not in DOC
 
 
 def test_query_word_lists_relocated_no_duplication():
@@ -369,18 +386,18 @@ def test_query_word_lists_relocated_no_duplication():
     收尾后词表只剩两处：阶段 3 组件池（验证搜索造"机构名 + 入口意图"）、
     阶段 4 角度池（增量发现造"领域词 + 角度词"）。
     防回潮：通用纪律再长出"搜索词构造"节、或易失效词形回到全局，都会重新打开多份词表打架。"""
-    assert "### 搜索词构造" not in SKILL_MD
-    assert "**角度池**" in SKILL_MD
-    assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in SKILL_MD
+    assert "### 搜索词构造" not in DOC
+    assert "**角度池**" in REF_4
+    assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in REF_4
     # 易失效词形紧跟在角度池之后（同一节内，角度概念就近）
-    assert (SKILL_MD.rindex("**角度池**")
-            < SKILL_MD.rindex("**易失效词形（两类已知易命中低相关结果集的模式）**"))
+    assert (DOC.rindex("**角度池**")
+            < DOC.rindex("**易失效词形（两类已知易命中低相关结果集的模式）**"))
     # 并入角度池的 5 个独有词
     for w in ["文献库", "开发者文档", "API 参考", "帮助中心", "市场研究"]:
-        assert w in SKILL_MD
+        assert w in DOC
     # 逐字重复清单已清：入口词列举只留一处（易失效词形里那次）
-    assert SKILL_MD.count("检索 / 列表 / 分类 / 目录 / 合集") == 1
-    assert "通用纪律\"易失效词形\"" not in SKILL_MD
+    assert DOC.count("检索 / 列表 / 分类 / 目录 / 合集") == 1
+    assert "通用纪律\"易失效词形\"" not in DOC
 
 
 def test_official_site_label_only_for_site_entry():
@@ -388,8 +405,8 @@ def test_official_site_label_only_for_site_entry():
     （根域名 / 语言首页）——厂商站内的产品页、文档页、介绍页按实际形态标注。
     120118 轮实证：180 条标"官网"的条目里只有 7 条是站点入口，173 条是子页面
     （模型把"来自厂商官网站的页面"全标成了官网）。防回潮：判据删掉即退回错标。"""
-    assert '**标"官网"的只限站点入口**（根域名 / 语言首页）' in SKILL_MD
-    assert '按实际形态标注（文档 / 报告 / 数据库…），不标"官网"' in SKILL_MD
+    assert '**标"官网"的只限站点入口**（根域名 / 语言首页）' in DOC
+    assert '按实际形态标注（文档 / 报告 / 数据库…），不标"官网"' in DOC
 
 
 def test_search_response_two_parts_both_valid_evidence():
@@ -401,33 +418,33 @@ def test_search_response_two_parts_both_valid_evidence():
     81%（官网类 45% 的入口只存在于摘要中）。2026-09-14 补"两部分都要过目 /
     摘要里的 URL 一样要提取"——101223 轮厂商阶段 43 家里 37 家的记录 URL 只出现在
     链接列表、0 家只出现在摘要，摘要里写明的根域名一条未被取用。钉桩防回退。"""
-    assert "每次搜索返回**两部分**" in SKILL_MD
-    assert "**两部分都是搜索返回的结果，同样重要，都要过目**" in SKILL_MD
-    assert "摘要正文里的 URL 与链接列表里的一样要提取" in SKILL_MD
+    assert "每次搜索返回**两部分**" in REF_DISCIPLINE
+    assert "**两部分都是搜索返回的结果，同样重要，都要过目**" in REF_DISCIPLINE
+    assert "摘要正文里的 URL 与链接列表里的一样要提取" in REF_DISCIPLINE
 
 
 def test_verification_query_component_pool():
     """验证搜索组件池：自由组合（每词 2-4 组件），来源识别必带，旧固定模板废止。
     2026-08-25 重组：语言规则独立成条。2026-09-11：语言规则并入"每项固定搜 2 次
     不同角度"（两次查询词不得重复），"只搜 1 次"整条废止。"""
-    assert "组件池" in SKILL_MD
-    assert "来源识别（必带其一）" in SKILL_MD
-    assert "{机构/体系名} 官方文档 / 官网" not in SKILL_MD
-    assert "**首轮优先官方入口**" in SKILL_MD  # 2026-08-27：验证首轮 42% 落空实证，官网式优先、落空留扩量轮
+    assert "组件池" in REF_3
+    assert "来源识别（必带其一）" in REF_3
+    assert "{机构/体系名} 官方文档 / 官网" not in DOC
+    assert "**首轮优先官方入口**" in REF_3  # 2026-08-27：验证首轮 42% 落空实证，官网式优先、落空留扩量轮
     # 2026-09-11：每项从"只搜 1 次"改为固定 2 次不同角度；厂商官网另行由阶段 1 负责
-    assert "**每项固定搜 2 次，两次取不同角度**" in SKILL_MD
-    assert "两次查询词不得重复" in SKILL_MD
-    assert "只搜 1 次" not in SKILL_MD
+    assert "**每项固定搜 2 次，两次取不同角度**" in REF_3
+    assert "两次查询词不得重复" in REF_3
+    assert "只搜 1 次" not in DOC
 
 
 def test_extraction_per_item_no_whole_row_rejection():
     """提取端禁止整批拒收（2026-08-27 交换机 Nokia 事件实证：查询返回 10 条官方文档页提取 0）：
     逐条判断、提取为 0 的唯一前提、粒度"优先收合集入口"歧义澄清。
     2026-09-09 重构：小节标题扁平化为六段结构，断言同步新形态（判断方式段）。"""
-    assert "**判断方式**" in SKILL_MD
-    assert "提取为 0 的唯一前提" in SKILL_MD
-    assert "没看到合集入口就放弃该批结果" in SKILL_MD
-    assert "合集入口与其包含的同一具体内容页同时出现时" in SKILL_MD
+    assert "**判断方式**" in REF_DISCIPLINE
+    assert "提取为 0 的唯一前提" in REF_DISCIPLINE
+    assert "没看到合集入口就放弃该批结果" in REF_DISCIPLINE
+    assert "合集入口与其包含的同一具体内容页同时出现时" in REF_DISCIPLINE
 
 
 def test_extraction_yield_benchmark_and_self_check():
@@ -439,28 +456,28 @@ def test_extraction_yield_benchmark_and_self_check():
     书商/元器件站/SEO 页如实 0，不得为提高数量收录）、重审不重新搜索（防复核
     变成加搜拖长运行）。2026-09-09 重构：改名"提取率自查（非准入条件）"并降格
     ——只触发复核、不覆盖收录判据、低相关结果集不适用。"""
-    assert "**提取率自查（非准入条件）**" in SKILL_MD
-    assert "机构信息载体通常占 2-4 条" in SKILL_MD  # 2026-09-10 按 2110 条实况重校准（旧标尺 1-2 条不符与搜索生态脱节，激励全收）
-    assert "不得为提高数量收录" in SKILL_MD
-    assert "**入库前自查**" in SKILL_MD
-    assert "明显低于 1 条/搜" in SKILL_MD
-    assert "重审不重新搜索" in SKILL_MD
+    assert "**提取率自查（非准入条件）**" in REF_DISCIPLINE
+    assert "机构信息载体通常占 2-4 条" in REF_DISCIPLINE  # 2026-09-10 按 2110 条实况重校准（旧标尺 1-2 条不符与搜索生态脱节，激励全收）
+    assert "不得为提高数量收录" in REF_DISCIPLINE
+    assert "**入库前自查**" in REF_4
+    assert "明显低于 1 条/搜" in REF_4
+    assert "重审不重新搜索" in REF_4
 
 
 def test_node_search_profile():
     """节点搜索画像（2026-08-26 起）：基础契约钉进测试——不改 nodes 契约、禁编造机构、
     核心搜索词含行业术语与细分场景词（2026-08-27 补：薄弱节点维度窄的治理）。"""
-    assert "### 节点搜索画像" in SKILL_MD
-    assert "不改变 `nodes` 字段契约" in SKILL_MD
-    assert "禁止为填画像强行编造机构名称" in SKILL_MD
-    assert "行业术语与细分场景词" in SKILL_MD
+    assert "### 节点搜索画像" in REF_0_2
+    assert "不改变 `nodes` 字段契约" in REF_0_2
+    assert "禁止为填画像强行编造机构名称" in REF_0_2
+    assert "行业术语与细分场景词" in REF_0_2
 
 
 def test_journal_verified_field_contract():
     """2026-09-01：验证搜索日志拆分 verified/extracted 两字段（一个字段装一个事实，
     治理两轮记账口径不一致——交换机轮曾把验证通过计入 extracted）。"""
-    assert "verified" in SKILL_MD
-    assert "extracted 只记顺路新源数" in SKILL_MD
+    assert "verified" in DOC
+    assert "extracted 只记顺路新源数" in REF_3
 
 
 def test_entity_query_second_type_contract():
@@ -468,32 +485,25 @@ def test_entity_query_second_type_contract():
     旧"每个查询词必须包含领域词"一刀切句移除（与通用纪律 3/4 类词的矛盾根）。
     实体选题固定配额（新实体不足退回角度池）：09-02 实测 82 样本每搜 0.87 后曾 4→2，
     09-08 用户决策恢复 4（配合扩充有界化，实体覆盖由固定配额保障）。"""
-    assert "两类选题" in SKILL_MD
-    assert "实体选题" in SKILL_MD
-    assert "可不含领域词" in SKILL_MD
-    assert "每个查询词必须包含领域词" not in SKILL_MD
-    assert "新实体不足 4 个时，空缺次数退回角度池" in SKILL_MD
+    assert "两类选题" in REF_4
+    assert "实体选题" in REF_4
+    assert "可不含领域词" in REF_4
+    assert "每个查询词必须包含领域词" not in DOC
+    assert "新实体不足 4 个时，空缺次数退回角度池" in REF_4
 
 
 def test_coverage_missing_rough_signal_contract():
     """2026-09-01 评审修复钉桩：coverage 的 missing 是粗略缺口信号（提取含去重前/
     跨节点顺路发现，与幂等后已收数口径不同）——小额不触发补搜，只有接近一整批
     提取量才怀疑漏调 record_sources。"""
-    assert "missing 是粗略缺口信号" in SKILL_MD
-    assert "missing > 0（提取过但落库不足）时只补该节点" not in SKILL_MD
-
-
-def test_verified_field_incremental_wording():
-    """2026-09-01：增量发现项的 verified 表述与实际契约一致——store 对所有 search
-    行都写 verified（缺省空），脚本按 phase 过滤，填了也不计入验证账。"""
-    assert "增量发现项的 verified 留空即可" in SKILL_MD
-    assert "增量发现项无 verified 字段" not in SKILL_MD
+    assert "missing 是粗略缺口信号" in REF_5
+    assert "missing > 0（提取过但落库不足）时只补该节点" not in DOC
 
 
 def test_journal_phase_vocabulary_pinned():
     """2026-09-01 实测 bug 钉桩：phase 是模型自由文本，曾被缩写为"增量/验证"
     导致选题分布 0/0 与 verified 警告误报——契约钉死三个取值。"""
-    assert "phase 只允许三个取值" in SKILL_MD
+    assert "phase 只允许三个取值" in REF_3
 
 
 def test_manifest_example_is_valid_json():
@@ -501,8 +511,8 @@ def test_manifest_example_is_valid_json():
     模型照抄会写出不可解析的 manifest，finalize 报"manifest.json 损坏"。"""
     import json as jsonlib
     import re as re_mod
-    blocks = re_mod.findall(r"```json\n(.*?)```", SKILL_MD, re_mod.S)
-    assert blocks, "SKILL.md 应有 json 代码块"
+    blocks = re_mod.findall(r"```json\n(.*?)```", REF_0_2, re_mod.S)
+    assert blocks, "阶段 2 文件应有 json 代码块"
     for b in blocks:
         if '"domain"' in b or '"domain"' in b.replace("“", '"').replace("”", '"'):
             jsonlib.loads(b)
@@ -512,9 +522,9 @@ def test_manifest_example_is_valid_json():
 
 def test_no_cost_driven_trimming():
     """防模型自砍搜索次数：无"代价"成本措辞，两处决策点写明不以搜索成本缩减/合并。"""
-    assert "列多列杂的代价" not in SKILL_MD
-    assert "无需以搜索成本为由缩减清单" in SKILL_MD
-    assert "不以搜索次数或运行时长为由合并节点" in SKILL_MD
+    assert "列多列杂的代价" not in DOC
+    assert "无需以搜索成本为由缩减清单" in REF_0_2
+    assert "不以搜索次数或运行时长为由合并节点" in REF_0_2
 
 
 def test_settings_raises_web_search_session_budget():
@@ -568,16 +578,16 @@ def test_settings_allow_mcp_store_tools():
 
 def test_skill_no_history_output_reading():
     """阶段 0 禁止读取历史运行产物（解释式提示词，与 deny 规则互补）。"""
-    assert "禁止读取 outputs/ 下历史运行的产物" in SKILL_MD
+    assert "禁止读取 outputs/ 下历史运行的产物" in REF_0_2
 
 
 def test_finish_writes_domain_analysis_report():
     """收尾最后一步：写领域分析报告（第三交付物），模板在 references/；
     文件名由脚本 --rename-report 命名（模型写内容、不自行命名）。"""
-    assert "分析报告.md" in SKILL_MD
-    assert "领域分析报告" in SKILL_MD
-    assert "--rename-report" in SKILL_MD
-    assert "_分析报告.md" in SKILL_MD
+    assert "分析报告.md" in REF_6_7
+    assert "领域分析报告" in REF_6_7
+    assert "--rename-report" in DOC
+    assert "_分析报告.md" in REF_6_7
     template = (SKILL_DIR / "references" / "分析报告模板.md").read_text(encoding="utf-8")
     assert "严格按以下固定模板" in template
     assert "ALWAYS" not in template  # 2026-08-25 审查：英文全大写命令式改为中文祈使
@@ -587,7 +597,7 @@ def test_finish_writes_domain_analysis_report():
     assert "## 数据总览" in template
     assert "不写任何统计数字" in template
     assert "由收尾脚本自动生成" in template
-    assert "统计数字一律不写" in SKILL_MD
+    assert "统计数字一律不写" in REF_6_7
     # 2026-09-01：模板不承载一次性实证记录（skill 只放可复用指令，日期化记录进 02 日志）
     assert "2026-08-28" not in template
 
@@ -596,30 +606,30 @@ def test_contradiction_and_wording_cleanup():
     """2026-08-25 全局审查修订钉进测试：矛盾表述对齐（Bash 范围/定案时机/剔除语义），
     非正式措辞移除（乱搜/掺长尾垃圾/不死循环/纪律保留/不花一次搜索），
     重复规则改指针（数据集主导只留总纲、通用平台指向总则），裸禁令补理由（自锚定）。"""
-    assert "初始化 `--prepare` 与阶段 7 报告命名 `--rename-report`" in SKILL_MD
-    assert "（阶段 7 收尾执行）" not in SKILL_MD
-    assert "留待扩量轮换角度重试后按阶段 5 定案" in SKILL_MD
-    assert "从有效来源中剔除" in SKILL_MD
-    assert "以上约束只管本类" in SKILL_MD
-    assert "历史清单是上轮结果的基线，照搬会继承上轮的遗漏与偏差" in SKILL_MD
-    assert "数据集只是其中一类，不应占主导" not in SKILL_MD
-    assert '见通用纪律"平台准入"' in SKILL_MD  # 2026-09-10 引用名统一（原"提取规则"的平台准入段）
+    assert "初始化 `--prepare` 与阶段 7 报告命名 `--rename-report`" in SKILL_ROUTER
+    assert "（阶段 7 收尾执行）" not in DOC
+    assert "留待扩量轮换角度重试后按阶段 5 定案" in REF_3
+    assert "从有效来源中剔除" in REF_5
+    assert "以上约束只管本类" in REF_4
+    assert "历史清单是上轮结果的基线，照搬会继承上轮的遗漏与偏差" in REF_0_2
+    assert "数据集只是其中一类，不应占主导" not in DOC
+    assert '见通用纪律"平台准入"' in DOC  # 2026-09-10 引用名统一（原"提取规则"的平台准入段）
     for bad in ["乱搜", "掺长尾垃圾", "不死循环", "纪律保留", "不花一次搜索"]:
-        assert bad not in SKILL_MD
+        assert bad not in DOC
     # 厂商/产品名规则归属（2026-09-11 搜索词构造下沉后）：官网入口 → 阶段 1；
     # 不搜规格页 → 阶段 4 实体选题。通用纪律词类表删除，并入阶段 4 角度池
-    assert "不单独搜规格参数页" in SKILL_MD
-    assert '通用纪律"搜索词构造"' not in SKILL_MD
-    assert SKILL_MD.count("单独搜产品名") == 0
-    assert "裸搜" not in SKILL_MD  # 2026-09-02："裸"俚语前缀清除（裸搜/裸后缀→单独搜/未组合）
-    assert "禁止裸搜产品名" not in SKILL_MD
-    assert "❌" not in SKILL_MD and "✅" not in SKILL_MD
+    assert "不单独搜规格参数页" in REF_4
+    assert '通用纪律"搜索词构造"' not in DOC
+    assert DOC.count("单独搜产品名") == 0
+    assert "裸搜" not in DOC  # 2026-09-02："裸"俚语前缀清除（裸搜/裸后缀→单独搜/未组合）
+    assert "禁止裸搜产品名" not in DOC
+    assert "❌" not in DOC and "✅" not in DOC
     # 数据源类型（2026-09-08 终版）：SKILL 只留字段语义，脚本机制（词表 12 类/归一/
     # 表外词审计）全部在 store.py——词表当提取筛子的两版尝试均致产量暴跌，机制不进 SKILL
     # 2026-09-09 重构：小节并入标注段
-    assert "**标注**" in SKILL_MD
-    assert "内容形态标签" in SKILL_MD
-    assert "SOURCE_TYPES" not in SKILL_MD and "归一" not in SKILL_MD
+    assert "**标注**" in REF_DISCIPLINE
+    assert "内容形态标签" in REF_DISCIPLINE
+    assert "SOURCE_TYPES" not in DOC and "归一" not in DOC
 
 
 def test_conciseness_review_cleanup():
@@ -633,46 +643,46 @@ def test_conciseness_review_cleanup():
     弹窗询问，而弹窗意味着运行停下来等人，与「流程中间没有交接停靠点」冲突；禁读规则
     2026-09-08 移除后 98 行的说法更与配置事实相反。义务本句未删——落盘规则本身（禁止
     自创脚本 / Write 数据文件组装）原样保留，删的只是机制叙述。"""
-    assert "离截断边界约 10 倍" not in SKILL_MD
-    assert "写入截断在机制上不可能发生" not in SKILL_MD
-    assert "越界命令会被权限白名单拦截弹窗" not in SKILL_MD
-    assert "执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗" not in SKILL_MD
-    assert "禁止自创脚本 / Write 数据文件组装" in SKILL_MD
-    assert "读取被权限拦截属护栏按设计工作，不是缺陷" not in SKILL_MD
+    assert "离截断边界约 10 倍" not in DOC
+    assert "写入截断在机制上不可能发生" not in DOC
+    assert "越界命令会被权限白名单拦截弹窗" not in DOC
+    assert "执行任何 Bash 如 `python build_xxx.py` 都会越界被权限白名单拦截弹窗" not in DOC
+    assert "禁止自创脚本 / Write 数据文件组装" in REF_DISCIPLINE
+    assert "读取被权限拦截属护栏按设计工作，不是缺陷" not in DOC
 
 
 def test_skill_no_multilang_audit_promise():
     """2026-09-01 多语言审计下线（两轮实测全假阳性、修不如删）后，SKILL 语言版本偏好节
     仍残留"脚本会对最终清单做确定性审计（同域名剥语言码路径段…）"的悬空承诺——脚本已无
     此实现，模型会期待一个永不出现的 stdout 提示（2026-09-02 审查发现）。钉死承诺句不再出现。"""
-    assert "同域名剥语言码路径段后相同的组计数" not in SKILL_MD
+    assert "同域名剥语言码路径段后相同的组计数" not in DOC
 
 
 def test_quote_style_unified_straight():
     """2026-09-02 排版统一：SKILL.md 引号全部统一为直引号——此前 91/92/148/193 等十余行
     混用弯引号（“”），与正文主体直引号风格不一致（曾有两处用右引号当开引号的排版 bug，
     统一为直引号后该类 bug 结构性消失）。阶段 7 标题括弧与交接强调次数同前。"""
-    assert "“" not in SKILL_MD
-    assert "”" not in SKILL_MD
-    assert "（写完 manifest 后立即执行，不要结束回合）" not in SKILL_MD
-    assert SKILL_MD.count("不要结束回合") == 1
-    assert SKILL_MD.count("没有交接") == 2
+    assert "“" not in DOC
+    assert "”" not in DOC
+    assert "（写完 manifest 后立即执行，不要结束回合）" not in DOC
+    assert DOC.count("不要结束回合") == 1
+    assert DOC.count("没有交接") == 2
 
 
 def test_intro_structure_reorganized():
     """2026-08-25 结构重排（skill-creator 规范）：文件头分组为 分工与边界 / 参数与运行约定 / 通用纪律，
     流程图带阶段编号成为全文地图；总则改名通用纪律（原"阶段 3-5 适用"标注与内容矛盾），
     证据链标题注明脚本强制校验（解释为什么硬）。"""
-    assert "初始化（预留运行目录） → 0 领域拆解 → 1 厂商清单与官网搜索 → 2 知识清单" in SKILL_MD
-    assert "## 分工与边界" in SKILL_MD
-    assert "## 参数与运行约定" in SKILL_MD
-    assert "## 通用纪律" in SKILL_MD
-    assert "### 证据链与写入纪律（脚本强制校验）" in SKILL_MD
-    assert "### 提取规则" in SKILL_MD
-    assert "### 失败路径（搜索工具异常）" in SKILL_MD
-    assert "（脚本强制校验）" in SKILL_MD
-    assert "总则" not in SKILL_MD
-    assert "**运行约定**：" not in SKILL_MD
+    assert "初始化（预留运行目录） → 0 领域拆解 → 1 厂商清单与官网搜索 → 2 知识清单" in SKILL_ROUTER
+    assert "## 分工与边界" in SKILL_ROUTER
+    assert "## 参数与运行约定" in SKILL_ROUTER
+    assert "## 通用纪律" in REF_DISCIPLINE
+    assert "### 证据链与写入纪律（脚本强制校验）" in REF_DISCIPLINE
+    assert "### 提取规则" in REF_DISCIPLINE
+    assert "### 失败路径（搜索工具异常）" in REF_DISCIPLINE
+    assert "（脚本强制校验）" in REF_DISCIPLINE
+    assert "总则" not in DOC
+    assert "**运行约定**：" not in DOC
 
 
 def test_settings_reference_existing_scripts():
@@ -719,7 +729,46 @@ def test_phases_3_to_5_forbid_mid_phase_user_interaction():
     通用纪律已有"流程中间没有交接停靠点……不得停靠、缩减配额"，但三个阶段
     均无落点，模型在该处读到的是"阶段 0/2 有『无需等待用户确认』、3/4/5 沉默"。
     """
-    for phase, nxt in (("阶段 3", "4"), ("阶段 4", "5"), ("阶段 5", "6")):
+    for ref, phase, nxt in ((REF_3, "阶段 3", "4"), (REF_4, "阶段 4", "5"), (REF_5, "阶段 5", "6")):
         assert (f"**阶段中途不与用户交互**：不产出状态汇报、不请用户选择方向"
                 f"（含\"是否继续 / 是否缩小领域\"）——本阶段做完即进入阶段 {nxt}"
-                in SKILL_MD), phase
+                in ref), phase
+
+
+def test_stage_reference_files_exist_and_linked():
+    """2026-09-17 拆分：SKILL.md 退化为路由，阶段细则搬进 references/、进入该阶段前才读。
+
+    守住拆分的结构不变量：① 6 个文件都在；② 路由地图列全 6 个路径（漏一个就有
+    一整个阶段的细则读不到）；③ 每个阶段文件带自己的阶段标题（搬错文件即红）；
+    ④ 出口指针链完整 0-2 → 3 → 4 → 5 → 6-7（模型靠它逐阶段前进，断链即卡死）；
+    ⑤ 路由里不留任何阶段标题（留了就是两处维护，且与"按需读"的设计矛盾）。
+    """
+    refs = [
+        ("通用纪律.md", None),
+        ("阶段0-2-初始化与清单.md", "## 初始化 · 预留运行目录"),
+        ("阶段3-验证搜索.md", "## 阶段 3 · 验证搜索"),
+        ("阶段4-增量发现.md", "## 阶段 4 · 增量发现"),
+        ("阶段5-覆盖评估与扩量.md", "## 阶段 5 · 覆盖评估与扩量"),
+        ("阶段6-7-自检与收尾.md", "## 阶段 6 · 清单了结自检"),
+    ]
+    for fname, heading in refs:
+        assert (REF_DIR / fname).is_file(), f"缺阶段文件 {fname}"
+        assert fname in SKILL_ROUTER, f"路由地图没列出 {fname}"
+        if heading:
+            assert heading in (REF_DIR / fname).read_text(encoding="utf-8"), \
+                f"{fname} 里没有标题「{heading}」"
+
+    chain = [
+        ("阶段0-2-初始化与清单.md", "阶段3-验证搜索.md"),
+        ("阶段3-验证搜索.md", "阶段4-增量发现.md"),
+        ("阶段4-增量发现.md", "阶段5-覆盖评估与扩量.md"),
+        ("阶段5-覆盖评估与扩量.md", "阶段6-7-自检与收尾.md"),
+    ]
+    for this_f, next_f in chain:
+        text = (REF_DIR / this_f).read_text(encoding="utf-8")
+        assert "**本阶段出口**" in text, f"{this_f} 缺出口指针"
+        assert next_f in text, f"{this_f} 的出口没指向 {next_f}"
+    assert "运行到此结束" in (REF_DIR / "阶段6-7-自检与收尾.md").read_text(encoding="utf-8")
+
+    for i in range(8):
+        assert f"## 阶段 {i} ·" not in SKILL_ROUTER, "路由里残留阶段标题，细则应只在 references/"
