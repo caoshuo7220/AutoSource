@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/skills/autosource/scripts/evidence_hook.py"
+            "command": "python \"${CLAUDE_PROJECT_DIR}/.claude/skills/autosource/scripts/evidence_hook.py\""
           }
         ]
       }

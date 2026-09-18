@@ -24,20 +24,21 @@ import os
 import sys
 from pathlib import Path
 
-from evidence import default_evidence_log  # 会话级留痕路径单一事实源（读写两端共用）
+from evidence import default_evidence_log, project_root  # 留痕路径与项目根：读写两端共用的单一事实源
 
 
 def run_scoped_log_path() -> Path | None:
     """按会话标记定位本会话运行目录内的留痕：outputs/run_*/.session_id == 会话 ID。
 
     多个匹配时取最新目录（同会话多轮的边角，取最近一次 --prepare）；
-    无匹配返回 None（调用方回退 default_evidence_log）。
+    无匹配返回 None（调用方回退 default_evidence_log）。**路径锚定项目根、
+    不相对 cwd**（2026-09-18 实证：cwd 漂移会让留痕写到漂移目录下）。
     """
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not session_id:
         return None
     candidates = []
-    for marker in Path("outputs").glob("run_*/.session_id"):
+    for marker in (project_root() / "outputs").glob("run_*/.session_id"):
         try:
             if marker.read_text(encoding="utf-8").strip() == session_id:
                 candidates.append(marker.parent)

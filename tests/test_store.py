@@ -25,8 +25,9 @@ def write_evidence(tmp_path: Path, urls: list[str]) -> Path:
 
 
 def source_entry(url="https://a.com/doc", name="A",
-                 category_path="算力服务器-GPU服务器-AI训练GPU") -> dict:
-    return {"name": name, "category_path": category_path, "source_type": "文档",
+                 category_path="算力服务器-GPU服务器-AI训练GPU",
+                 source_type="文档") -> dict:
+    return {"name": name, "category_path": category_path, "source_type": source_type,
             "granularity": "合集级", "url": url, "description": "d", "reason": "r"}
 
 
@@ -445,6 +446,21 @@ class TestCoverage:
         cov = {c["node"]: c for c in coverage(store, NODES)}
         assert cov["AI训练GPU"]["missing"] == 0
 
+    def test_types_distribution_per_node(self, tmp_path):
+        """docs/07 §五.3：薄弱判定的"体裁/来源维度单一"需要分布数据。下放后
+        阶段 5 是独立代理、拿不到"刚提取的内容"，分布改由脚本从 store 算。"""
+        store = self._seed(
+            tmp_path,
+            [source_entry(source_type="官网"),
+             source_entry(url="https://a.com/2", name="A2", source_type="官网"),
+             source_entry(url="https://a.com/3", name="A3", source_type="文献")],
+            [],
+        )
+        cov = {c["node"]: c for c in coverage(store, NODES)}
+        assert cov["AI训练GPU"]["types"] == {"官网": 2, "文献": 1}
+        # 无活动节点给空分布——"没有"与"单一"要能分开
+        assert cov["图形渲染GPU"]["types"] == {}
+
 
 class TestGarbageDomainGate:
     """2026-09-10 收录政策收紧：垃圾域/低价值聚合平台入库即拒（GARBAGE_DOMAINS
@@ -461,6 +477,19 @@ class TestGarbageDomainGate:
         assert result["accepted"] == 1
         assert result["rejected"][0]["reason"] == "垃圾域/低价值聚合平台，不收"
         assert "taobao" in result["rejected"][0]["url"]
+
+    def test_scheme_less_garbage_url_rejected(self, tmp_path):
+        """无协议写法不得绕过垃圾域闸门（2026-09-18 实证：_domain 对无协议 URL 返回
+        空串，is_garbage_domain('') 恒为假——115926/143431 两轮各有 50+ 条无协议
+        URL 走的正是这条路径，闸门形同虚设）。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["zhuanlan.zhihu.com/p/1", "https://a.com/doc"])
+        result = record_sources(store, [
+            source_entry(url="zhuanlan.zhihu.com/p/1", name="G"),
+            source_entry(),
+        ], evidence, NODES)
+        assert result["accepted"] == 1
+        assert "垃圾域" in result["rejected"][0]["reason"]
 
     def test_knowledge_rejected_on_garbage_domain(self, tmp_path):
         store = tmp_path / "store.jsonl"

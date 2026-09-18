@@ -3,7 +3,7 @@
 record_sources(run_dir, entries)   — 批次入库即验（store.py.record_sources）
 record_search(run_dir, entries)    — 搜索日志批量追加（store.py.record_search）
 record_knowledge(run_dir, entries) — 清单核对结果批量入库（store.py.record_knowledge）
-coverage(run_dir)                  — 每节点"已收 vs 提取"只读计数（只测缺失）
+coverage(run_dir)                  — 每节点"已收 vs 提取"只读计数 + 体裁分布
 finalize(run_dir)                  — 收尾折叠（postprocess.fold），返回汇总文本
 
 run_dir 为初始化 --prepare 打印的运行目录（outputs/run_{时间戳}/）；
@@ -112,8 +112,9 @@ def record_sources(run_dir: str, entries: list) -> str:
     """把一批新增数据源条目落库（入库即验）。
 
     何时调用：每完成一批搜索并提取新条目后调用一次——阶段 4 每节点基底 16 次
-    搜索完成后一批、扩充 4 次完成后再落一次；阶段 5 每节点收敛后一批；阶段 3 不需要
-    （清单核对结果走 record_knowledge，见 SKILL 阶段 3/5）。条目字段：name/category_path/source_type/
+    搜索完成后一批、扩充 4 次完成后再落一次；阶段 5 每节点收敛后一批；阶段 3 的
+    清单核对结果走 record_knowledge，但两次验证搜索命中的顺路新源走本工具。
+    条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
     垃圾域/低价值聚合平台（store.GARBAGE_DOMAINS 平台级名单）入库即拒——新闻门户、
@@ -121,8 +122,8 @@ def record_sources(run_dir: str, entries: list) -> str:
 
     返回 JSON：{"accepted": 入库数, "skipped": 裸 URL 精确重复跳过数,
     "rejected": [{index, name, url, reason}], "unmapped": [表外原始体裁词]}——
-    单条被拒不阻断批次；unmapped 列出 source_type 落「其他」的原始词（词表外，
-    应改从 SKILL 词表内选择；高频新词可补别名进 store.SOURCE_TYPE_ALIASES）。
+    单条被拒不阻断批次；unmapped 列出 source_type 落「其他」的原始词——按它换一个
+    更常见的内容形态词重录即可（同批重传即覆盖），无需查词表。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)
@@ -137,7 +138,8 @@ def record_search(run_dir: str, entries: list) -> str:
 
     何时调用：阶段 3 每 ~10-15 次验证搜索一批；阶段 4/5 每节点完成时一批。
     每项 {phase, node, query, results, extracted, zero_reason?}——query 必须照抄实际
-    发出的查询词（脚本在收尾时逐字比对证据留痕，不在则标注"证据缺失"）。
+    发出的查询词（脚本在收尾时逐字比对证据留痕，不在则标注"证据缺失"）；
+    results 填该次搜索返回的链接条数，extracted 填本次提取的候选条数。
     zero_reason（2026-09-09 收尾护栏）：增量/扩量搜索提取为 0 时必填拒收理由
     （已收/垃圾域/无主题边界等）——finalize 校验缺失或与结果域名证据矛盾时
     拒绝收尾；补录 = 重传同 phase+node+query 行（末次覆盖）。
@@ -176,14 +178,15 @@ def record_knowledge(run_dir: str, entries: list) -> str:
 
 @mcp.tool()
 def coverage(run_dir: str) -> str:
-    """查每节点"已收 vs 提取"的缺口（只读，不改数据）。
+    """查每节点"已收 vs 提取"的缺口与体裁分布（只读，不改数据）。
 
     何时调用：阶段 5 扩量判断与收尾前自查。missing 是粗略缺口信号（提取数含
     去重前与跨节点顺路发现、已收数是幂等去重后的入库数，两口径天然有差），
     小额 missing 不触发补搜；接近该节点一整批提取量才怀疑漏调 record_sources。
-    只测条数缺失；体裁/来源维度是否单一由模型在会话内判断（依据是它刚提取的内容）。
 
-    返回 [{node, recorded, extracted, missing}]（missing = max(0, 提取-已收)）。
+    返回 [{node, recorded, extracted, missing, types}]（missing = max(0, 提取-已收)；
+    types 为该节点体裁分布，由脚本从 store 算——"体裁/来源维度单一"按它判定，
+    已收数为 0 的节点给空分布）。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)

@@ -164,7 +164,7 @@ class TestMcpProtocol:
                 "run_dir": str(run_dir)}}, req_id=6)
             cov = json.loads(_tool_text(r))
             assert cov[0] == {"node": "数据中心交换机", "recorded": 1,
-                              "extracted": 5, "missing": 4}
+                              "extracted": 5, "missing": 4, "types": {"文档": 1}}
 
             # 哨兵路径：record_search 有提取、record_sources 未调用 → finalize 报错
             _rpc(proc, "tools/call", {"name": "record_search", "arguments": {

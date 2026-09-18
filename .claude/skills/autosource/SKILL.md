@@ -1,7 +1,7 @@
 ---
 name: autosource
 description: 系统性发现技术、行业或研究领域的多个公开数据源并导出结构化清单。仅在用户需要多来源收集、分类整理或 CSV 输出时使用，不适用于单个网页、文档或数据集查询。
-allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sources, mcp__autosource-store__record_search, mcp__autosource-store__record_knowledge, mcp__autosource-store__coverage, mcp__autosource-store__finalize
+allowed-tools: WebSearch, Read, Write, Bash, Agent, mcp__autosource-store__record_sources, mcp__autosource-store__record_search, mcp__autosource-store__record_knowledge, mcp__autosource-store__coverage, mcp__autosource-store__finalize
 ---
 
 # AutoSource — 数据源自动发现
@@ -18,7 +18,7 @@ allowed-tools: WebSearch, Read, Write, Bash, mcp__autosource-store__record_sourc
 
 ## 分工与边界
 
-**分工原则**：LLM 只负责语义环节（领域拆解、知识清单、搜索、验证与提取判断），一切确定性环节（时间戳、目录命名、入库校验、证据链、对账、去重、CSV 编码、stats 统计、搜索日志、折叠收尾、文件清理）由脚本保证。**数据落盘不靠写大文件**：新增条目、搜索日志与清单核对结果通过 record_sources / record_search / record_knowledge 工具入库（store.jsonl 由脚本持有、模型不可见），收尾由 finalize 工具一次性折叠；元数据（领域/节点/模型/厂商清单/知识清单声明）在 manifest.json，由模型 Write 一次（阶段 0-2）——清单核对结果**不进 manifest 转写**，随验证过程分批落库。
+**分工原则**：LLM 只负责语义环节（领域拆解、知识清单、搜索、验证与提取判断），一切确定性环节（时间戳、目录命名、入库校验、证据链、对账、去重、CSV 编码、stats 统计、搜索日志、折叠收尾、文件清理）由脚本保证。**数据落盘不靠写大文件**：新增条目、搜索日志与清单核对结果通过 record_sources / record_search / record_knowledge 工具入库（store.jsonl 由脚本持有、模型不可见），收尾由 finalize 工具一次性折叠；元数据（领域/节点/模型/厂商清单/知识清单声明）在 manifest.json，由模型 Write 一次（阶段 0-2）——清单核对结果**不进 manifest 转写**，随验证过程分批落库。**搜索阶段由子代理执行**：阶段 1/3/4/5 的搜索、提取、落库整体下放子代理，主流程只做编排、验收、对账（派工模板见通用纪律「子代理派工」）；落盘仍只走 MCP 工具，不开第二套。
 
 **运行期边界**：本流程不写代码、不跑测试——运行中禁止调用开发类技能；唯一合法的 Bash 是 postprocess 命令（初始化 `--prepare` 与阶段 7 报告命名 `--rename-report`）；数据写入只走五个 MCP 工具（record_sources / record_search / record_knowledge / coverage / finalize），禁止自创脚本或 Write 数据文件组装。
 

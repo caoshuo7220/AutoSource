@@ -72,7 +72,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 from evidence import (RUN_DIR_RE, check_grounded, default_evidence_log,
                       extract_strings, line_query, query_in_evidence,
@@ -82,12 +81,12 @@ from lineage import build_lineage, first_query_by_source, write_lineage_csv
 from report import finalize_report
 # 条目粒度契约与节点推导归存储层（store），编排层从这里取——依赖方向单向向下
 # （mcp_server → store/postprocess → evidence/lineage/report，无环）。
-from store import (GRANULARITY_LEVELS, canonicalize_source_type, leaf_node,
-                   is_garbage_domain, load_store)
+from store import (GRANULARITY_LEVELS, canonicalize_source_type, domain_of,
+                   leaf_node, is_garbage_domain, load_store)
 
 # 重导出（test_postprocess 的导入面）：query_in_evidence 本模块未用，仅作兼容出口。
 __all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicate",
-           "default_evidence_log", "finalize_report", "fold", "leaf_node",
+           "default_evidence_log", "domain_of", "finalize_report", "fold", "leaf_node",
            "prepare_run_dir", "query_in_evidence", "run_pipeline", "run_evidence_log",
            "sanitize_domain", "slice_evidence", "strip_citation_anchors"]
 
@@ -147,10 +146,6 @@ def prepare_run_dir(base: Path, now: Optional[datetime] = None) -> str:
     return str(run_dir)
 
 
-def _domain(url: str) -> str:
-    return urlparse(url).netloc
-
-
 def deduplicate(sources: list[dict]) -> list[dict]:
     """按域名 + 名称去重，保留首次出现，镜像站（不同域名）保留。
 
@@ -158,13 +153,15 @@ def deduplicate(sources: list[dict]) -> list[dict]:
     record_sources 与 record_knowledge 各记一次、两次名称措辞不同时，
     (域名,名称) 键不命中——200054 轮交付清单因此虚高 116 条/16%；且输出 CSV
     剥离纯数字锚点，只在原始串上判重会留下两行完全相同的 URL。
+    URL 键按 evidence._form_variants 的口径归一（2026-09-18）：协议与尾斜杠
+    不改变资源身份，不归一则同一入口的两种照抄写法双双留下。
     """
     seen: set[tuple[str, str]] = set()
     seen_urls: set[str] = set()
     result: list[dict] = []
     for s in sources:
-        url = strip_citation_anchors(s["url"])
-        key = (_domain(s["url"]), s["name"])
+        url = re.sub(r"^https?://", "", strip_citation_anchors(s["url"])).rstrip("/")
+        key = (domain_of(s["url"]), s["name"])
         if key not in seen and url not in seen_urls:
             seen.add(key)
             seen_urls.add(url)
@@ -356,7 +353,7 @@ def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list
         result_urls = urls_by_query.get(query, [])
         if any(SINGLE_DOC_URL.search(u) for u in result_urls):
             single_doc_zero.append((node, query))
-        domains = {_domain(u) for u in result_urls}
+        domains = {domain_of(u) for u in result_urls}
         if not domains:
             if not reason:
                 violations.append((node, query, reason, "无 zero_reason"))
@@ -412,6 +409,33 @@ def _check_zero_reason_violations(audit: dict) -> None:
         "phase+node+query 行，末次覆盖）后重跑 finalize：\n"
         + "\n".join(f"  - [{node}] {query}（{problem}）"
                     for node, query, _reason, problem in violations))
+
+
+def _reverse_gap(evidence: str, journal_queries: set) -> dict:
+    """收尾反向差额（docs/07 §六）：留痕里的查询词 − 日志里的查询词。
+
+    正向（日志 → 留痕）由「证据缺失」列逐行承担；反向这一边原先没有——漏记的
+    搜索此前只能人工比对（2026-09-11 实证：200054 轮记账漏 37%）。搜索下放
+    子代理后日志由执行搜索的代理写，这一边更需要摆上桌。
+
+    只报告不拦截：差额里的查询词归属不到节点/阶段，主流程补录无从下手；而
+    "有害漏记"（真搜了但日志不足 20 条）已由哨兵 1 拦截。样例截前 10 个。
+    """
+    evidence_queries = set()
+    for line in evidence.splitlines():
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        query = line_query(payload)
+        if query:
+            evidence_queries.add(query)
+    gap = sorted(evidence_queries - journal_queries)
+    return {"applicable": True,
+            "evidence_queries": len(evidence_queries),
+            "journal_queries": len(journal_queries),
+            "unlogged": len(gap),
+            "unlogged_samples": gap[:10]}
 
 
 def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False,
@@ -481,7 +505,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     # 垃圾候选无需证据链背书、也不占用"URL 不在留痕"的误导性拒因。
     candidates_pre_filter = len(all_candidates)
     all_candidates = [s for s in all_candidates
-                      if not is_garbage_domain(_domain(str(s.get("url") or "")))]
+                      if not is_garbage_domain(domain_of(str(s.get("url") or "")))]
     garbage_filtered = candidates_pre_filter - len(all_candidates)
     # 体裁归一（封闭词表）：MCP 路径的 store 行入库时已归一一次，此处对三来源
     # 汇合（store/CLI raw/knowledge manifest）统一再归一——幂等，双入口口径一致
@@ -552,6 +576,12 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
 
     # 证据留痕切片（会话级 → 运行级）——血缘表与"来源搜索"列的归因基础。
     # 运行级留痕即本运行专属、不混入其他运行，全量归档不切片——切片会连带丢掉
+    # 收尾反向差额（docs/07 §六）：留痕 → 日志方向，只看运行级留痕——会话级
+    # 共享留痕本就按日志查询词切片，切片后差额恒为零，报 0 是误导，标「不适用」。
+    reverse_gap = (_reverse_gap(evidence, journal_queries) if run_scoped_log else
+                   {"applicable": False, "evidence_queries": None,
+                    "journal_queries": len(journal_queries),
+                    "unlogged": None, "unlogged_samples": []})
     # 模型漏记账的搜索留痕（2026-09-11 实证：200054 轮记账漏 37%，交付清单
     # 29% 的 URL 归档后无法溯源）；会话级共享留痕仍按本运行查询词切片。
     sliced, slice_kept, slice_skipped = slice_evidence(
@@ -569,7 +599,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         q = line_query(payload)
         if q:
             urls_by_query.setdefault(q, []).extend(result_urls(payload))
-    kept_domains = {_domain(str(s.get("url") or "")) for s in kept}
+    kept_domains = {domain_of(str(s.get("url") or "")) for s in kept}
     zero_audit = _zero_extraction_audit(zero_search_rows, urls_by_query, kept_domains)
     if enforce_quotas:
         _check_node_quota(journal, nodes)
@@ -623,6 +653,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "unmapped_types": unmapped_types,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
+        "reverse_gap": reverse_gap,
         "sources_broken": sources_broken,
         "zero_audit": zero_audit,
         "garbage_filtered": garbage_filtered,
@@ -745,6 +776,9 @@ def _build_run_attestation(summary: dict, journal: list, records: list, nodes: l
         "quota": {"required_per_node": MIN_INCREMENTAL_SEARCHES, "per_node": per_node},
         "journal": {"rows": _count(summary.get("journal_count")),
                     "skipped": _count(summary.get("journal_skipped"))},
+        # 反向差额（docs/07 §六）：只报告不拦截——差额归属不到节点/阶段，
+        # 补录无从下手；"有害漏记"已由配额哨兵拦截。
+        "reverse_gap": summary.get("reverse_gap", {}),
     }
 
 

@@ -15,7 +15,7 @@ store 承载三类记录：增量发现条目（type=source）、搜索日志（
   zero_reason 可选——增量/扩量零提取的拒收理由（收尾护栏哨兵 2/3 校验）
 - record_knowledge：清单核对结果批量入库（verified=true 必带 url 且过证据链；
   verified=false 带 note 不查证据；同名重录 = 状态更新，折叠取末次）
-- coverage：每节点"已收 vs 提取"的只读计数（只测缺失，不测薄弱）
+- coverage：每节点"已收 vs 提取"只读计数 + 每节点体裁分布（types）——脚本只供数据，薄弱判定仍由模型做
 
 条目粒度契约（GRANULARITY_LEVELS）与节点推导（leaf_node）是存储层的契约工具——
 入库校验与收尾统计共用，编排层（postprocess）从这里取（依赖方向：编排 → 存储，
@@ -68,8 +68,14 @@ GARBAGE_DOMAINS = [
 ]
 
 
-def _domain(url: str) -> str:
-    return urlparse(url).netloc
+def domain_of(url: str) -> str:
+    """主机名（契约工具：入库闸门与收尾去重共用同一份实现）。
+
+    无协议写法要认——结果的结构化链接带协议、摘要散文常不带，两种都是逐字照抄来的
+    合法写法（2026-09-18 实证：不补协议则返回空串，垃圾域闸门形同虚设）。此前本模块
+    与 postprocess 各有一份拷贝，改一份漏一份不会有测试报红——收敛为单一实现。
+    """
+    return urlparse(url if "://" in url else "http://" + url).netloc
 
 
 def is_garbage_domain(domain: str) -> bool:
@@ -339,7 +345,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
         if not isinstance(e, dict) or not name or not url:
             rejected.append({"index": i, "name": name, "url": url, "reason": "缺 name/url"})
             continue
-        if is_garbage_domain(_domain(url)):
+        if is_garbage_domain(domain_of(url)):
             rejected.append({"index": i, "name": name, "url": url,
                              "reason": "垃圾域/低价值聚合平台，不收"})
             continue
@@ -467,7 +473,7 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
         if verified and not url:
             rejected.append({"index": i, "name": name, "reason": "verified=true 缺 url"})
             continue
-        if verified and is_garbage_domain(_domain(url)):
+        if verified and is_garbage_domain(domain_of(url)):
             rejected.append({"index": i, "name": name,
                              "reason": "垃圾域/低价值聚合平台，不收"})
             continue
@@ -508,30 +514,37 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
 
 
 def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
-    """每节点 已收 vs 提取 的只读计数——只测缺失（missing = max(0, 提取-已收)）。
+    """每节点 已收 vs 提取 的只读计数（missing = max(0, 提取-已收)）+ 体裁分布。
 
     missing 是粗略缺口信号（2026-09-02 评审）：提取数含去重前重复与跨节点
     顺路发现，已收数是幂等去重后的入库数，两口径天然有差——小额 missing 不
     视为遗漏，接近一整批提取量才值得怀疑漏调 record_sources。
-    只测缺失、不测薄弱（体裁/来源维度单一由模型在会话内判断，依据是它刚提取
-    的内容）；角度级状态不可恢复（角度多样性脚本校验 2026-08-31 裁决不做，该
-    缺口以散文层治理维持，见 docs/02 讨论日志）。
+
+    types 为每节点体裁分布（2026-09-18 补，docs/07 §五.3）：薄弱判定的"体裁/
+    来源维度单一"原由模型按"刚提取的内容"判断，搜索下放子代理后主流程不再
+    经过条目正文，改由本函数从 store 算分布供其判定；已收数为 0 的节点给空
+    分布——"没有"与"单一"要能分开。角度级状态不可恢复（角度多样性脚本校验
+    2026-08-31 裁决不做，该缺口以散文层治理维持，见 docs/02 讨论日志）。
     """
     records, _ = load_store(store_path) if store_path.exists() else ([], 0)
-    per: dict[str, dict] = {n: {"recorded": 0, "extracted": 0} for n in nodes}
+    per: dict[str, dict] = {n: {"recorded": 0, "extracted": 0, "types": {}}
+                            for n in nodes}
     extra: dict[str, dict] = {}
 
     def bucket(node: str) -> dict:
         if node in per:
             return per[node]
-        return extra.setdefault(node, {"recorded": 0, "extracted": 0})
+        return extra.setdefault(node, {"recorded": 0, "extracted": 0, "types": {}})
 
     for r in records:
         node = str(r.get("node") or "")
         if not node:
             continue
         if r.get("type") == "source":
-            bucket(node)["recorded"] += 1
+            b = bucket(node)
+            b["recorded"] += 1
+            t = str(r.get("source_type") or "其他")
+            b["types"][t] = b["types"].get(t, 0) + 1
         elif r.get("type") == "search":
             try:
                 bucket(node)["extracted"] += int(r.get("extracted") or 0)
@@ -541,5 +554,6 @@ def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
     for node, c in {**per, **extra}.items():
         result.append({"node": node, "recorded": c["recorded"],
                        "extracted": c["extracted"],
-                       "missing": max(0, c["extracted"] - c["recorded"])})
+                       "missing": max(0, c["extracted"] - c["recorded"]),
+                       "types": c["types"]})
     return result

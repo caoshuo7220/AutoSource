@@ -77,13 +77,14 @@ def test_skill_has_no_phantom_c_parameter():
     assert "预设分类" not in DOC
 
 
-def test_skill_frontmatter_tools_no_agent():
-    """frontmatter allowed-tools 为运行所需最小集，不含未被流程使用的 Agent。
-    五个 MCP 工具（.mcp.json 注册的 autosource-store）与正文强依赖对齐，一并声明
-    （2026-09-08 架构修订起为五工具：record_knowledge 清单核对批次）。"""
+def test_skill_frontmatter_tools_declare_agent():
+    """frontmatter allowed-tools 声明流程实际使用的工具（docs/07 §七）。
+    阶段 1/3/4/5 的搜索、提取、落库下放子代理后 Agent 成为强依赖，一并声明
+    （2026-09-18；此前"不含未被流程使用的 Agent"的钉桩随下放改造作废）。
+    五个 MCP 工具（.mcp.json 注册的 autosource-store）与正文强依赖对齐。"""
     frontmatter = DOC.split("---")[1]
     assert "allowed-tools" in frontmatter
-    assert "Agent" not in frontmatter
+    assert "Agent" in frontmatter
     for tool in ["mcp__autosource-store__record_sources",
                  "mcp__autosource-store__record_search",
                  "mcp__autosource-store__record_knowledge",
@@ -375,7 +376,9 @@ def test_vendor_phase_own_query_form_no_side_extraction():
     assert "厂商清单写进 manifest 的 `vendors` 数组" in REF_0_2
     # manifest 两栏分装：knowledge = 阶段 3 待验证清单；vendors = 阶段 1 厂商清单
     # （2026-09-11 B 方案）——厂商项混进 knowledge 会重新逼出"阶段 3 跳过厂商项"的补丁
-    assert '`{domain, nodes, model, vendors, knowledge}`' in DOC
+    # 2026-09-18（docs/07 §五.1）：node_profiles 并入 manifest 顶层——画像必须落盘，
+    # 否则下放到子代理的搜索拿不到节点搜索依据（子代理读不到主会话上下文）
+    assert '`{domain, nodes, model, node_profiles, vendors, knowledge}`' in DOC
     assert "预期体裁为\"官网\"的厂商项由阶段 1 处理" not in DOC
 
 
@@ -500,10 +503,22 @@ def test_coverage_missing_rough_signal_contract():
     assert "missing > 0（提取过但落库不足）时只补该节点" not in DOC
 
 
+def test_self_check_searches_before_calling_coverage():
+    """2026-09-18（122246 轮首跑实证）：开工自检的第 ③ 项 coverage 在首次搜索前
+    **必然失败**——证据留痕文件由 WebSearch 的 PostToolUse hook 首次触发时才创建，
+    五个 MCP 工具在留痕不存在时一律报「证据留痕不存在：…」（mcp_server.self_check）。
+    旧文案「① 工具加载 / ② coverage / ③ manifest，三项全过才开搜」照字面执行，
+    会让每一次运行都在开搜前中止。修法：② 先发一次真实的 WebSearch 把留痕造出来。"""
+    assert "② **发一次 WebSearch**" in REF_DISCIPLINE
+    assert "留痕文件由 hook 首次触发时才创建" in REF_DISCIPLINE
+
+
 def test_journal_phase_vocabulary_pinned():
     """2026-09-01 实测 bug 钉桩：phase 是模型自由文本，曾被缩写为"增量/验证"
-    导致选题分布 0/0 与 verified 警告误报——契约钉死三个取值。"""
-    assert "phase 只允许三个取值" in REF_3
+    导致选题分布 0/0 与 verified 警告误报。2026-09-18 起字面量单一来源收敛到
+    通用纪律「子代理派工」的分组表（阶段 1 搜索入账，取值增至四个）。"""
+    assert "按上表写死" in REF_DISCIPLINE
+    assert "按通用纪律「子代理派工」的字面量填" in REF_3
 
 
 def test_manifest_example_is_valid_json():
@@ -686,7 +701,13 @@ def test_intro_structure_reorganized():
 
 
 def test_settings_reference_existing_scripts():
-    """settings.json 的 hook 命令与 postprocess 权限规则指向真实存在的脚本文件。"""
+    """settings.json 的 hook 命令与 postprocess 权限规则指向真实存在的脚本文件。
+
+    2026-09-18（122246 轮实证）：hook 命令曾为裸相对路径 `python .claude/skills/...`，
+    会话 cwd 一旦漂移（模型排查时 `cd` 进运行目录）就解析不到脚本，证据留痕自 12:47
+    起整段停写——17 条搜索无留痕、5 个扩量组整组重做。改为 `${CLAUDE_PROJECT_DIR}`
+    锚定（CLI 自身 lint 推荐的形式，见 claude.exe 内的 PowerShell 告警文案）；
+    不硬编码绝对路径——settings.json 随 git 分发，须对所有使用者有效（docs/02 08-26）。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     for entry in settings["permissions"]["allow"]:
         if "postprocess.py" in entry:
@@ -697,7 +718,11 @@ def test_settings_reference_existing_scripts():
             if "evidence_hook.py" in cmd:
                 assert "scripts/evidence_hook.py" in cmd
                 assert "evidence_hook.py outputs/" not in cmd  # 2026-08-26 起按会话隔离命名，不留固定共享路径
-                hook_script = cmd.split("python ", 1)[1].split(" outputs/", 1)[0]
+                # cwd 漂移免疫：必须锚定 ${CLAUDE_PROJECT_DIR}，裸相对路径会静默停写
+                assert "${CLAUDE_PROJECT_DIR}" in cmd, \
+                    "hook 命令必须锚定 ${CLAUDE_PROJECT_DIR}（裸相对路径遇 cwd 漂移会静默停写证据留痕）"
+                hook_script = cmd.split("${CLAUDE_PROJECT_DIR}/", 1)[1]
+                hook_script = hook_script.strip('"').split(" outputs/", 1)[0]
                 assert (ROOT / hook_script).is_file()
             assert "log_tool.py" not in cmd  # 2026-09-02 改名 evidence_hook，旧名不残留
 

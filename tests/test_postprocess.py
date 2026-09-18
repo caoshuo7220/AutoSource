@@ -94,6 +94,18 @@ def base_data() -> dict:
     }
 
 
+def test_both_gates_share_one_domain_helper():
+    """入库闸门（store）与收尾闸门（postprocess）必须用同一个主机名函数。
+
+    此前两处各有一份完全相同的 `_domain` 拷贝，改一份漏一份不会有测试报红——
+    2026-09-18 实证：无协议 URL 返回空串的 bug 正是因为两份**同时**存在才长期
+    没暴露（store 的垃圾域闸门与 postprocess 的去重键一起失效）。同一文件里
+    `is_garbage_domain` 等四个契约工具早已共享，`_domain` 是唯一漏掉的那个。"""
+    from store import domain_of as store_domain
+    from postprocess import domain_of as pp_domain
+    assert store_domain is pp_domain
+
+
 class TestDeduplicate:
     def test_no_duplicates(self):
         sources = [
@@ -124,6 +136,32 @@ class TestDeduplicate:
             {"name": "B", "url": "https://a.com/2"},
         ]
         assert len(deduplicate(sources)) == 2
+
+    def test_scheme_variant_same_name_deduped(self):
+        """带协议与不带协议是同一资源，同名时须判重（2026-09-18 实证：142313 轮
+        留下 4 组并存条目——结果的结构化链接带协议、摘要散文可能不带，两种都是
+        逐字照抄来的合法写法；此前 _domain 对无协议 URL 返回空串，键落成 ('',名称)）。"""
+        sources = [
+            {"name": "康宁 Corning", "url": "https://www.corning.com"},
+            {"name": "康宁 Corning", "url": "www.corning.com"},
+        ]
+        assert len(deduplicate(sources)) == 1
+
+    def test_scheme_variant_different_name_deduped(self):
+        """同一 URL 两种写法 + 名称措辞不同——URL 键（此前比的是原始串）也要认。"""
+        sources = [
+            {"name": "康宁官网", "url": "https://www.corning.com"},
+            {"name": "Corning 中国", "url": "www.corning.com"},
+        ]
+        assert len(deduplicate(sources)) == 1
+
+    def test_scheme_variant_trailing_slash_deduped(self):
+        """协议与尾斜杠同属"不改变资源身份"的两样（evidence._form_variants 口径）。"""
+        sources = [
+            {"name": "康宁官网", "url": "https://www.corning.com"},
+            {"name": "Corning 中国", "url": "www.corning.com/"},
+        ]
+        assert len(deduplicate(sources)) == 1
 
     def test_same_url_different_name_deduped(self):
         """URL 相同即同一资源，名称措辞不同不构成两个条目（2026-09-11 实证：
@@ -1628,16 +1666,20 @@ class TestReportStatsInjection:
 class TestSessionIsolatedEvidenceLog:
     """证据留痕按会话隔离（2026-08-26 起）：并行运行互不删除对方留痕。"""
 
-    def test_default_evidence_log_uses_session_id(self, monkeypatch):
+    def test_default_evidence_log_uses_session_id(self, monkeypatch, tmp_path):
+        """2026-09-18：默认留痕路径锚定项目根（$CLAUDE_PROJECT_DIR 优先、按文件位置回退），
+        不再相对进程 cwd——cwd 漂移会让 hook 把留痕写到别处（122246 轮实证）。"""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-abc")
-        assert default_evidence_log() == "outputs/search_log_sess-abc.jsonl"
+        assert default_evidence_log() == str(tmp_path / "outputs" / "search_log_sess-abc.jsonl")
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
-        assert default_evidence_log() == "outputs/search_log.jsonl"
+        assert default_evidence_log() == str(tmp_path / "outputs" / "search_log.jsonl")
 
     def test_evidence_hook_without_arg_writes_session_file(self, tmp_path):
         payload = json.dumps(
             {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
-        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-1")
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-1",
+                   CLAUDE_PROJECT_DIR=str(tmp_path))
         result = subprocess.run(
             [sys.executable, str(SKILL_DIR / "evidence_hook.py")],
             input=payload, capture_output=True, encoding="utf-8", timeout=30,
@@ -1646,6 +1688,28 @@ class TestSessionIsolatedEvidenceLog:
         log = tmp_path / "outputs" / "search_log_sess-1.jsonl"
         assert log.exists()
         assert json.loads(log.read_text(encoding="utf-8").strip())["tool_input"]["query"] == "测试"
+
+    def test_evidence_hook_immune_to_cwd_drift(self, tmp_path):
+        """122246 轮实证：会话 cwd 漂移（模型排查时 `cd` 进运行目录）会让 hook 的相对路径
+        解析失败、证据留痕整段停写（19 次搜索无留痕、5 个扩量组整组重做）。锚定项目根后，
+        cwd 漂到别处也照常写进运行目录，且不在漂移目录下留 outputs/ 残渣。"""
+        root = tmp_path / "repo"
+        run_dir = root / "outputs" / "run_2026-01-01-000000"
+        run_dir.mkdir(parents=True)
+        (run_dir / ".session_id").write_text("sess-drift", encoding="utf-8")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        payload = json.dumps(
+            {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-drift",
+                   CLAUDE_PROJECT_DIR=str(root))
+        result = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "evidence_hook.py")],
+            input=payload, capture_output=True, encoding="utf-8", timeout=30,
+            cwd=str(elsewhere), env=env)
+        assert result.returncode == 0
+        assert (run_dir / "evidence.jsonl").exists()
+        assert not (elsewhere / "outputs").exists()  # 漂移目录不留残渣
 
 
 class TestRunScopedEvidence:
@@ -1727,7 +1791,8 @@ class TestRunScopedEvidence:
         (run_dir / ".session_id").write_text("sess-run-ev", encoding="utf-8")
         payload = json.dumps(
             {"tool_name": "WebSearch", "tool_input": {"query": "测试"}}, ensure_ascii=False)
-        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-run-ev")
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sess-run-ev",
+                   CLAUDE_PROJECT_DIR=str(tmp_path))
         result = subprocess.run(
             [sys.executable, str(SKILL_DIR / "evidence_hook.py")],
             input=payload, capture_output=True, encoding="utf-8", timeout=30,
@@ -2367,3 +2432,68 @@ class TestRunAttestation(_SentinelFoldBase):
         outdir = Path(summary["outdir"])
         assert not (outdir / f"{outdir.name}_运行验收单.json").exists()
         assert list(outdir.glob("*_数据源清单.csv"))
+
+
+class TestReverseGap(_SentinelFoldBase):
+    """docs/07 §六：收尾反向差额（留痕 → 日志）——把漏记账的搜索摆上桌。
+
+    只报告不拦截：差额里的查询词归属不到节点/阶段，补录无从下手；"有害漏记"
+    （真搜了但日志不足 20 条）已由哨兵 1 拦截。会话级共享留痕按日志切片、
+    切完差额恒为零，须标「不适用」而不是报 0。"""
+
+    def _clean_rows(self):
+        return [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+
+    def _clean_query_urls(self, extra=()):
+        urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
+        urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
+        for q in extra:
+            urls[q] = ["https://a.com/doc"]
+        return urls
+
+    def _attestation(self, summary):
+        outdir = Path(summary["outdir"])
+        path = outdir / f"{outdir.name}_运行验收单.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_unlogged_queries_reported(self, tmp_path):
+        """留痕走运行级（run_dir/evidence.jsonl）：多出的两次搜索如实计入差额与样例。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)
+        self._write_store(run_dir, self._clean_rows())
+        ev = write_evidence_map(tmp_path, self._clean_query_urls(["漏记甲", "漏记乙"]), [])
+        (run_dir / "evidence.jsonl").write_text(ev.read_text(encoding="utf-8"),
+                                                encoding="utf-8")
+        summary = fold(str(run_dir), out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        gap = self._attestation(summary)["reverse_gap"]
+        assert gap["applicable"] is True
+        assert gap["evidence_queries"] == 2 * QUOTA_N + 2
+        assert gap["journal_queries"] == 2 * QUOTA_N
+        assert gap["unlogged"] == 2
+        assert set(gap["unlogged_samples"]) == {"漏记甲", "漏记乙"}
+
+    def test_no_gap_reports_zero(self, tmp_path):
+        """三本账齐平：差额为 0（而不是省略该节）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)
+        self._write_store(run_dir, self._clean_rows())
+        ev = write_evidence_map(tmp_path, self._clean_query_urls(), [])
+        (run_dir / "evidence.jsonl").write_text(ev.read_text(encoding="utf-8"),
+                                                encoding="utf-8")
+        summary = fold(str(run_dir), out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        gap = self._attestation(summary)["reverse_gap"]
+        assert gap["applicable"] is True
+        assert gap["unlogged"] == 0
+        assert gap["unlogged_samples"] == []
+
+    def test_session_scoped_evidence_marked_not_applicable(self, tmp_path):
+        """显式传 evidence_log（会话级共享留痕路径）→ 标「不适用」，不报误导性的 0。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        summary = self._fold(tmp_path, run_dir, self._clean_rows(),
+                             self._clean_query_urls(), evidence_sources=self._clean_rows()[:1])
+        gap = self._attestation(summary)["reverse_gap"]
+        assert gap["applicable"] is False
+        assert gap["unlogged"] is None
+        assert gap["evidence_queries"] is None

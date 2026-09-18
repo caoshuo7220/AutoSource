@@ -16,12 +16,24 @@ import re
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_EVIDENCE_LOG = "outputs/search_log.jsonl"
-
 # prepare 预留的运行目录：run_{时间戳}（收尾时由脚本重命名为 {领域词}_{时间戳}）。
 # 路径由脚本生成、每次运行唯一——连续/并发运行的 raw.json 不会互相覆盖
 # （旧固定路径 outputs/raw.json 仍兼容，父目录不匹配本模式时走原逻辑）。
 RUN_DIR_RE = re.compile(r"^run_(\d{4}-\d{2}-\d{2}-\d{6})(_\d+)?$")
+
+
+def project_root() -> Path:
+    """项目根：优先 $CLAUDE_PROJECT_DIR（Claude Code 为 hook 进程设置的环境变量），
+    回退按本文件位置上溯——**不相对进程 cwd**。
+
+    2026-09-18（122246 轮实测）：hook 是每次 WebSearch 新起的子进程、继承会话 cwd，
+    模型排查时 `cd` 进运行目录即造成漂移；留痕的定位与写入若相对 cwd，证据会被写到
+    漂移目录下的 outputs/，运行目录里反而空空如也——症状与"hook 完全失效"一个样。
+    """
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[4]
 
 
 def default_evidence_log() -> str:
@@ -30,12 +42,11 @@ def default_evidence_log() -> str:
     与 evidence_hook.py 的命名规则一致：hook 按 CLAUDE_CODE_SESSION_ID 写
     会话文件，postprocess 读同一会话文件、也只删同一会话文件——并行
     运行的证据链互不干扰（2026-08-26 实证：共享文件被并行运行的
-    postprocess 删除，另一运行证据链断裂）。
+    postprocess 删除，另一运行证据链断裂）。路径锚定项目根（见 project_root）。
     """
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if session_id:
-        return f"outputs/search_log_{session_id}.jsonl"
-    return DEFAULT_EVIDENCE_LOG
+    name = f"search_log_{session_id}.jsonl" if session_id else "search_log.jsonl"
+    return str(project_root() / "outputs" / name)
 
 
 def run_evidence_log(run_dir: Path) -> Optional[Path]:
