@@ -10,12 +10,8 @@ CLAUDE.md
 # autosource outputs
 outputs/
 outputs_1/
-# 文档：契约类入库，其余本地保留
+# 文档：全部本地保留，不入库（2026-09-20 用户决策）
 docs/*
-!docs/01-交付手册.md
-!docs/03-待办账本.md
-!docs/04-存储架构改造方案.md
-!docs/06-规则强制力重构方案.md
 # local overrides (not committed)
 .claude/settings.local.json
 evals/
