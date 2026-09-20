@@ -122,8 +122,9 @@ def record_sources(run_dir: str, entries: list) -> str:
 
     返回 JSON：{"accepted": 入库数, "skipped": 裸 URL 精确重复跳过数,
     "rejected": [{index, name, url, reason}], "unmapped": [表外原始体裁词]}——
-    单条被拒不阻断批次；unmapped 列出 source_type 落「其他」的原始词——按它换一个
-    更常见的内容形态词重录即可（同批重传即覆盖），无需查词表。
+    单条被拒不阻断批次；unmapped 列出 source_type 落「其他」的原始词——该词已随条目
+    入库（原词留痕在 source_type_raw，信息零丢失），不必重录；后续批次换用更朴素的
+    形态词即可。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)

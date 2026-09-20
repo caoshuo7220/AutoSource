@@ -591,6 +591,26 @@ def test_settings_allow_mcp_store_tools():
         assert f"mcp__{server}__{tool}" in allow
 
 
+def test_settings_allow_delegation_tools():
+    """下放改造引入的工具进 settings.json 会话级白名单（2026-09-20 实证）。
+
+    default 模式下 13 分钟内弹窗 60 次：主会话 11 次派工、子代理 22 次工具加载。
+    `Agent` 此前只在 SKILL frontmatter 声明里，而那是回合级预放行——docs/02
+    09-01 记着「回合级放行在用户中途插话即失效」，而确认弹窗本身就是插话：
+    弹窗把自己锁死。同 test_settings_allow_mcp_store_tools 的理由，运行期零弹窗
+    需会话级兜底。
+
+    Grep / Glob / WebFetch 刻意不入白名单：它们不是流程所需，留着弹窗即越界信号
+    （09-18 与 09-20 两轮都有子代理用它们去读源码与本轮数据文件）。
+    """
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    allow = settings["permissions"]["allow"]
+    for tool in ["Agent", "ToolSearch"]:
+        assert tool in allow, tool
+    for tool in ["Grep", "Glob", "WebFetch"]:
+        assert tool not in allow, f"{tool} 不是流程所需，不应进白名单"
+
+
 def test_skill_no_history_output_reading():
     """阶段 0 禁止读取历史运行产物（解释式提示词，与 deny 规则互补）。"""
     assert "禁止读取 outputs/ 下历史运行的产物" in REF_0_2
