@@ -43,7 +43,6 @@ raw.json 结构（fold 组装等价结构；CLI 兼容路径由调用方提供�
     {
       "domain": "领域词（用于目录命名）",
       "nodes": ["全部叶子节点"],
-      "model": "模型名（可选，fold 路径随 manifest_input.json 归档留存）",
       "knowledge": [
         {"name": ..., "node": 叶子节点, "verified": true,
          "category_path": "完整层级路径", "source_type": ..., "url": ...,
@@ -308,8 +307,8 @@ def _phase_group(phase: str) -> str:
     警告误报。按前缀归组为 验证/增量/扩量，无法归组返回空串。
     """
     p = str(phase or "")
-    for prefix, group in (("验证", "验证"), ("增量", "增量"), ("扩量", "扩量")):
-        if p.startswith(prefix):
+    for group in ("验证", "增量", "扩量"):
+        if p.startswith(group):
             return group
     return ""
 
@@ -522,7 +521,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     ungrounded = len(rejected)
 
     # 粒度声明归一化与计数（不拒绝）
-    single_count, granularity_missing = check_granularity(grounded)
+    _, granularity_missing = check_granularity(grounded)
 
     kept = deduplicate(grounded)
     removed = len(grounded) - len(kept)
@@ -630,7 +629,6 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
 
     summary = {
         "domain": domain,
-        "timestamp": timestamp,
         "total_found": candidates_pre_filter,  # 过滤前计数：候选总数 = 过滤移除 + 最终收录（算术自洽）
         "removed_duplicates": removed,
         "ungrounded": ungrounded,
@@ -648,7 +646,6 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "incomplete": incomplete,
         "unverified": unverified,
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
-        "single_count": single_count,
         "granularity_missing": granularity_missing,
         "unmapped_types": unmapped_types,
         "journal_count": len(journal_rows),
@@ -831,7 +828,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
                         str(s.get("query") or ""))] = {
             "phase": s.get("phase", ""), "node": s.get("node", ""),
             "query": s.get("query", ""), "results": s.get("results", ""),
-            "extracted": s.get("extracted", ""), "verified": s.get("verified", ""),
+            "extracted": s.get("extracted", ""),
             "zero_reason": s.get("zero_reason", ""),
         }
     journal = list(journal_latest.values())
@@ -898,7 +895,6 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     data = {
         "domain": manifest.get("domain", ""),
         "nodes": [str(n) for n in manifest["nodes"]],
-        "model": manifest.get("model", ""),
         "knowledge": knowledge_list,
         "journal": journal,
         "sources": sources,

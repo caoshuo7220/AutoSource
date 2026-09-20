@@ -656,7 +656,6 @@ class TestRun:
                       evidence_log=str(ev))
 
         assert summary["kept"] == 3
-        assert summary["single_count"] == 1
         source_csv = next((Path(summary["outdir"])).glob("*数据源清单.csv"))
         rows = read_csv_rows(source_csv)
         assert any(r[0] == "团体标准" and r[3] == "单篇级" for r in rows)
@@ -690,7 +689,8 @@ class TestRun:
                       evidence_log=str(ev))
 
         assert summary["kept"] == 3
-        assert summary["single_count"] == 1
+        rows = read_csv_rows(next(Path(summary["outdir"]).glob("*_数据源清单.csv")))
+        assert any(r[0] == "国标文件" and r[3] == "单篇级" for r in rows)
 
     def test_citation_anchor_stripped_in_csv(self, tmp_path):
         # 证据链仍严格逐字：带引用锚点的 URL 照抄通过校验；

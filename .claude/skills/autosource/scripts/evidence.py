@@ -19,7 +19,7 @@ from typing import Optional
 # prepare 预留的运行目录：run_{时间戳}（收尾时由脚本重命名为 {领域词}_{时间戳}）。
 # 路径由脚本生成、每次运行唯一——连续/并发运行的 raw.json 不会互相覆盖
 # （旧固定路径 outputs/raw.json 仍兼容，父目录不匹配本模式时走原逻辑）。
-RUN_DIR_RE = re.compile(r"^run_(\d{4}-\d{2}-\d{2}-\d{6})(_\d+)?$")
+RUN_DIR_RE = re.compile(r"^run_(\d{4}-\d{2}-\d{2}-\d{6})(?:_\d+)?$")
 
 
 def project_root() -> Path:
