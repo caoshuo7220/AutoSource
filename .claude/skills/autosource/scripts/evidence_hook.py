@@ -51,23 +51,25 @@ def run_scoped_log_path() -> Path | None:
 
 
 def main() -> None:
-    # 读取 hook 通过 stdin 传入的 JSON（含 tool_name / tool_input / tool_response）
+    """契约（模块 docstring）：任何失败都不阻断工具调用——整个主体兜底，不留
+    "某一步在 try 外"的缺口（2026-09-21 修：路径解析此前漏在 try 外，finalize
+    改名窗口内运行目录消失即抛 FileNotFoundError 穿透 main()、进程非零退出）。
+    失败留一行 stderr 标记：不阻断，但也不静默（122246 轮 hook 停写无人察觉）。
+    """
     try:
+        # 读取 hook 通过 stdin 传入的 JSON（含 tool_name / tool_input / tool_response）
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return
-
-    if len(sys.argv) > 1:
-        log_path = Path(sys.argv[1])
-    else:
-        log_path = run_scoped_log_path() or Path(default_evidence_log())
-
-    try:
+        if len(sys.argv) > 1:
+            log_path = Path(sys.argv[1])
+        else:
+            log_path = run_scoped_log_path() or Path(default_evidence_log())
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass  # 留痕失败不阻断工具调用
+    except Exception as e:  # 不设类型：契约是"任何失败都不阻断"
+        # 纯 ASCII：stderr 未被 reconfigure，中文在 GBK 管道下会再抛编码错
+        print(f"evidence_hook: recording failed (non-blocking): {type(e).__name__}",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":

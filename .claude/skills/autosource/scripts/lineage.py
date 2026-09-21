@@ -7,8 +7,8 @@ import csv
 import json
 from pathlib import Path
 
-from evidence import (contains_bounded, line_query, result_urls,
-                      strip_citation_anchors, URL_CHARS)
+from evidence import (find_bounded, line_query, result_urls, strip_bold,
+                      strip_citation_anchors)
 
 LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
                       "收录条目名称", "收录理由", "备注"]
@@ -40,10 +40,13 @@ def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, s
             stripped = strip_citation_anchors(url)
             if stripped and stripped in wanted and stripped not in result:
                 result[stripped] = query
-        for stripped in wanted - result.keys():
-            if (contains_bounded(originals[stripped], line, URL_CHARS)
-                    or contains_bounded(stripped, line, URL_CHARS)):
-                result[stripped] = query
+        pending = wanted - result.keys()
+        if pending:
+            clean = strip_bold(line)      # 每行归一一次（逐候选重复剥是收尾的主要开销）
+            for stripped in pending:
+                if (find_bounded(originals[stripped], clean)
+                        or find_bounded(stripped, clean)):
+                    result[stripped] = query
     return result
 
 
@@ -80,11 +83,12 @@ def build_lineage(kept: list[dict], sliced_evidence: str,
             if name:
                 covered.add(stripped)
     # 回退：收录了但不在任何结构化结果数组中的 URL（仅出现在摘要文本）
+    lines = [(line, strip_bold(line)) for line in sliced_evidence.splitlines()]
     for stripped, (name, reason) in collected.items():
         if stripped in covered:
             continue
-        for line in sliced_evidence.splitlines():
-            if not contains_bounded(stripped, line, URL_CHARS):
+        for line, clean in lines:
+            if not find_bounded(stripped, clean):
                 continue
             try:
                 payload = json.loads(line)

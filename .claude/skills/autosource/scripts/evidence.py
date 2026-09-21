@@ -114,6 +114,36 @@ def _form_variants(url: str) -> list[str]:
     return list(dict.fromkeys(variants))
 
 
+def strip_bold(text: str) -> str:
+    """剥掉 Markdown 加粗记号 `**`。
+
+    摘要习惯把入口写成 `**https://example.com/**`，而 `*` 属 RFC 3986 sub-delims
+    （在 URL_CHARS 内）——不剥则边界匹配把"紧跟 `**` 的完整 URL"判成"更长 URL 的
+    前缀"，摘要里唯一写明的入口反被拒（2026-09-14 实测）。
+    """
+    return text.replace("**", "")
+
+
+def find_bounded(url: str, stripped_evidence: str) -> bool:
+    """已 strip_bold 的留痕文本里，是否出现该 URL 的任一等价写法。
+
+    判定 = 等价写法（_form_variants：原形 / 去协议 / 去尾斜杠 / 两者都去）+
+    边界匹配。校验（check_grounded：这条 URL 能不能收）与归因（lineage 的来源
+    搜索与溯源：这条 URL 是哪次搜索发现的）回答的是同一个问题——"URL 在不在
+    留痕里"——共用本函数，两处不会各说各话。
+
+    2026-09-21 收敛：此前两处各写一份，归因那份不剥加粗、不试等价写法。`*` 在
+    URL_CHARS 内，摘要把入口写成 `**url**` 时归因即判为"更长 URL 的前缀"——
+    104028 轮 326 条官网里 149 条（6.3%）「来源搜索」列空白，且这些 URL 在溯源
+    表里一并查不到。
+
+    加粗由调用方按批归一（见 strip_bold）：逐候选重复剥是纯开销，实测 104028
+    轮收尾 70s 里有 27s 花在重复 replace 上。
+    """
+    return any(contains_bounded(v, stripped_evidence, URL_CHARS)
+               for v in _form_variants(url))
+
+
 def nearest_forms(candidate: str, evidence: str, limit: int = 3) -> list[str]:
     """留痕里与候选同主机的 URL 写法（去重、按出现顺序）；无同主机返回 []。
 
@@ -151,13 +181,15 @@ def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list
     提交里 50 条被拒，其中 10 条（20%）是 scheme/尾斜杠这一类渲染差异，模型
     抄对了却不被认；其余 40 条是抄短（去参数/取父路径），**按规则拒绝，不受本
     次归一化影响**。
+
+    判定经 find_bounded 与归因（lineage）共用——两处必须同一套规则。
     """
-    evidence = evidence.replace("**", "")
+    stripped_evidence = strip_bold(evidence)   # 整份留痕归一一次，逐候选重复剥是纯开销
     kept: list[dict] = []
     rejected: list[dict] = []
     for s in sources:
         url = str(s.get("url") or "")
-        if any(contains_bounded(v, evidence, URL_CHARS) for v in _form_variants(url)):
+        if find_bounded(url, stripped_evidence):
             kept.append(s)
         else:
             rejected.append(s)
@@ -204,9 +236,16 @@ def line_query(payload: dict) -> str:
 
 
 def result_urls(payload: dict) -> list[str]:
-    """提取一次搜索的结构化结果 URL（兼容 results[].url 与 results[].content[].url）。"""
+    """提取一次搜索的结构化结果 URL（兼容 results[].url 与 results[].content[].url）。
+
+    tool_response 用与 line_query 同款的 isinstance 守卫：链式 `.get(k, {})` 只在
+    键缺失时兜底，键存在而为 null / 字符串时抛 AttributeError（2026-09-21 修）。
+    """
     urls: list[str] = []
-    results = payload.get("tool_response", {}).get("results")
+    response = payload.get("tool_response")
+    if not isinstance(response, dict):
+        return urls
+    results = response.get("results")
     if not isinstance(results, list):
         return urls
     for item in results:

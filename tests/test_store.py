@@ -181,7 +181,7 @@ class TestRecordKnowledge:
 
         收尾折叠按名精确对账，名称写错原本要等 finalize 才点名——115926 实证：
         模型把「HPE Aruba Networking 技术文档门户」写成"……技术文档库"，收尾漏录
-        9 项、白跑一轮。"""
+        9 项、整轮返工。"""
         store = tmp_path / "store.jsonl"
         (tmp_path / "manifest.json").write_text(json.dumps(
             {"nodes": NODES,

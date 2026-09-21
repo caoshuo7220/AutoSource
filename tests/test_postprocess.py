@@ -17,7 +17,8 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity,
                          deduplicate, default_evidence_log, finalize_report, fold,
-                         leaf_node, prepare_run_dir, query_in_evidence, run_pipeline,
+                         leaf_node, prepare_run_dir, query_in_evidence, result_urls,
+                         run_pipeline,
                          run_evidence_log, sanitize_domain, slice_evidence,
                          strip_citation_anchors)
 
@@ -97,7 +98,7 @@ def base_data() -> dict:
 def test_both_gates_share_one_domain_helper():
     """入库闸门（store）与收尾闸门（postprocess）必须用同一个主机名函数。
 
-    此前两处各有一份完全相同的 `_domain` 拷贝，改一份漏一份不会有测试报红——
+    此前两处各有一份完全相同的 `_domain` 拷贝，只改其中一份不会有测试报红——
     2026-09-18 实证：无协议 URL 返回空串的 bug 正是因为两份**同时**存在才长期
     没暴露（store 的垃圾域闸门与 postprocess 的去重键一起失效）。同一文件里
     `is_garbage_domain` 等四个契约工具早已共享，`_domain` 是唯一漏掉的那个。"""
@@ -874,6 +875,24 @@ class TestKnowledge:
         assert not raw.exists()  # 无修正重跑环节，临时文件正常清理
 
 
+class TestResultUrls:
+    """结构化结果 URL 提取：对载荷形态用与 line_query 同款的守卫（2026-09-21 修）。"""
+
+    def test_non_dict_tool_response_yields_nothing(self):
+        """链式 .get(k, {}) 只在"键不存在"时兜底；键存在但为 null / 字符串时抛
+        AttributeError——同模块 line_query 用 isinstance 守卫，这里此前漏了。"""
+        for payload in ({"tool_response": None}, {"tool_response": "error"}, {}):
+            assert result_urls(payload) == []
+
+    def test_extracts_both_result_shapes(self):
+        payload = {"tool_response": {"results": [
+            {"url": "https://a.com/x"},
+            {"content": [{"url": "https://b.com/y"}, {"title": "无 url"}]},
+            "垃圾条目",
+        ]}}
+        assert result_urls(payload) == ["https://a.com/x", "https://b.com/y"]
+
+
 class TestQueryEvidence:
     """journal 查询词精确比对:截短/改写一律视为证据缺失(旧子串匹配会放行)。"""
 
@@ -1319,6 +1338,54 @@ class TestLineage:
         assert by_name["A"][6] == "q1"
         assert by_name["A"][4] == "https://a.com/doc"  # 输出仍剥锚点
 
+    def test_first_query_attributed_for_markdown_bold_url(self, tmp_path):
+        """摘要把入口写成 **url** 时，归因与校验必须同口径（2026-09-21 修）。
+
+        校验（check_grounded）剥 Markdown 加粗记号后再匹配，归因
+        （first_query_by_source）此前不剥——`*` 属 RFC 3986 sub-delims（在
+        URL_CHARS 内），URL 后紧跟 `**` 即被判为"更长 URL 的前缀"。结果同一个
+        URL 校验说"在"、归因说"没见过"：104028 轮 326 条官网里 149 条（6.3%）
+        「来源搜索」列空白，且这些 URL 在溯源表里也查不到。"""
+        data = base_data()
+        data["journal"] = self._journal(["q1"])
+        raw = write_raw(tmp_path, data)
+        ev = tmp_path / "search_log.jsonl"
+        ev.write_text(json.dumps({
+            "tool_name": "WebSearch", "tool_input": {"query": "q1"},
+            "tool_response": {"query": "q1", "results": [
+                {"content": [{"title": "摘要", "text": "**官网地址：https://a.com/doc**"}]},
+                {"content": [{"title": "B", "url": "https://b.com/data"}]}]}},
+            ensure_ascii=False) + "\n", encoding="utf-8")
+
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                               evidence_log=str(ev))
+        rows = read_csv_rows(next(Path(summary["outdir"]).glob("*数据源清单.csv")))
+        by_name = {r[0]: r for r in rows[1:]}
+        assert by_name["A"][6] == "q1"   # 只出现在摘要文本里的 URL 也要归因
+
+    def test_first_query_attributed_for_scheme_less_url(self, tmp_path):
+        """留痕里写的是去协议形态时，归因与校验同口径（_form_variants）。
+
+        校验收候选的四种等价写法（原形 / 去协议 / 去尾斜杠 / 两者都去），归因
+        此前只试原形——104028 轮 149 条里 72 条卡在这里。"""
+        data = base_data()
+        data["sources"][0]["url"] = "https://www.a.com/doc"
+        data["journal"] = self._journal(["q1"])
+        raw = write_raw(tmp_path, data)
+        ev = tmp_path / "search_log.jsonl"
+        ev.write_text(json.dumps({
+            "tool_name": "WebSearch", "tool_input": {"query": "q1"},
+            "tool_response": {"query": "q1", "results": [
+                {"content": [{"title": "摘要", "text": "官网：www.a.com/doc"}]},
+                {"content": [{"title": "B", "url": "https://b.com/data"}]}]}},
+            ensure_ascii=False) + "\n", encoding="utf-8")
+
+        summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
+                               evidence_log=str(ev))
+        rows = read_csv_rows(next(Path(summary["outdir"]).glob("*数据源清单.csv")))
+        by_name = {r[0]: r for r in rows[1:]}
+        assert by_name["A"][6] == "q1"
+
     def test_first_query_consistent_with_lineage(self, tmp_path):
         # 不变量：清单"来源搜索"= 溯源.csv 中该 URL 第一行的查询词（口径一致）
         data = base_data()
@@ -1572,6 +1639,26 @@ class TestEvidenceHook:
         assert result.returncode == 0
         assert not log.exists()
 
+    def test_path_resolution_failure_does_not_escape(self, tmp_path, monkeypatch, capsys):
+        """留痕路径解析失败不得穿透 main()（2026-09-21 修）。
+
+        契约是"任何失败都不阻断工具调用、hook 始终退出 0"，而解析此前不在 try 内：
+        finalize 改名窗口内运行目录消失会让 run_scoped_log_path() 抛
+        FileNotFoundError（标记文件非 UTF-8 则抛 UnicodeDecodeError），异常穿透
+        main()、进程非零退出。失败改为可见（stderr 一行）但不阻断。"""
+        import evidence_hook
+
+        class _Stdin:
+            buffer = io.BytesIO(b'{"tool_name": "WebSearch"}')
+
+        def boom():
+            raise FileNotFoundError("模拟：解析期间运行目录被改名")
+
+        monkeypatch.setattr(evidence_hook.sys, "stdin", _Stdin)
+        monkeypatch.setattr(evidence_hook, "run_scoped_log_path", boom)
+        evidence_hook.main()                      # 不得抛异常
+        assert "recording failed" in capsys.readouterr().err
+
 
 class TestFinalizeReport:
     def test_renames_with_dirname_prefix(self, tmp_path):
@@ -1656,11 +1743,19 @@ class TestReportStatsInjection:
         text = Path(result).read_text(encoding="utf-8")
         assert "统计注入失败" in text
         assert "（本段由收尾脚本自动生成）" not in text
+        assert "## 数据总览" in text   # 替换分支不得把原有标题一并替换掉
 
-    def test_missing_stats_skips_injection(self, tmp_path):
+    def test_missing_stats_placeholder_carries_heading(self, tmp_path):
+        """占位块与正常块形状一致（自带 `## 数据总览` 标题）——2026-09-21 修。
+
+        原用例名写 "skips_injection"，但代码里没有"跳过注入"的分支，它断言的
+        "标题不出现"只是当时行为的副产品；而占位块不含标题会让替换分支把报告
+        原有的标题一并替换掉（见上一条用例）。"""
         d = self._setup(tmp_path, "# 标题\n\n## 一、领域概览\n内容\n", with_stats=False)
-        result = finalize_report(str(d))
-        assert "数据总览" not in Path(result).read_text(encoding="utf-8")
+        text = Path(finalize_report(str(d))).read_text(encoding="utf-8")
+        assert "## 数据总览" in text
+        assert "统计注入失败" in text
+        assert text.index("## 数据总览") < text.index("## 一、领域概览")
 
 
 class TestSessionIsolatedEvidenceLog:
@@ -1674,6 +1769,29 @@ class TestSessionIsolatedEvidenceLog:
         assert default_evidence_log() == str(tmp_path / "outputs" / "search_log_sess-abc.jsonl")
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
         assert default_evidence_log() == str(tmp_path / "outputs" / "search_log.jsonl")
+
+    def test_fallback_shared_log_survives_cleanup(self, tmp_path, monkeypatch):
+        """兜底分支不删会话级共享留痕（2026-09-21 修）。
+
+        无运行级 evidence.jsonl 时 log_path 回退到会话级共享路径，此前收尾按
+        log_path 无条件删除——删的是不属于本运行的文件（旧 CLI 排障重跑
+        outputs/raw.json 即命中，其父目录不匹配 run_*），而本运行只归档了它的
+        切片，删了再无原件（同 200054 轮切片丢 29% 溯源的事故类别）。"""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-shared")
+        out = tmp_path / "outputs"
+        out.mkdir()
+        data = base_data()
+        shared = write_evidence(out, data["sources"]).rename(
+            out / "search_log_sess-shared.jsonl")  # 本会话的共享留痕
+        raw = out / "raw.json"                     # 旧固定路径：父目录非 run_
+        raw.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        summary = run_pipeline(str(raw), out_dir=str(out), now=FIXED_NOW)
+
+        assert summary["kept"] == 2
+        assert not raw.exists()      # 本运行的临时文件照删
+        assert shared.exists()       # 共享留痕不归本运行，不动
 
     def test_evidence_hook_without_arg_writes_session_file(self, tmp_path):
         payload = json.dumps(
@@ -1988,6 +2106,27 @@ class TestFinalizeFold:
         assert summary["kept"] == 1
         assert summary["list_verified"] == "1/1"
 
+    def test_fold_without_store_does_not_crash_on_archive(self, tmp_path):
+        """旧路径兜底 + 目录内没有 store.jsonl —— 归档不得抛异常（2026-09-21 修）。
+
+        归档此前无条件 shutil.move(store.jsonl)，而"manifest 自带核对态、无 store"
+        这条分支存在的理由正是服务 2026-09-08 前（没有 store.jsonl）的历史归档。
+        异常抛在目录重命名之后：运行卡在既非原名、又缺 intermediate/store_input.jsonl
+        的状态；重跑还会因目录不再匹配 run_* 而报"证据留痕不存在"——指向当前会话的
+        共享留痕，与本运行无关。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)          # 旧格式：清单自带 verified/url
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+
+        assert summary["kept"] == 1
+        outdir = Path(summary["outdir"])
+        assert not (outdir / "store.jsonl").exists()
+        assert not (outdir / "manifest.json").exists()      # 两件都归了档
+        assert (outdir / "intermediate" / "manifest_input.json").exists()
+        assert not (outdir / "intermediate" / "store_input.jsonl").exists()
+
     def test_fold_archives_store_manifest_and_cleans_root(self, tmp_path):
         """2026-09-01 实测 bug 钉进测试：fold 只归档并删除了 manifest，store.jsonl
         既未归档也未删除——交付目录根残留 store.jsonl（用户实测发现）。
@@ -2154,7 +2293,7 @@ class TestQuotaSentry(_SentinelFoldBase):
         with pytest.raises(ValueError, match="增量搜索未达标") as ei:
             self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
         assert "图形渲染GPU 8 次（缺 12）" in str(ei.value)
-        assert "phase 填「增量发现」" in str(ei.value)  # 2026-09-17：补搜填哪个 phase 由报错承担（115926 实证白跑一轮）
+        assert "phase 填「增量发现」" in str(ei.value)  # 2026-09-17：补搜填哪个 phase 由报错承担（115926 实证整轮返工）
         assert run_dir.exists() and run_dir.name.startswith("run_")
 
     def test_exact_quota_per_node_passes(self, tmp_path):
@@ -2497,3 +2636,4 @@ class TestReverseGap(_SentinelFoldBase):
         assert gap["applicable"] is False
         assert gap["unlogged"] is None
         assert gap["evidence_queries"] is None
+{"tool_name": "WebSearch"}

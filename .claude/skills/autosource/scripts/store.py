@@ -73,7 +73,7 @@ def domain_of(url: str) -> str:
 
     无协议写法要认——结果的结构化链接带协议、摘要散文常不带，两种都是逐字照抄来的
     合法写法（2026-09-18 实证：不补协议则返回空串，垃圾域闸门形同虚设）。此前本模块
-    与 postprocess 各有一份拷贝，改一份漏一份不会有测试报红——收敛为单一实现。
+    与 postprocess 各有一份拷贝，只改其中一份不会有测试报红——收敛为单一实现。
     """
     return urlparse(url if "://" in url else "http://" + url).netloc
 
@@ -443,7 +443,7 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # 名称对账前移（2026-09-17）：manifest 与 store 同在运行目录，收尾折叠按名精确
     # 对账——名称写错原本要等 finalize 才被点名（115926 实证：模型改写过名称，收尾
-    # 漏录 9 项、白跑一轮）。manifest 不存在时（阶段 1 的行前清单核对）不校验。
+    # 漏录 9 项、整轮返工）。manifest 不存在时（阶段 1 的行前清单核对）不校验。
     declared: Optional[set] = None
     _mp = store_path.parent / "manifest.json"
     if _mp.exists():

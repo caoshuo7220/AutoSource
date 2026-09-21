@@ -86,14 +86,14 @@ def finalize_report(outdir: str) -> str:
     if not report.exists():
         raise FileNotFoundError(f"未找到 分析报告.md: {report}（报告需先由模型写入该文件）")
     block = _report_stats_block(d)
-    if block:
-        text = _insert_stats_section(report.read_text(encoding="utf-8"), block)
-        report.write_text(text, encoding="utf-8")
-    else:
-        text = _insert_stats_section(report.read_text(encoding="utf-8"),
-                                     "（本次统计注入失败：未找到 stats.csv，见 intermediate/）")
-        report.write_text(text, encoding="utf-8")
+    if block is None:
         print("注意: 未找到 stats.csv，已往报告数据总览写入占位提示（统计未注入）")
+        # 占位块与正常块同形状（自带 `## 数据总览` 标题）：_insert_stats_section 的
+        # 替换分支按"整块含标题"设计，占位块缺标题会把报告原有标题一并替换掉
+        # （2026-09-21 修）。
+        block = "## 数据总览\n\n（本次统计注入失败：未找到 stats.csv，见 intermediate/）"
+    report.write_text(_insert_stats_section(report.read_text(encoding="utf-8"), block),
+                      encoding="utf-8")
     target = d / f"{d.name}_分析报告.md"
     if target.exists():
         raise FileExistsError(f"目标文件已存在: {target}")

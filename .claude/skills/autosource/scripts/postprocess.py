@@ -488,6 +488,11 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     run_scoped_log = None if evidence_log else run_evidence_log(raw.parent)
     log_path = (Path(evidence_log) if evidence_log
                 else (run_scoped_log or Path(default_evidence_log())))
+    # 收尾可删的只有本运行自己那一个（显式指定，或运行目录内）。兜底指向的会话级
+    # 共享留痕不属于本运行——它可能装着 prepare 之前的搜索，而本运行只归档了它
+    # 按记账查询词切出的那一片，删了再无原件（2026-09-21 修：此前按 log_path
+    # 无条件删，旧 CLI 排障重跑 outputs/raw.json 会把当前会话的共享留痕删掉）。
+    owned_log = Path(evidence_log) if evidence_log else run_scoped_log
     if (valid or merged or journal) and not log_path.exists():
         raise FileNotFoundError(
             f"证据留痕不存在: {log_path}（PostToolUse hook 未启用或未生效？"
@@ -692,11 +697,12 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
 
     # 删除会话临时文件（--keep-raw 时保留；无修正重跑环节，运行到此结束）。
     # 会话标记与运行级证据随目录重命名来到 outdir——收尾完成即失效，一并清理；
-    # （log_path 为预留目录路径时已随重命名失效，exists() 自然为假）
+    # 只删本运行的留痕（owned_log），兜底用的会话级共享留痕不动。
+    # （owned_log 为预留目录路径时已随重命名失效，missing_ok 覆盖）
     if not keep_raw:
         raw.unlink(missing_ok=True)
-        if log_path.exists():
-            log_path.unlink(missing_ok=True)
+        if owned_log is not None:
+            owned_log.unlink(missing_ok=True)
         (outdir / ".session_id").unlink(missing_ok=True)
         (outdir / "evidence.jsonl").unlink(missing_ok=True)
 
@@ -718,7 +724,7 @@ def _scripts_fingerprint() -> str:
 def _write_run_attestation(outdir: Path, payload: dict) -> Path:
     """写出本轮运行验收单（docs/06 第 2 期）。
 
-    只记录事实、不做拦截；调用方必须兜住异常——自证工具不得成为新的报废来源。
+    只记录事实、不做拦截；调用方必须捕获异常——自证工具不得成为新的报废来源。
     """
     path = outdir / f"{outdir.name}_运行验收单.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -791,9 +797,9 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     搜索日志按（phase, node, query）末次胜出组装（2026-09-09 收尾护栏配套）——
     补录 zero_reason 时重传同键行即覆盖，append-only 语义不变。
     防截断哨兵：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
-    违约未调用 record_sources 时失败响亮，不再静默丢数据）。
+    违约未调用 record_sources 时显式报错，不再静默丢数据）。
     清单了结哨兵：声明清单项在 store 中无核对记录 → 拒绝折叠并点名（漏调
-    record_knowledge 同样响亮；2026-09-08 前归档的 manifest 最终核对态走旧路径兜底）。
+    record_knowledge 同样报错；2026-09-08 前归档的 manifest 最终核对态走旧路径兜底）。
     收尾护栏三哨兵（enforce_quotas，2026-09-09）：配额（每节点增量搜索 ≥20）、
     拒收留痕（零提取必须带 zero_reason）、理由与域名证据一致——在 run_pipeline
     内、目录重命名前拦截。
@@ -912,7 +918,8 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     intermediate = outdir / "intermediate"
     store_path = outdir / "store.jsonl"
     manifest_path = outdir / "manifest.json"
-    shutil.move(str(store_path), intermediate / "store_input.jsonl")
+    if store_path.exists():  # 旧路径兜底分支本就没有 store.jsonl，无物可归档
+        shutil.move(str(store_path), intermediate / "store_input.jsonl")
     shutil.move(str(manifest_path), intermediate / "manifest_input.json")
     try:
         _write_run_attestation(outdir, _build_run_attestation(

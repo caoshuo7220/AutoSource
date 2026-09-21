@@ -113,7 +113,7 @@ def test_model_field_optional_contract():
 
 def test_incremental_search_count_per_node():
     """增量发现每节点固定 20 次（基底 16 = 固定 4 + 自由 8 + 实体 4，扩充固定 4）。
-    扩充演进：09-01 起按产出不限次数 → 09-07 SOM 轮 489 次撞墙后 09-08 有界化（至多
+    扩充演进：09-01 起按产出不限次数 → 09-07 SOM 轮 489 次触顶后 09-08 有界化（至多
     2 批 + 续批判定 + 上限 24）→ 09-10 改固定 4 次（实证 24 次轮的扩充批被整体跳过：
     模型读着 finalize 的 ≥16 校验线把预算定到 16，续批判定给了"不扩"的决策空间）；
     实体配额 4 为 09-08 用户决策恢复（09-02 曾 4→2、空出并入自由 8→10，现自由回 8、
@@ -159,7 +159,7 @@ def test_storage_contract_mcp_tools():
     assert "基底 16 次搜索完成后" in REF_4
     assert "**防截断哨兵**" in REF_6_7
     assert "数据落盘只走 MCP 工具" in REF_DISCIPLINE
-    assert "存储机制自检" in SKILL_ROUTER  # 装配层故障时五工具硬失败的行为说明（mcp_server.self_check）
+    assert "存储机制自检" in SKILL_ROUTER  # 装配层故障时五工具显式报错的行为说明（mcp_server.self_check）
     assert "model = " not in DOC  # 防误用：禁止模型用 Write 写数据文件组装
 
 
@@ -169,7 +169,7 @@ def test_finalize_guards_quota_zero_reason_and_evidence():
     ③ 理由与结果域名证据一致。以及配套的两处纪律：符合判据一律收录
     （打掉"怕清单变杂"的自创拒收借口）、上下文不停靠（打掉停靠与缩水借口）。
     防回潮：这些文本是脚本哨兵的 SKILL 侧契约（postprocess.run_pipeline
-    enforce_quotas），删文案会重新打开模型谎报/静默拒收的口子。
+    enforce_quotas），删文案会重新打开模型谎报/静默拒收的缺口。
 
     2026-09-16（docs/06 第 5 期文本收口）：两条断言随文案改写——
     ① "增量搜索不足 20 次拒绝并点名"：哨兵的触发条件细节与恢复指令已由
@@ -191,7 +191,7 @@ def test_finalize_guards_quota_zero_reason_and_evidence():
 
 
 def test_manifest_knowledge_no_granularity_field():
-    """2026-09-10 文本矛盾修复①：knowledge 字段契约与粒度条打架——字段条写
+    """2026-09-10 文本矛盾修复①：knowledge 字段契约与粒度条冲突——字段条写
     "只含 name/node/预期体裁"，粒度条又要求"声明 granularity"，模型 thinking
     原话「Hmm, conflict.」后放弃声明、各行其是。定案：粒度与 source_type 同
     规矩（验证时按实际形态确定），manifest 不声明 granularity。"""
@@ -215,7 +215,7 @@ def test_single_carrier_not_auto_passed():
 
 def test_unverified_note_values_on_the_spot():
     """2026-09-10 文本矛盾修复④：阶段 3 未通过项的 note 没有合法取值（两个定案
-    值在阶段 5 才出现）——模型据此决定"不落库、攒到定案再记"，撞墙后 16 项全丢
+    值在阶段 5 才出现）——模型据此决定"不落库、攒到定案再记"，触顶后 16 项全丢
     （收尾被清单了结哨兵拦下，靠人工补录救回）。定案：三个取值当场落库，禁止攒。"""
     assert "note 按当次搜索结果如实取一个" in REF_3
     assert "不得攒到定案时再记" in REF_3
@@ -251,7 +251,7 @@ def test_category_path_and_vendor_site_query_contract():
 def test_vendor_official_site_mandatory_and_entry_form():
     """2026-09-10 厂商官网必收 + 入口形态否定清单（用户决策）——112053 轮实测：
     606 条里指向根域名的只有 5 条、33 家厂商 0 家有官网条目（判据把首页当"纯导流页"
-    排除，而同一判据却给平台开了"领域专属入口可收"的口子）；且 79 条"官网"里 23 条
+    排除，而同一判据却对平台放宽为"领域专属入口可收"）；且 79 条"官网"里 23 条
     形态不合格（新闻页 15 / 跟踪参数 4 / 机构介绍页 4 / 打印版 1）。
     防回潮：删这组文案会重新打开"官网一条没有 + 新闻页冒充入口"。"""
     assert "**厂商官网首页 / 根域名（含语言首页）可收，且每个厂商必收一条**" in REF_DISCIPLINE
@@ -281,7 +281,7 @@ def test_criterion_institution_carrier_and_exclusions():
     的信息载体"两条规则——新闻/资讯/媒体文章/个人内容/导购/百科词条一律不收，
     垃圾域与低价值聚合平台由脚本名单入库即拒；提取率标尺按实况重校准（2-4 条/10）。
     防回潮：2110 条里 794 条媒体+530 条噪声的成因就是旧判据（"有主题边界就收"），
-    删这些文案会重新打开新闻洪水与垃圾域收录的口子。"""
+    删这些文案会重新打开新闻洪水与垃圾域收录的缺口。"""
     assert "机构发布的信息载体" in REF_DISCIPLINE
     assert "新闻、资讯与媒体文章不属于收录对象" in SKILL_ROUTER
     assert "新闻、资讯、媒体文章、个人内容一律不收录" in REF_DISCIPLINE
@@ -366,7 +366,7 @@ def test_vendor_phase_own_query_form_no_side_extraction():
 
     120118 轮实测：180 条"官网"条目里只有 2-3 条指向厂商根域名，173 条是子页面——
     知识清单把厂商列成"某某文档体系"，模型据此搜出文档深链、再标成"官网"；
-    「厂商官网项固定搜 {厂商名} 官网」那条规则因清单里压根没有官网项而从未触发。
+    「厂商官网项固定搜 {厂商名} 官网」那条规则因清单里本就没有官网项而从未触发。
     定案：厂商单独成阶段、查询词收窄为唯一形态、只服务官网一个目的（不做顺路提取）。
     防回潮：删这组文案会退回"官网标签被文档深链占据"。"""
     assert "## 阶段 1 · 厂商清单与官网搜索" in REF_0_2
@@ -388,7 +388,7 @@ def test_query_word_lists_relocated_no_duplication():
     易失效词形从通用纪律搬到角度池之后（"角度"概念在上一行定义，不再跨 167 行引用）。
     收尾后词表只剩两处：阶段 3 组件池（验证搜索造"机构名 + 入口意图"）、
     阶段 4 角度池（增量发现造"领域词 + 角度词"）。
-    防回潮：通用纪律再长出"搜索词构造"节、或易失效词形回到全局，都会重新打开多份词表打架。"""
+    防回潮：通用纪律再长出"搜索词构造"节、或易失效词形回到全局，都会重新打开多份词表互相冲突。"""
     assert "### 搜索词构造" not in DOC
     assert "**角度池**" in REF_4
     assert "**易失效词形（两类已知易命中低相关结果集的模式）**" in REF_4
@@ -485,7 +485,7 @@ def test_journal_verified_field_contract():
 
 def test_entity_query_second_type_contract():
     """2026-09-01：实体选题放开——阶段 4 查询词构造改两类选题，
-    旧"每个查询词必须包含领域词"一刀切句移除（与通用纪律 3/4 类词的矛盾根）。
+    旧"每个查询词必须包含领域词"的无差别约束句移除（与通用纪律 3/4 类词的矛盾根）。
     实体选题固定配额（新实体不足退回角度池）：09-02 实测 82 样本每搜 0.87 后曾 4→2，
     09-08 用户决策恢复 4（配合扩充有界化，实体覆盖由固定配额保障）。"""
     assert "两类选题" in REF_4
