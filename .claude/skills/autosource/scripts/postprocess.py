@@ -336,38 +336,44 @@ def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list
                            kept_domains: set[str]) -> dict:
     """零提取审计（哨兵 2/3 的数据面）：核对留痕理由与结果域名证据。
 
-    zero_rows = [(node, query, zero_reason), ...]（增量/扩量轮提取为 0 的行）。
-    返回 {total, violations, single_doc_zero}：
-    - violations：客观矛盾——缺 zero_reason；理由声称已收但域名不在清单；
-      理由声称垃圾域但域名非垃圾域——enforce 时拦截（拒收必须留痕可核）
-    - single_doc_zero：零提取但结果里含单篇文档详情页的行 [(node, query)]——
-      **只进收尾输出、不拦截**（2026-09-14：判据落在 URL 形态这个客观事实上，
-      但"已收/重复"的核实是按域名粗查的，跨平台重复时收的那条在别的域名下会
-      误判；误报代价是整轮无法收尾，故先只报不拦，跑准了再谈升格）
+    zero_rows = [(phase, node, query, zero_reason), ...]（增量/扩量轮提取为 0 的行）。
+    返回 {total, violations, claimed_collected, single_doc_zero}：
+    - violations：客观矛盾——缺 zero_reason；理由声称垃圾域但域名非垃圾域——
+      enforce 时拦截（拒收必须留痕可核）
+    - claimed_collected / single_doc_zero：**只进收尾输出、不拦截**——两条都因
+      "判据强度不足以拦整轮"降级：
+      · single_doc_zero（2026-09-14）：判据落在 URL 形态这个客观事实上，但
+        "已收/重复"的核实是按域名粗查的，跨平台重复时收的那条在别的域名下会
+        误判；误报代价是整轮无法收尾，故先只报不拦，跑准了再谈升格
+      · claimed_collected（2026-09-21）：判据是 zero_reason 的自由文本子串
+        （"已收"/"重复"），区分不了**指代**与**断言**——180104 轮「结果…与已收录
+        平台（万方/知网）的访问说明页」被读成"声称已收"，连拒两次收尾，模型只能
+        去读护栏源码才弄明白差在哪
     """
     violations: list[tuple] = []
+    claimed_collected: list[tuple] = []
     single_doc_zero: list[tuple] = []
 
-    for node, query, reason in zero_rows:
+    for phase, node, query, reason in zero_rows:
         result_urls = urls_by_query.get(query, [])
         if any(SINGLE_DOC_URL.search(u) for u in result_urls):
             single_doc_zero.append((node, query))
         domains = {domain_of(u) for u in result_urls}
         if not domains:
             if not reason:
-                violations.append((node, query, reason, "无 zero_reason"))
+                violations.append((phase, node, query, reason, "无 zero_reason"))
             continue
         kept_hits = sum(1 for d in domains if d in kept_domains)
         garbage_hits = sum(1 for d in domains if is_garbage_domain(d))
         if not reason:
-            violations.append((node, query, reason, "无 zero_reason"))
+            violations.append((phase, node, query, reason, "无 zero_reason"))
         elif ("已收" in reason or "重复" in reason) and kept_hits == 0:
-            violations.append((node, query, reason,
-                               f"理由声称已收/重复，但结果域名 {sorted(domains)} 不在最终清单"))
+            claimed_collected.append((node, query, sorted(domains)))
         elif "垃圾" in reason and garbage_hits == 0:
-            violations.append((node, query, reason,
+            violations.append((phase, node, query, reason,
                                f"理由声称垃圾域，但结果域名 {sorted(domains)} 非垃圾域"))
     return {"total": len(zero_rows), "violations": violations,
+            "claimed_collected": claimed_collected,
             "single_doc_zero": single_doc_zero}
 
 
@@ -398,16 +404,17 @@ def _check_node_quota(journal: list, nodes: list[str]) -> None:
 
 
 def _check_zero_reason_violations(audit: dict) -> None:
-    """哨兵 2/3 拦截：零提取拒收必须留痕（zero_reason）且与结果域名证据一致。"""
+    """哨兵 2/3 拦截：零提取必须留痕（zero_reason）；理由声称垃圾域时域名须确是垃圾域。"""
     violations = audit["violations"]
     if not violations:
         return
     raise AutoSourceError(
         f"零提取留痕缺失或与证据矛盾（{len(violations)} 条）：拒收必须逐条说明理由且"
         "可核对——该收的补 record_sources，确不收的补录 zero_reason（重传同"
-        "phase+node+query 行，末次覆盖）后重跑 finalize：\n"
-        + "\n".join(f"  - [{node}] {query}（{problem}）"
-                    for node, query, _reason, problem in violations))
+        "phase+node+query 行，末次覆盖）后重跑 finalize。**phase 必须与被拒行逐字"
+        "相同**——换成别的阶段等于新写一条，原件仍在、下次照样被拒：\n"
+        + "\n".join(f"  - [{node}] {query}（{problem}）｜重传用 phase={phase!r}"
+                    for phase, node, query, _reason, problem in violations))
 
 
 def _reverse_gap(evidence: str, journal_queries: set) -> dict:
@@ -558,7 +565,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
                 extracted = 0
             if extracted <= 0:
                 zero_search_rows.append(
-                    (str(j.get("node") or ""), query, str(j.get("zero_reason") or "")))
+                    (phase, str(j.get("node") or ""), query,
+                     str(j.get("zero_reason") or "")))
             if classify_query_scope(query, domain, nodes) == "框架内":
                 in_framework["count"] += 1
                 in_framework["extracted"] += extracted
@@ -990,6 +998,11 @@ def summary_text(summary: dict) -> str:
         more = f" 等 {len(nodes)} 个节点" if len(nodes) > 4 else ""
         lines.append(f"待复核: 零提取但结果含单篇详情页 {len(sd)} 行（{shown}{more}）"
                      "——该批有可收的单篇专利/论文，核对零提取理由列")
+    cc = zero.get("claimed_collected") if zero else None
+    if cc:
+        lines.append(f"待复核: {len(cc)} 行零提取理由含「已收/重复」但结果域名不在清单"
+                     "——脚本按域名粗查、区分不了指代与断言，只报不拦；核对理由说的是"
+                     "这批结果本身，还是在指代别处已收录的条目")
     if summary["outdir"]:
         if summary.get("lineage_rows"):
             lines.append(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")

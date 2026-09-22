@@ -446,6 +446,38 @@ class TestCoverage:
         cov = {c["node"]: c for c in coverage(store, NODES)}
         assert cov["AI训练GPU"]["missing"] == 0
 
+    def test_pending_lists_declared_names_without_knowledge_record(self, tmp_path):
+        """pending = manifest 声明名 − 已有 knowledge 记录的名（2026-09-21 补）。
+
+        阶段 5/6 要判"两栏清单项全部了结"，此前只能自己去 store.jsonl 里 grep
+        （180104 轮实测 9 次）。verified 真假都算了结——定案后一律落 record_knowledge。
+        """
+        store = self._seed(tmp_path, [source_entry()], [])
+        (tmp_path / "manifest.json").write_text(json.dumps(
+            {"nodes": NODES, "vendors": [{"name": "厂商甲", "node": "AI训练GPU"}],
+             "knowledge": [{"name": "机构乙", "node": "AI训练GPU"},
+                           {"name": "机构丙", "node": "图形渲染GPU"}]},
+            ensure_ascii=False), encoding="utf-8")
+        cov = {c["node"]: c for c in coverage(store, NODES)}
+        assert cov["AI训练GPU"]["pending"] == ["厂商甲", "机构乙"]
+        assert cov["图形渲染GPU"]["pending"] == ["机构丙"]
+
+        # 定案落库（verified=false 也算了结）——对应项从 pending 消失
+        record_knowledge(store, [{"name": "厂商甲", "node": "AI训练GPU",
+                                  "verified": False, "note": "未找到官网"}],
+                         tmp_path / "no_such_evidence.jsonl")
+        record_knowledge(store, [{"name": "机构丙", "node": "图形渲染GPU",
+                                  "verified": False, "note": "疑似无效机构"}],
+                         tmp_path / "no_such_evidence.jsonl")
+        cov = {c["node"]: c for c in coverage(store, NODES)}
+        assert cov["AI训练GPU"]["pending"] == ["机构乙"]
+        assert cov["图形渲染GPU"]["pending"] == []
+
+    def test_pending_empty_without_manifest(self, tmp_path):
+        """阶段 0-2 之前的行前清单核对没有 manifest——pending 给空表，不报错。"""
+        store = self._seed(tmp_path, [source_entry()], [])
+        assert coverage(store, NODES)[0]["pending"] == []
+
     def test_types_distribution_per_node(self, tmp_path):
         """docs/07 §五.3：薄弱判定的"体裁/来源维度单一"需要分布数据。下放后
         阶段 5 是独立代理、拿不到"刚提取的内容"，分布改由脚本从 store 算。"""

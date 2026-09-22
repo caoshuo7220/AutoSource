@@ -6,7 +6,7 @@
     "advisory": "只有文本、没有执行点——登记在此是为了承认无法拦截"
   },
   "impl_kinds": ["python", "settings", "hook", "store", "mcp"],
-  "updated": "2026-09-18",
+  "updated": "2026-09-21",
   "entries": [
     {"id": "url-verbatim-copy", "summary": "URL 逐字照抄搜索结果，禁止规范化（补路径/换域名/去参数）与截短", "level": "enforced", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "逐字照抄", "file": "references/通用纪律.md"}], "impl": ["python:evidence.py:check_grounded", "python:store.py:record_sources"], "test": "tests/test_postprocess.py::TestCheckGroundedBoundaries::test_path_prefix_truncation_rejected"},
     {"id": "no-prior-knowledge-url", "summary": "禁止凭先验知识补 URL——必须先搜到、URL 出现在留痕里", "level": "enforced", "anchors": [{"section": "证据链与写入纪律（脚本强制校验）", "marker": "先验知识", "file": "references/通用纪律.md"}], "impl": ["python:evidence.py:check_grounded"], "test": "tests/test_postprocess.py::TestCheckGrounded::test_fabricated_url_rejected"},
@@ -19,7 +19,7 @@
     {"id": "verified-knowledge-needs-url", "summary": "清单核对 verified=true 必带 url 且过证据链校验，否则当场拒绝", "level": "enforced", "anchors": [{"section": "阶段 3 · 验证搜索", "marker": "入库即验证据链", "file": "references/阶段3-验证搜索.md"}], "impl": ["python:store.py:record_knowledge"], "test": "tests/test_store.py::TestRecordKnowledge::test_verified_without_url_rejected"},
     {"id": "knowledge-closeout-by-name", "summary": "声明清单项必须留下核对记录、按名精确对账，缺失拒绝收尾并点名", "level": "enforced", "anchors": [{"section": "阶段 6 · 清单了结自检", "marker": "应录 vs 已录", "file": "references/阶段6-7-自检与收尾.md"}], "impl": ["python:postprocess.py:fold"], "test": "tests/test_postprocess.py::TestFinalizeFold::test_fold_unrecorded_declared_items_raise_with_names"},
     {"id": "zero-reason-required", "summary": "增量/扩量搜索提取为 0 时必须写明 zero_reason，缺失拒绝收尾", "level": "enforced", "anchors": [{"section": "阶段 7 · 收尾", "marker": "zero_reason", "file": "references/阶段6-7-自检与收尾.md"}], "impl": ["python:postprocess.py:_check_zero_reason_violations"], "test": "tests/test_postprocess.py::TestZeroReasonSentry::test_zero_extraction_without_reason_raises"},
-    {"id": "zero-reason-evidence-consistency", "summary": "拒收理由与结果域名证据矛盾时拒绝收尾并点名", "level": "enforced", "anchors": [{"section": "阶段 7 · 收尾", "marker": "理由与结果域名证据", "file": "references/阶段6-7-自检与收尾.md"}], "impl": ["python:postprocess.py:_zero_extraction_audit"], "test": "tests/test_postprocess.py::TestZeroReasonContradiction::test_reason_claims_garbage_but_domains_clean_raises"},
+    {"id": "zero-reason-evidence-consistency", "summary": "拒收理由声称垃圾域但域名非垃圾域时拒绝收尾并点名（声称已收/重复的一类只报告不拦截——子串判据区分不了指代与断言）", "level": "enforced", "anchors": [{"section": "阶段 7 · 收尾", "marker": "理由与结果域名证据", "file": "references/阶段6-7-自检与收尾.md"}], "impl": ["python:postprocess.py:_zero_extraction_audit"], "test": "tests/test_postprocess.py::TestZeroReasonContradiction::test_reason_claims_garbage_but_domains_clean_raises"},
     {"id": "node-search-quota", "summary": "每节点增量搜索 >= 20 次，不足拒绝收尾并点名", "level": "enforced", "anchors": [{"section": "阶段 4 · 增量发现", "marker": "固定 20 次", "file": "references/阶段4-增量发现.md"}], "impl": ["python:postprocess.py:_check_node_quota"], "test": "tests/test_postprocess.py::TestQuotaSentry::test_exact_quota_per_node_passes"},
     {"id": "anti-truncation-sentinel", "summary": "有提取但来源 0 入库时拒绝收尾（防截断）", "level": "enforced", "anchors": [{"section": "阶段 7 · 收尾", "marker": "防截断哨兵", "file": "references/阶段6-7-自检与收尾.md"}], "impl": ["python:postprocess.py:fold"], "test": "tests/test_postprocess.py::test_sentinel_empty_sources_with_extractions_raises"},
     {"id": "run-dir-unique", "summary": "每次运行预留唯一运行目录，同秒自动加后缀", "level": "enforced", "anchors": [{"section": "参数与运行约定", "marker": "每次运行唯一"}], "impl": ["python:postprocess.py:prepare_run_dir"], "test": "tests/test_postprocess.py::TestPrepareRunDir::test_prepare_flag_prints_path_and_creates_dir"},
@@ -45,6 +45,7 @@
     {"id": "no-confirmation-stop-in-run", "summary": "运行中不得出现需要用户确认的停顿——白名单外的一切操作必须是拒绝，不是询问", "level": "advisory", "anchors": [{"section": "AutoSource — 数据源自动发现", "marker": "没有交接停靠点"}], "impl": [], "test": ""},
     {"id": "search-log-by-executor", "summary": "搜索日志由执行搜索的代理落库（阶段 1 不再豁免）；漏记账的搜索由收尾反向差额如实报告", "level": "advisory", "anchors": [{"section": "1b 官网搜索（子代理执行）", "marker": "阶段 1 不再豁免记账", "file": "references/阶段0-2-初始化与清单.md"}, {"section": "阶段 7 · 收尾", "marker": "漏记账的搜索", "file": "references/阶段6-7-自检与收尾.md"}], "impl": [], "test": ""},
     {"id": "phase-vocabulary-pinned", "summary": "搜索日志 phase 按通用纪律分组表的字面量填——自创写法归不进任何一组、对护栏不可见", "level": "advisory", "anchors": [{"section": "子代理派工（阶段 1/3/4/5）", "marker": "按上表写死", "file": "references/通用纪律.md"}], "impl": [], "test": ""},
-    {"id": "weakness-from-coverage-types", "summary": "阶段 5 的体裁/来源维度判定依据 coverage() 的每节点体裁分布（脚本从 store 算，不经代理自报）", "level": "advisory", "anchors": [{"section": "阶段 5 · 覆盖评估与扩量（含清单定案）", "marker": "不经代理自报", "file": "references/阶段5-覆盖评估与扩量.md"}], "impl": [], "test": ""}
+    {"id": "weakness-from-coverage-types", "summary": "阶段 5 的体裁/来源维度判定依据 coverage() 的每节点体裁分布（脚本从 store 算，不经代理自报）", "level": "advisory", "anchors": [{"section": "阶段 5 · 覆盖评估与扩量（含清单定案）", "marker": "不经代理自报", "file": "references/阶段5-覆盖评估与扩量.md"}], "impl": [], "test": ""},
+    {"id": "no-dispatch-retry-when-saturated", "summary": "并发满（派工返回 Concurrent subagent limit reached）时不得重派，等下一条回执到达再派、一次只派一组", "level": "advisory", "anchors": [{"section": "子代理派工（阶段 1/3/4/5）", "marker": "不得重派", "file": "references/通用纪律.md"}], "impl": [], "test": ""}
   ]
 }

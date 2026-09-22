@@ -7,7 +7,7 @@
 
 产出六张表（有 transcript 才有后三张）：
   1. 漏斗指标——各阶段搜索/提取/零提取，每节点分布，manifest 声明与体裁
-  2. 零提取构成——词题(结果垃圾)/疑似漏收/已收重复/混合 四分类 + 样本 URL
+  2. 零提取构成——词题(结果垃圾)/疑似漏收/已收重复/混合/理由已说明 五分类 + 样本 URL 与零提取理由
   3. 交付物成色——验收单摘要、体裁/粒度/域名/URL 形态/官网/归因缺口/配额/同领域跨轮
   4. 模型身份——manifest 与 transcript 的 model 字段实录
   5. 上下文消耗——thinking/工具返回/工具参数占比、每搜成本、异常工具序列
@@ -22,6 +22,10 @@
 只承载声明态、不再带 verified。核对结果改从运行验收单读，并新增「交付物成色」
 一节——近几轮实际复盘的关切（体裁映射、粒度、域名集中度、官网有效性、归因
 完整度、配额）此前只散落在一次性脚本里。
+
+同日改「疑似漏收」的判据：原判只看域名（既不在清单、也不在垃圾域名单即入此类），
+厂商站新闻页与财经媒体因此被误报——180104 轮 27 条「疑似漏收」逐条核对，真漏收
+0 条。现读入搜索日志的「零提取理由」列分桶，已交代清楚的一批移出该类。
 """
 import argparse
 import csv
@@ -68,6 +72,12 @@ ORG_NAMES = {"3GPP", "IEEE", "JEDEC", "GSMA", "ETSI", "Omdia", "LightCounting",
              "中国卫星导航系统管理办公室"}
 # 站点入口形态：根路径 / index.* / 语言首页
 ENTRY_PATTERN = re.compile(r"^(|index\.(html?|php|aspx?)|[a-z]{2}(-[a-z]{2})?|default\.html?)$", re.I)
+# 零提取理由里点名了"结果不可收"具体原因的措辞——命中即视为该批已交代清楚，不再进
+# 「疑似漏收」。名单性质同 GARBAGE_DOMAINS：一条一行、渐进收敛
+REASON_EXPLAINED = ("新闻", "资讯", "媒体", "报道", "门户", "公众号", "已收录", "已收",
+                    "超出", "边界", "无主题", "与领域无关", "图书馆", "招聘", "宣传稿")
+# 运行期唯一合法的 Bash（SKILL「运行期边界」）——判定与规则同源，免得把合法项报成越界
+LEGAL_BASH = re.compile(r"postprocess\.py.*--(prepare|rename-report)")
 
 
 def _csv_rows(path: Path):
@@ -122,7 +132,7 @@ def section_metrics(run_dir: Path, w):
 
 
 def section_zero_split(run_dir: Path, w):
-    """2. 零提取构成：词题/疑似漏收/已收/混合。"""
+    """2. 零提取构成：词题/疑似漏收/已收/混合/理由已说明。"""
     w("=" * 24, "零提取构成")
     base = run_dir / "intermediate"
     traces = sorted(glob.glob(str(base / "*溯源.csv")))
@@ -138,6 +148,11 @@ def section_zero_split(run_dir: Path, w):
     zero = {(r[si["阶段"]], r[si["节点"]], r[si["查询词"]])
             for r in slog[1:] if r[si["阶段"]] == "增量发现"
             and int(r[si["提取候选数"]] or 0) == 0}
+    # 零提取理由（收尾护栏保证非空）：判定"是否漏收"的依据，比只看域名的猜测可靠。
+    # 该列 2026-09-09 起才有，老产物缺列时按空理由处理（一律进「疑似漏收」）
+    ri = _idx(slog[0], "零提取理由")
+    reason_of = {(r[si["阶段"]], r[si["节点"]], r[si["查询词"]]): r[ri]
+                 for r in slog[1:] if r[si["阶段"]] == "增量发现"} if ri is not None else {}
     by_query = defaultdict(list)
     for r in trace[1:]:
         by_query[(r[ti["阶段"]], r[ti["查询词"]])].append(r[ti["结果URL"]])
@@ -156,22 +171,27 @@ def section_zero_split(run_dir: Path, w):
             cat = "词题(结果垃圾)"
         elif g > 0:
             cat = "混合"
+        elif any(k in reason_of.get((ph, node, q), "") for k in REASON_EXPLAINED):
+            cat = "理由已说明(拒收合理)"
         else:
             cat = "疑似漏收"
         cats[cat] += 1
         if len(samples[cat]) < 4:
-            samples[cat].append((q, urls[:3]))
+            samples[cat].append((q, urls[:3], reason_of.get((ph, node, q), "")))
     n = sum(cats.values())
     if not n:
         w("  无零提取增量搜索")
         return
-    for cat in ["疑似漏收", "词题(结果垃圾)", "已收(拒收合理)", "混合"]:
+    for cat in ["疑似漏收", "理由已说明(拒收合理)", "词题(结果垃圾)", "已收(拒收合理)", "混合"]:
         if cats[cat]:
             w(f"  {cat}: {cats[cat]} ({cats[cat] * 100 // n}%)")
-    w("  注：'疑似漏收'为启发式（域名不在清单且非垃圾域），需人工抽查定案")
-    for cat in ["疑似漏收", "混合"]:
-        for q, urls in samples[cat]:
+    w("  注：'疑似漏收'为启发式（域名不在清单、非垃圾域，且零提取理由未点名不可收原因），"
+      "需人工抽查定案；'理由已说明'按模型自述归入，抽查点是理由是否属实")
+    for cat in ["疑似漏收", "混合", "理由已说明(拒收合理)"]:
+        for q, urls, reason in samples[cat]:
             w(f"  [{cat}] {q[:70]}")
+            if reason:
+                w(f"      理由: {reason[:110]}")
             for u in urls:
                 w(f"      {urlparse(u).netloc} | {u[:80]}")
 
@@ -352,7 +372,8 @@ def section_context(transcript: Path | None, w):
                         if nm == "WebSearch":
                             ws_thinking.append(cur_thinking)
                             cur_thinking = 0
-                        if nm in ("Bash", "Edit", "Grep", "Glob"):
+                        cmd = str((b.get("input") or {}).get("command") or "")
+                        if nm in ("Bash", "Edit", "Grep", "Glob") and not LEGAL_BASH.search(cmd):
                             anomaly.append((ts, nm, len(json.dumps(
                                 b.get("input", {}), ensure_ascii=False))))
         elif o.get("type") == "user":

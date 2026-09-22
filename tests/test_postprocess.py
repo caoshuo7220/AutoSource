@@ -2437,19 +2437,27 @@ class TestZeroReasonSentry(_SentinelFoldBase):
 
 
 class TestZeroReasonContradiction(_SentinelFoldBase):
-    """哨兵 3：zero_reason 与结果域名证据矛盾拦截（2026-09-11：分类计数与疑似漏收
+    """哨兵 3：zero_reason 声称垃圾域时域名须确是垃圾域，否则拦截（2026-09-11：分类计数与疑似漏收
     审计清单随之删除——清单是"人工复核"输出，已下线）。"""
 
-    def test_reason_claims_collected_but_domains_not_in_list_raises(self, tmp_path):
+    def test_reason_claims_collected_but_domains_not_in_list_reported_not_blocked(self, tmp_path):
+        """理由含「已收/重复」但域名不在清单——只报不拦（2026-09-21 降级）。
+
+        180104 轮实证：zero_reason 写「结果…与已收录平台（万方/知网）的访问说明页」，
+        是**指代**别处已收录的条目，被自由文本子串判成"声称已收"，连拒两次收尾，模型
+        只能去读护栏源码才弄明白差在哪。子串判据区分不了指代与断言，误报代价却是整轮
+        交不出交付物——同 single_doc_zero，降为只报不拦。
+        """
+        from postprocess import summary_text
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(QUOTA_N)}
-        with pytest.raises(ValueError, match="理由声称已收") as ei:
-            self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
-        assert "q0" in str(ei.value)
-        assert run_dir.exists()
+        summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        assert not run_dir.exists()  # 不拦截：正常收尾
+        assert len(summary["zero_audit"]["claimed_collected"]) == QUOTA_N
+        assert "已收/重复" in summary_text(summary)
 
     def test_reason_claims_garbage_but_domains_clean_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
@@ -2460,6 +2468,19 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
         with pytest.raises(ValueError, match="理由声称垃圾域"):
             self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert run_dir.exists()
+
+    def test_violation_message_carries_original_phase(self, tmp_path):
+        """报错必须给出原件 phase：覆盖键是 (phase, node, query)，换成别的阶段等于
+        新写一条、原件仍在（2026-09-21 实证：180104 轮模型把 phase 从「增量发现」改成
+        「扩量轮」重传两次，全无效果，最后只能去读护栏源码）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": [f"https://www.cisco.com/doc{i}"] for i in range(QUOTA_N)}
+        with pytest.raises(ValueError, match="理由声称垃圾域") as ei:
+            self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        assert "重传用 phase='增量发现'" in str(ei.value)
 
     def test_consistent_reasons_pass_and_audit_reported(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
@@ -2474,7 +2495,7 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
         assert "零提取审计" in summary_text(summary)
 
     def test_zero_reason_contradiction_not_flagged_when_clean(self, tmp_path):
-        """理由与域名证据一致（无矛盾）时 violations 为空——哨兵 2/3 不误报。"""
+        """理由与域名证据一致（无矛盾）时 violations 为空——哨兵 2/3 不误报，只报通道也不报。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
@@ -2483,6 +2504,7 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
         query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
         summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
         assert summary["zero_audit"]["violations"] == []
+        assert summary["zero_audit"]["claimed_collected"] == []
 
 
 class TestGarbageFilter(_SentinelFoldBase):

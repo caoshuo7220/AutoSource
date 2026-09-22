@@ -185,9 +185,10 @@ def coverage(run_dir: str) -> str:
     去重前与跨节点顺路发现、已收数是幂等去重后的入库数，两口径天然有差），
     小额 missing 不触发补搜；接近该节点一整批提取量才怀疑漏调 record_sources。
 
-    返回 [{node, recorded, extracted, missing, types}]（missing = max(0, 提取-已收)；
+    返回 [{node, recorded, extracted, missing, types, pending}]（missing = max(0, 提取-已收)；
     types 为该节点体裁分布，由脚本从 store 算——"体裁/来源维度单一"按它判定，
-    已收数为 0 的节点给空分布）。
+    已收数为 0 的节点给空分布；**pending 为该节点尚无任何核对记录的声明清单项名**，
+    "两栏清单项全部了结"按它判——不必自己去读 store.jsonl。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)

@@ -525,8 +525,26 @@ def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
     经过条目正文，改由本函数从 store 算分布供其判定；已收数为 0 的节点给空
     分布——"没有"与"单一"要能分开。角度级状态不可恢复（角度多样性脚本校验
     2026-08-31 裁决不做，该缺口以散文层治理维持，见 docs/02 讨论日志）。
+
+    pending 为未了结的声明清单项名（2026-09-21 补）：阶段 5 与阶段 6 要判"两栏
+    清单项全部了结"，此前只能自己去 store.jsonl 里 grep（180104 轮实测 9 次）。
+    判定 = manifest 声明的名字 − store 里已有 knowledge 记录的名字——verified
+    真假都算了结（定案后一律落 record_knowledge）。manifest 不存在时给空表。
     """
     records, _ = load_store(store_path) if store_path.exists() else ([], 0)
+    declared: dict[str, list[str]] = {}
+    manifest = store_path.parent / "manifest.json"
+    if manifest.exists():
+        try:
+            m = json.loads(manifest.read_text(encoding="utf-8"))
+            for item in (m.get("vendors") or []) + (m.get("knowledge") or []):
+                if isinstance(item, dict) and item.get("name"):
+                    declared.setdefault(str(item.get("node") or ""), []).append(
+                        str(item["name"]).strip())
+        except (json.JSONDecodeError, OSError):
+            declared = {}
+    closed = {str(r.get("name") or "").strip() for r in records
+              if r.get("type") == "knowledge"}
     per: dict[str, dict] = {n: {"recorded": 0, "extracted": 0, "types": {}}
                             for n in nodes}
     extra: dict[str, dict] = {}
@@ -555,5 +573,6 @@ def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
         result.append({"node": node, "recorded": c["recorded"],
                        "extracted": c["extracted"],
                        "missing": max(0, c["extracted"] - c["recorded"]),
-                       "types": c["types"]})
+                       "types": c["types"],
+                       "pending": [n for n in declared.get(node, []) if n not in closed]})
     return result
