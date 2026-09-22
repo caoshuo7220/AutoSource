@@ -562,11 +562,21 @@ def test_settings_deny_outputs_read():
 def test_settings_outputs_write_only_no_edit():
     """docs/04 §3.3/§10 契约：outputs 目录只放行 Write——Edit 不入 allow。
     2026-09-07：allow 曾显式放行 Edit(outputs/**)，与契约文本矛盾（Edit 墙实际由
-    deny Read(outputs/**) 兜底），删除并对齐。"""
+    deny Read(outputs/**) 兜底），删除并对齐。
+
+    2026-09-22：postprocess 那条收窄到 SKILL 明列的两个子命令（`--prepare` /
+    `--rename-report`）——原先的 `postprocess.py *` 宽于契约面。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     allow = settings["permissions"]["allow"]
     assert "Write(outputs/**)" in allow
     assert "Edit(outputs/**)" not in allow
+    # postprocess 逐子命令收窄：raw.json 形态（`postprocess.py <路径>`）不落白名单
+    assert ("Bash(python .claude/skills/autosource/scripts/postprocess.py --prepare)"
+            in allow)
+    assert ("Bash(python .claude/skills/autosource/scripts/postprocess.py --rename-report *)"
+            in allow)
+    assert ("Bash(python .claude/skills/autosource/scripts/postprocess.py *)"
+            not in allow)
 
 
 def test_settings_allow_entries_well_formed():
@@ -589,6 +599,27 @@ def test_settings_allow_mcp_store_tools():
     for tool in ["record_sources", "record_search", "record_knowledge",
                  "coverage", "finalize"]:
         assert f"mcp__{server}__{tool}" in allow
+
+
+def test_mcp_args_not_anchored_on_claude_project_dir():
+    """2026-09-22 实测：`.mcp.json` **支持** `${VAR}` 展开（CLI 自带缺失变量诊断），
+    但 CLI 自身的环境里没有 CLAUDE_PROJECT_DIR——写成 `${CLAUDE_PROJECT_DIR}/…` 时
+    服务连不上：`claude mcp list` 报 ✘ CONNECTION_CLOSED，诊断原文
+    「Missing environment variables: CLAUDE_PROJECT_DIR」；换回裸相对路径立即
+    ✔ Connected。
+
+    与 hook 那条（必须锚定 `${CLAUDE_PROJECT_DIR}`）方向相反，原因不同：hook 由 CLI
+    逐回合派发，会话 cwd 一旦漂移（模型 `cd` 进运行目录）就解析不到脚本；MCP 进程在
+    会话启动时一次性拉起、cwd 即项目根，且从子目录启动时服务本就因「未批准」不可用
+    （2026-09-22 实测 ⏸ Pending approval），与路径写法无关。"""
+    mcp_config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+    for name, server in mcp_config["mcpServers"].items():
+        for arg in server.get("args") or []:
+            assert "CLAUDE_PROJECT_DIR" not in arg, (
+                f"{name}: MCP args 不得用 ${{CLAUDE_PROJECT_DIR}} 锚定"
+                "——该变量不在 CLI 环境里，服务会连不上")
+            if arg.endswith(".py"):
+                assert (ROOT / arg).is_file(), f"{name}: {arg}"
 
 
 def test_settings_allow_delegation_tools():
