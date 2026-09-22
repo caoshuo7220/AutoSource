@@ -24,18 +24,24 @@ def _report_stats_block(outdir: Path) -> Optional[str]:
     node_rows = []
     total_row = None
     with open(stats_csv, encoding="utf-8-sig") as f:
-        rows = list(csv.reader(f))[1:]
-    for r in rows:
-        if not r or not r[0]:
+        rows = list(csv.reader(f))
+    # 按列名读取（接口契约第 1 批）：列序变化不再静默读错；列缺失按"无法统计"
+    # 处理，与 stats.csv 缺失同策略——占位提示，不阻断重命名。
+    idx = {name: i for i, name in enumerate(rows[0])} if rows else {}
+    if not {"分类节点", "候选数", "体裁分布"} <= set(idx):
+        return None
+    col_node, col_count, col_types = idx["分类节点"], idx["候选数"], idx["体裁分布"]
+    for r in rows[1:]:
+        if len(r) <= max(col_node, col_count) or not r[col_node]:
             continue
-        if r[0] == "总计":
+        if r[col_node] == "总计":
             total_row = r
         else:
             node_rows.append(r)
     if total_row is None:
         return None
-    total = total_row[1] if len(total_row) > 1 else "0"
-    type_dist = total_row[2] if len(total_row) > 2 else ""
+    total = total_row[col_count] if len(total_row) > col_count else "0"
+    type_dist = total_row[col_types] if len(total_row) > col_types else ""
     coll = single = 0
     list_csv = next((f for f in outdir.iterdir() if f.name.endswith("数据源清单.csv")), None)
     if list_csv:
@@ -51,7 +57,7 @@ def _report_stats_block(outdir: Path) -> Optional[str]:
         "",
         f"- 数据源总数：{total} 条（合集级 {coll} / 单篇级 {single}）",
         f"- 分类节点：{len(node_rows)} 个",
-        "- 节点分布：" + "; ".join(f"{r[0]}: {r[1]}" for r in node_rows),
+        "- 节点分布：" + "; ".join(f"{r[col_node]}: {r[col_count]}" for r in node_rows),
         "- 体裁分布：" + type_dist,
         "",
     ])
@@ -87,11 +93,11 @@ def finalize_report(outdir: str) -> str:
         raise FileNotFoundError(f"未找到 分析报告.md: {report}（报告需先由模型写入该文件）")
     block = _report_stats_block(d)
     if block is None:
-        print("注意: 未找到 stats.csv，已往报告数据总览写入占位提示（统计未注入）")
+        print("注意: 未找到 stats.csv 或表头列名不符，已往报告数据总览写入占位提示（统计未注入）")
         # 占位块与正常块同形状（自带 `## 数据总览` 标题）：_insert_stats_section 的
         # 替换分支按"整块含标题"设计，占位块缺标题会把报告原有标题一并替换掉
         # （2026-09-21 修）。
-        block = "## 数据总览\n\n（本次统计注入失败：未找到 stats.csv，见 intermediate/）"
+        block = "## 数据总览\n\n（本次统计注入失败：未找到 stats.csv 或表头列名不符，见 intermediate/）"
     report.write_text(_insert_stats_section(report.read_text(encoding="utf-8"), block),
                       encoding="utf-8")
     target = d / f"{d.name}_分析报告.md"

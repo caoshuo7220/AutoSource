@@ -17,10 +17,10 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from postprocess import (check_grounded, check_granularity,
                          deduplicate, default_evidence_log, finalize_report, fold,
-                         leaf_node, prepare_run_dir, query_in_evidence, result_urls,
-                         run_pipeline,
+                         leaf_node, prepare_run_dir, query_in_evidence,
+                         RUN_ATTESTATION_KEYS, result_urls, run_pipeline,
                          run_evidence_log, sanitize_domain, slice_evidence,
-                         strip_citation_anchors)
+                         strip_citation_anchors, write_stats_csv)
 
 FIXED_NOW = datetime(2026, 8, 13, 18, 30, 45)
 BOM = b"\xef\xbb\xbf"
@@ -1757,6 +1757,40 @@ class TestReportStatsInjection:
         assert "统计注入失败" in text
         assert text.index("## 数据总览") < text.index("## 一、领域概览")
 
+    def test_column_order_change_does_not_misread(self, tmp_path):
+        """按列名读取（接口契约第 1 批）：列序变化不再静默读错——
+        旧实现按下标取值，列序一变数字会张冠李戴或整段退回占位；
+        短于取值下标的行按跳过处理，不越界（行过滤守卫覆盖全部读取列）。"""
+        d = self._setup(tmp_path, "# 交换机 领域分析报告\n\n## 一、领域概览\n内容\n")
+        (d / "intermediate" / "交换机_2026-08-28-114546_stats.csv").write_text(
+            "体裁分布,分类节点,候选数\n"
+            "\"厂商文档: 30\",工业交换机,98\n"
+            "\"厂商文档: 5\",数据中心交换机\n"
+            "\"厂商文档: 70; 行业标准: 10\",总计,182\n",
+            encoding="utf-8-sig")
+        text = Path(finalize_report(str(d))).read_text(encoding="utf-8")
+        assert "数据源总数：182 条（合集级 1 / 单篇级 2）" in text
+        assert "体裁分布：厂商文档: 70; 行业标准: 10" in text
+        assert "工业交换机: 98" in text
+        assert "数据中心交换机" not in text
+
+    def test_writer_header_round_trips(self, tmp_path):
+        """接口契约第 1 批：写方 STATS_CSV_HEADER 与 report 侧列名是两份字面——
+        本用例直接用写方写出的 stats.csv 走 finalize_report，任一侧改列名即红，
+        防止静默退化为占位提示。"""
+        d = self._setup(tmp_path,
+                        "# 交换机 领域分析报告\n\n## 一、领域概览\n内容\n",
+                        with_stats=False)
+        (d / "intermediate").mkdir()
+        write_stats_csv(d / "intermediate" / "交换机_2026-08-28-114546_stats.csv", {
+            "per_node": {"工业交换机": {"count": 98, "types": {"厂商文档": 30}}},
+            "kept": 98,
+            "total_types": {"厂商文档": 30},
+        })
+        text = Path(finalize_report(str(d))).read_text(encoding="utf-8")
+        assert "统计注入失败" not in text
+        assert "数据源总数：98 条" in text
+
 
 class TestSessionIsolatedEvidenceLog:
     """证据留痕按会话隔离（2026-08-26 起）：并行运行互不删除对方留痕。"""
@@ -2572,6 +2606,7 @@ class TestRunAttestation(_SentinelFoldBase):
         assert data["knowledge"]["missing"] == []
         assert len(data["script_fingerprint"]) == 12
         assert data["generated_at"]
+        assert set(data) == set(RUN_ATTESTATION_KEYS)
 
     def test_kept_matches_deliverable_rows(self, tmp_path):
         """验收单上的数字必须与交付物对得上——这是"不用读报告就能判断"的前提。"""

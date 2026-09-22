@@ -6,7 +6,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent.parent / ".claude" / "skills" / "autosource" / "scripts"
 sys.path.insert(0, str(SKILL_DIR))
 
-from store import (SOURCE_TYPES, SOURCE_TYPE_ALIASES, append_records,
+from store import (SOURCE_TYPES, SOURCE_TYPE_ALIASES, STORE_FIELDS, append_records,
                    canonicalize_source_type, coverage, load_store, record_search,
                    record_sources, record_knowledge)
 
@@ -202,6 +202,24 @@ class TestRecordKnowledge:
         store = tmp_path / "store.jsonl"
         evidence = write_evidence(tmp_path, ["https://k.com/doc"])
         result = record_knowledge(store, [self._entry(name="任意名称")], evidence)
+        assert result["accepted"] == 1
+
+    def test_name_matching_is_verbatim(self, tmp_path):
+        """2026-09-22 统一为逐字口径：入库校验与收尾对账共用同一名称集合。
+
+        此前入库侧对声明集 strip、收尾侧按原文比对——同一差异会"入库放过、
+        收尾判未了结"；统一逐字后差异在入库当场点名（与 URL 逐字校验同纪律）。
+        """
+        store = tmp_path / "store.jsonl"
+        (tmp_path / "manifest.json").write_text(json.dumps(
+            {"nodes": NODES,
+             "knowledge": [{"name": "机构乙 ", "node": "AI训练GPU"}]},
+            ensure_ascii=False), encoding="utf-8")
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [self._entry(name="机构乙")], evidence)
+        assert result["accepted"] == 0
+        assert "不在 manifest 声明清单中" in result["rejected"][0]["reason"]
+        result = record_knowledge(store, [self._entry(name="机构乙 ")], evidence)
         assert result["accepted"] == 1
 
     def test_verified_url_not_in_evidence_rejected(self, tmp_path):
@@ -576,3 +594,28 @@ class TestGarbageDomainGate:
             "name": "K1", "node": "AI训练GPU", "verified": False,
             "note": "未找到官方入口"}], tmp_path / "no-evidence.jsonl")
         assert result["accepted"] == 1
+
+
+class TestRecordShapeContract:
+    """契约见证（接口契约第 1 批）：三种 store 行的键集合 = STORE_FIELDS 声明。
+
+    写方新增/删除字段而不更新声明时本测试当场红——形状变更必须是自觉动作。
+    """
+
+    def test_writers_emit_declared_fields(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        record_sources(store, [source_entry(url="https://k.com/doc")], evidence, NODES)
+        record_search(store, [{"phase": "增量", "node": NODES[0], "query": "q",
+                               "results": 1, "extracted": 0, "zero_reason": "已收"}])
+        record_knowledge(store, [{
+            "name": "K1", "node": NODES[0], "verified": True,
+            "category_path": "算力服务器-GPU服务器-AI训练GPU",
+            "source_type": "文档", "granularity": "合集级",
+            "url": "https://k.com/doc", "description": "d", "reason": "r"}],
+            evidence)
+        records, _ = load_store(store)
+        by_type: dict[str, set] = {}
+        for r in records:
+            by_type.setdefault(r["type"], set()).update(r.keys())
+        assert by_type == {t: set(fields) for t, fields in STORE_FIELDS.items()}

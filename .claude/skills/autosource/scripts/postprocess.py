@@ -80,8 +80,9 @@ from lineage import build_lineage, first_query_by_source, write_lineage_csv
 from report import finalize_report
 # 条目粒度契约与节点推导归存储层（store），编排层从这里取——依赖方向单向向下
 # （mcp_server → store/postprocess → evidence/lineage/report，无环）。
-from store import (GRANULARITY_LEVELS, canonicalize_source_type, domain_of,
-                   leaf_node, is_garbage_domain, load_store)
+from store import (declared_names_of, domain_of, leaf_node, is_garbage_domain,
+                   load_store, normalize_entry_type, normalize_granularity,
+                   read_manifest)
 
 # 重导出（test_postprocess 的导入面）：query_in_evidence 本模块未用，仅作兼容出口。
 __all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicate",
@@ -182,10 +183,9 @@ def check_granularity(sources: list[dict]) -> tuple[int, int]:
     single_count = 0
     missing_count = 0
     for s in sources:
-        g = str(s.get("granularity") or "")
-        if g not in GRANULARITY_LEVELS:
+        g = normalize_granularity(s.get("granularity"))
+        if str(s.get("granularity") or "") != g:
             missing_count += 1
-            g = "合集级"
         s["granularity"] = g
         if g == "单篇级":
             single_count += 1
@@ -524,11 +524,10 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     # 发生的这一处按原始词计数——审计语义 = 本次运行实际发生的表外词，与来源无关。
     unmapped_types: dict[str, int] = {}
     for s in all_candidates:
-        raw_type = str(s.get("source_type") or "").strip()
-        source_type = canonicalize_source_type(raw_type)
+        source_type, _raw, unmapped_word = normalize_entry_type(s.get("source_type"))
         s["source_type"] = source_type
-        if source_type == "其他" and raw_type != "其他":
-            unmapped_types[raw_type] = unmapped_types.get(raw_type, 0) + 1
+        if unmapped_word:
+            unmapped_types[unmapped_word] = unmapped_types.get(unmapped_word, 0) + 1
     grounded, rejected = check_grounded(all_candidates, evidence)
     ungrounded = len(rejected)
 
@@ -729,6 +728,13 @@ def _scripts_fingerprint() -> str:
     return h.hexdigest()[:12]
 
 
+# 验收单形状契约（接口契约第 1 批）：顶层键集合——组装（_build_run_attestation）
+# 输出必须等于此处集合（由见证测试比对）；下游（度量/审阅）按此读取，增删键必须同步更新。
+RUN_ATTESTATION_KEYS = ("domain", "generated_at", "script_fingerprint", "sources",
+                        "knowledge", "zero_extraction", "quota", "journal",
+                        "reverse_gap")
+
+
 def _write_run_attestation(outdir: Path, payload: dict) -> Path:
     """写出本轮运行验收单（docs/06 第 2 期）。
 
@@ -815,15 +821,12 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     成功后 store/manifest 归档进 intermediate/（store_input.jsonl / manifest_input.json）。
     """
     run_dir_path = Path(run_dir)
-    manifest_path = run_dir_path / "manifest.json"
-    if not manifest_path.exists():
+    manifest = read_manifest(run_dir_path)
+    if manifest is None:
         raise FileNotFoundError(
-            f"manifest.json 不存在: {manifest_path}（阶段 0-2 应先 Write manifest）")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise ValueError(f"manifest.json 损坏: {e}")
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("nodes"), list):
+            f"manifest.json 不存在: {run_dir_path / 'manifest.json'}"
+            "（阶段 0-2 应先 Write manifest）")
+    if not isinstance(manifest.get("nodes"), list):
         raise ValueError('manifest.json 结构错误：应为 {"domain", "nodes", ...} 对象')
 
     store_path = run_dir_path / "store.jsonl"
@@ -865,8 +868,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     # 落库，fold 从 store 取末次记录与声明清单对账——废除"会话暂存 + 阶段 6
     # 一次性转写 manifest"（214051 实证漏写 60 个 verified 字段的事故类别）。
     declared = knowledge_list + vendors
-    declared_names = {str(k.get("name")) for k in declared
-                      if isinstance(k, dict) and k.get("name")}
+    declared_names = declared_names_of(manifest)
     knowledge_records = [r for r in records if r.get("type") == "knowledge"]
     latest: dict[str, dict] = {}
     for r in knowledge_records:

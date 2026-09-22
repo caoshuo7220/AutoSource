@@ -264,6 +264,76 @@ def canonicalize_source_type(raw) -> str:
     return SOURCE_TYPE_ALIASES.get(r, "其他")
 
 
+def normalize_entry_type(value) -> tuple[str, str, str]:
+    """条目体裁归一的一次口径：→ (标准词, 原始词, 表外原始词或空串)。
+
+    原始词为 strip 后的留痕（store 行 source_type_raw）；表外词（落「其他」
+    且非「其他」本身）由第三个返回值带出——审计按原始词计数。写方（入库）
+    与收尾三来源汇合共用本函数——多份口径漂移是已发生过的事故类型。
+    """
+    raw = str(value or "").strip()
+    source_type = canonicalize_source_type(raw)
+    unmapped = raw if source_type == "其他" and raw != "其他" else ""
+    return source_type, raw, unmapped
+
+
+def normalize_granularity(value) -> str:
+    """粒度归一：非法/缺失一律「合集级」（P-002 默认，不拒绝）。"""
+    return value if value in GRANULARITY_LEVELS else "合集级"
+
+
+def read_manifest(run_dir: Path) -> Optional[dict]:
+    """解析运行目录 manifest.json（全项目单一解析点）。
+
+    缺失 → None（由调用方定策略：收尾报错 / 入库跳过对账 / 只读工具宽容）；
+    损坏 / 非对象 → ValueError（文案与 fold 原有报错逐字一致）。nodes 是否
+    列表等结构细节由调用方按需校验——解析与策略分离。
+    """
+    path = run_dir / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"manifest.json 损坏: {e}")
+    if not isinstance(data, dict):
+        raise ValueError('manifest.json 结构错误：应为 {"domain", "nodes", ...} 对象')
+    return data
+
+
+def declared_items(manifest: dict) -> list[dict]:
+    """manifest 两栏（vendors + knowledge）的声明条目——非列表/非对象项跳过。"""
+    items: list[dict] = []
+    for key in ("vendors", "knowledge"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            items += [x for x in value if isinstance(x, dict)]
+    return items
+
+
+def declared_names_of(manifest: dict) -> set[str]:
+    """声明名称集合：逐字口径（name 必须逐字照抄 manifest，与 URL 逐字校验同一纪律）。
+
+    入库校验与收尾对账共用——此前两处各自 strip/不 strip，同一名称差异会
+    "入库放过、收尾才判未了结"（2026-09-22 统一为逐字）。
+    """
+    return {str(x.get("name")) for x in declared_items(manifest) if x.get("name")}
+
+
+# store 记录形状契约（接口契约第 1 批）：三种行的键集合声明——写方（record_*）
+# 输出必须等于此处集合（由见证测试比对）；新增字段必须同步更新此处。
+STORE_FIELDS = {
+    "source": ("type", "node", "name", "category_path", "source_type",
+               "source_type_raw", "granularity", "url", "description",
+               "reason", "ts"),
+    "search": ("type", "phase", "node", "query", "results", "extracted",
+               "zero_reason", "ts"),
+    "knowledge": ("type", "node", "name", "verified", "category_path",
+                  "source_type", "source_type_raw", "granularity", "url",
+                  "description", "reason", "note", "ts"),
+}
+
+
 def append_records(store_path: Path, records: list[dict]) -> int:
     """追加 JSONL 记录（单次追加原子）；空批不创建文件。返回追加数。"""
     if not records:
@@ -368,11 +438,9 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
         if url in existing_urls:
             skipped += 1
             continue
-        granularity = e.get("granularity")
-        raw_type = str(e.get("source_type") or "").strip()
-        source_type = canonicalize_source_type(raw_type)
-        if source_type == "其他" and raw_type != "其他":
-            unmapped.add(raw_type)
+        source_type, raw_type, unmapped_word = normalize_entry_type(e.get("source_type"))
+        if unmapped_word:
+            unmapped.add(unmapped_word)
         accepted.append({
             "type": "source",
             "node": leaf_node(str(e.get("category_path") or ""), nodes) or "",
@@ -380,7 +448,7 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
             "category_path": e.get("category_path", ""),
             "source_type": source_type,
             "source_type_raw": raw_type,
-            "granularity": granularity if granularity in GRANULARITY_LEVELS else "合集级",
+            "granularity": normalize_granularity(e.get("granularity")),
             "url": url,
             "description": e.get("description", ""),
             "reason": e.get("reason", ""),
@@ -444,12 +512,8 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
     # 名称对账前移（2026-09-17）：manifest 与 store 同在运行目录，收尾折叠按名精确
     # 对账——名称写错原本要等 finalize 才被点名（115926 实证：模型改写过名称，收尾
     # 漏录 9 项、整轮返工）。manifest 不存在时（阶段 1 的行前清单核对）不校验。
-    declared: Optional[set] = None
-    _mp = store_path.parent / "manifest.json"
-    if _mp.exists():
-        _m = json.loads(_mp.read_text(encoding="utf-8"))
-        declared = {str(x.get("name", "")).strip()
-                    for x in (_m.get("vendors") or []) + (_m.get("knowledge") or [])}
+    _m = read_manifest(store_path.parent)
+    declared: Optional[set] = declared_names_of(_m) if _m is not None else None
 
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
@@ -488,11 +552,9 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
                 rejected.append({"index": i, "name": name,
                                  "reason": "URL 不在证据留痕中" + _grounded_hint(url, evidence)})
                 continue
-        raw_type = str(e.get("source_type") or "").strip()
-        source_type = canonicalize_source_type(raw_type)
-        if source_type == "其他" and raw_type != "其他":
-            unmapped.add(raw_type)
-        granularity = e.get("granularity")
+        source_type, raw_type, unmapped_word = normalize_entry_type(e.get("source_type"))
+        if unmapped_word:
+            unmapped.add(unmapped_word)
         accepted.append({
             "type": "knowledge",
             "node": node,
@@ -501,7 +563,7 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
             "category_path": e.get("category_path", ""),
             "source_type": source_type,
             "source_type_raw": raw_type,
-            "granularity": granularity if granularity in GRANULARITY_LEVELS else "合集级",
+            "granularity": normalize_granularity(e.get("granularity")),
             "url": url,
             "description": e.get("description", ""),
             "reason": e.get("reason", ""),
@@ -533,17 +595,15 @@ def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
     """
     records, _ = load_store(store_path) if store_path.exists() else ([], 0)
     declared: dict[str, list[str]] = {}
-    manifest = store_path.parent / "manifest.json"
-    if manifest.exists():
-        try:
-            m = json.loads(manifest.read_text(encoding="utf-8"))
-            for item in (m.get("vendors") or []) + (m.get("knowledge") or []):
-                if isinstance(item, dict) and item.get("name"):
-                    declared.setdefault(str(item.get("node") or ""), []).append(
-                        str(item["name"]).strip())
-        except (json.JSONDecodeError, OSError):
-            declared = {}
-    closed = {str(r.get("name") or "").strip() for r in records
+    try:
+        m = read_manifest(store_path.parent)
+    except (ValueError, OSError):
+        m = None
+    if m is not None:
+        for item in declared_items(m):
+            if item.get("name"):
+                declared.setdefault(str(item.get("node") or ""), []).append(str(item["name"]))
+    closed = {str(r.get("name") or "") for r in records
               if r.get("type") == "knowledge"}
     per: dict[str, dict] = {n: {"recorded": 0, "extracted": 0, "types": {}}
                             for n in nodes}

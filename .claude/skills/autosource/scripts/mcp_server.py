@@ -96,14 +96,11 @@ def _ensure_healthy(run_dir: str | Path) -> None:
 
 
 def _manifest_nodes(run_dir: Path) -> list[str]:
-    manifest = run_dir / "manifest.json"
-    if not manifest.exists():
-        return []
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        data = store.read_manifest(run_dir)
+    except (ValueError, OSError):
         return []
-    nodes = data.get("nodes") if isinstance(data, dict) else None
+    nodes = (data or {}).get("nodes")
     return [str(n) for n in nodes] if isinstance(nodes, list) else []
 
 
