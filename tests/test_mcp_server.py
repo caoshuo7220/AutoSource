@@ -1,4 +1,4 @@
-"""mcp_server.py 协议层测试（docs/04 §7.8：stdio 握手、工具路由、哨兵错误路径）。"""
+"""mcp_server.py 协议层测试（docs/04 §7.8：stdio 握手、工具路由、校验错误路径）。"""
 import json
 import subprocess
 import sys
@@ -43,11 +43,11 @@ def _tool_text(resp) -> str:
 
 
 def test_project_root_and_relative_resolution():
-    """2026-08-31 首轮实测 bug 钉进测试：PROJECT_ROOT 曾上溯到 .claude/（parents[3]
+    """2026-08-31 首轮实测 bug 回归断言：PROJECT_ROOT 曾上溯到 .claude/（parents[3]
     off-by-one），相对 run_dir 解析到 .claude/outputs/ 下，store 与证据留痕全
     找不到、record_sources 全被拒。项目根必须锚定仓库根，相对路径锚定项目根。"""
     # 2026-09-07：目录改名（AutoSource → AutoSource-1.0）后 name 硬编码断言必红，
-    # 改为结构性断言——仍钉 parents 层数（off-by-one 回归），但不绑目录名
+    # 改为结构性断言——仍断言 parents 层数（off-by-one 回归），但不绑目录名
     assert ms.PROJECT_ROOT == Path(__file__).resolve().parent.parent
     assert (ms.PROJECT_ROOT / ".claude" / "skills" / "autosource" / "scripts"
             / "mcp_server.py").is_file()
@@ -105,7 +105,7 @@ class TestSelfCheck:
 
 
 class TestMcpProtocol:
-    def test_tool_routing_records_and_sentinel(self, tmp_path, monkeypatch):
+    def test_tool_routing_records_and_check(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-mcp-test")
 
         # run_dir 1：正常 record + coverage（证据按运行级归属写在 run_dir 内）
@@ -120,8 +120,8 @@ class TestMcpProtocol:
              "tool_response": {"results": [{"url": "https://a.com/doc"}]}},
             ensure_ascii=False) + "\n", encoding="utf-8")
 
-        # run_dir 2：只有搜索记录没有来源——finalize 应走哨兵错误路径
-        run_dir2 = tmp_path / "run_sentinel"
+        # run_dir 2：只有搜索记录没有来源——finalize 应走校验错误路径
+        run_dir2 = tmp_path / "run_check"
         run_dir2.mkdir()
         (run_dir2 / "manifest.json").write_text(json.dumps(
             {"domain": "交换机", "nodes": ["数据中心交换机"], "model": "t",
@@ -167,7 +167,7 @@ class TestMcpProtocol:
                               "extracted": 5, "missing": 4, "types": {"文档": 1},
                               "pending": []}
 
-            # 哨兵路径：record_search 有提取、record_sources 未调用 → finalize 报错
+            # 校验路径：record_search 有提取、record_sources 未调用 → finalize 报错
             _rpc(proc, "tools/call", {"name": "record_search", "arguments": {
                 "run_dir": str(run_dir2), "entries": [
                     {"phase": "增量发现", "node": "数据中心交换机", "query": "q1",

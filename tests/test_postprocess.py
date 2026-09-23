@@ -402,7 +402,7 @@ class TestCheckGranularity:
 
 class TestMultilangAudit:
     def test_multilang_audit_removed(self, tmp_path):
-        """2026-09-01 钉进测试：多语言审计已下线——两轮实测全为假阳性
+        """2026-09-01 回归断言：多语言审计已下线——两轮实测全为假阳性
         （分组键忽略 query 参数，同端点不同资源被误判为多语言重复），
         真多语言重复零发生；无消费者 + 假信号会误导触发，修不如删。
         stdout 不再报告该指标，summary 不再携带相关键。"""
@@ -528,7 +528,7 @@ class TestRun:
         assert rows[-1][0] == "总计"
         assert rows[-1][1] == "2"  # 最终收录 = 候选数求和
         assert rows[-1][2] == "数据集:1; 文档:1"  # 同数按体裁名升序：数(U+6570) < 文(U+6587)
-        # stats 列集合钉死：纯清单统计表（领域/时间戳在文件名、模型在 manifest、健康指标在 stdout）
+        # stats 列集合固定：纯清单统计表（领域/时间戳在文件名、模型在 manifest、健康指标在 stdout）
         assert rows[0] == ["分类节点", "候选数", "体裁分布"]
 
     def test_keep_raw(self, tmp_path):
@@ -1021,9 +1021,9 @@ class TestQueryScope:
     英文角度词/抽象词归非框架内是已知近似，数字按趋势读不按绝对值。"""
 
     def test_phase_group_prefix_tolerant(self):
-        """2026-09-01 实测 bug 钉进测试：phase 是模型自由文本（"验证搜索"曾被缩写
+        """2026-09-01 实测 bug 回归断言：phase 是模型自由文本（"验证搜索"曾被缩写
         为"验证"、"增量发现"为"增量"），字面全等匹配导致选题分布 0/0 与
-        verified 警告误报——按前缀归组。"""
+        verified 警告误报——按前缀归类。"""
         from postprocess import _phase_group
         assert _phase_group("验证搜索") == "验证"
         assert _phase_group("验证") == "验证"
@@ -1655,6 +1655,11 @@ class TestEvidenceHook:
             raise FileNotFoundError("模拟：解析期间运行目录被改名")
 
         monkeypatch.setattr(evidence_hook.sys, "stdin", _Stdin)
+        # argv 一并固定：main() 里 len(sys.argv) > 1 时会把 argv[1] 当留痕路径，
+        # 不固定就落到那一支——断言因错误原因通过（`pytest tests/ -q` 时 argv[1]
+        # 是目录，open 抛 IsADirectoryError 恰被兜底捕获），而 `pytest -q` 时真失败、
+        # 并把 pytest 自己的参数当路径写出垃圾文件（2026-09-23 实证）。
+        monkeypatch.setattr(evidence_hook.sys, "argv", ["evidence_hook.py"])
         monkeypatch.setattr(evidence_hook, "run_scoped_log_path", boom)
         evidence_hook.main()                      # 不得抛异常
         assert "recording failed" in capsys.readouterr().err
@@ -2018,7 +2023,7 @@ class TestFinalizeFold:
         self._write_store(run_dir, [self._source_row(), self._search_row()])
         fold_summary = fold(str(run_dir), evidence_log=str(evidence1),
                             out_dir=str(tmp_path / "outputs"), now=FIXED_NOW,
-                            enforce_quotas=False)  # 单条搜索：本测试钉等价性，护栏由专门测试覆盖
+                            enforce_quotas=False)  # 单条搜索：本测试断言等价性，护栏由专门测试覆盖
 
         raw = write_raw(tmp_path, {
             "domain": "算力服务器", "nodes": self.FOLD_NODES, "model": "test-model",
@@ -2067,9 +2072,9 @@ class TestFinalizeFold:
         assert not run_dir.exists()  # 正常重命名收尾
 
     def test_fold_unrecorded_declared_items_raise_with_names(self, tmp_path):
-        """清单了结哨兵（2026-09-08 架构修订配套）：声明清单项在 store 中无核对
+        """清单核对校验（2026-09-08 架构修订配套）：声明清单项在 store 中无核对
         记录 → 拒绝收尾并点名（防漏调 record_knowledge）。失败发生在重命名前，
-        补录后可安全重跑——与防截断哨兵同构。"""
+        补录后可安全重跑——与防截断校验同构。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         self._manifest(run_dir, knowledge=[
             {"name": "K1", "node": "AI训练GPU", "预期体裁": "官方文档"},
@@ -2082,12 +2087,30 @@ class TestFinalizeFold:
              "granularity": "合集级", "url": "https://k.com/doc",
              "description": "kd", "reason": "kr"}])
         evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
-        with pytest.raises(ValueError, match="清单项未了结"):
+        with pytest.raises(ValueError, match="清单项未核对"):
             fold(str(run_dir), evidence_log=str(evidence),
                  out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
         assert run_dir.exists()
         assert run_dir.name.startswith("run_")
         assert not (run_dir / "raw.json").exists()
+
+    def test_blocked_event_recorded_before_raise(self, tmp_path):
+        """整轮阻断先记账再抛（2026-09-23）：fold 失败也留得下"被拦几次、哪几类"。
+
+        事件写 run_dir/rejects.jsonl（与逐条拒收同一文件、同一形状）；异常照旧抛，
+        文案逐字不变——失败发生在重命名前，补正后可安全重跑，事件流继续追加。
+        """
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir, knowledge=[{"name": "K1", "node": "AI训练GPU"}])
+        self._write_store(run_dir, [self._source_row(), self._search_row(extracted=1)])
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"}])
+        with pytest.raises(ValueError, match="清单项未核对"):
+            fold(str(run_dir), evidence_log=str(evidence),
+                 out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        events = [json.loads(line) for line in
+                  (run_dir / "rejects.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert [e["code"] for e in events] == ["CHECKLIST_UNRECORDED"]
+        assert events[0]["actor"] == "model"
 
     def test_fold_vendors_field_declared_and_checked(self, tmp_path):
         """2026-09-11 阶段 1（厂商官网）独立成段：manifest 两栏分装——knowledge 是
@@ -2162,12 +2185,12 @@ class TestFinalizeFold:
         assert not (outdir / "intermediate" / "store_input.jsonl").exists()
 
     def test_fold_archives_store_manifest_and_cleans_root(self, tmp_path):
-        """2026-09-01 实测 bug 钉进测试：fold 只归档并删除了 manifest，store.jsonl
+        """2026-09-01 实测 bug 回归断言：fold 只归档并删除了 manifest，store.jsonl
         既未归档也未删除——交付目录根残留 store.jsonl（用户实测发现）。
         修复口径：store 归档进 intermediate/store_input.jsonl 且原件删除，
         交付目录根只留数据源清单（分析报告.md 由模型收尾时写入）。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
-        self._manifest(run_dir, knowledge=[])  # 空清单空 store：无来源无搜索（本测试只钉归档与清理行为）
+        self._manifest(run_dir, knowledge=[])  # 空清单空 store：无来源无搜索（本测试只断言归档与清理行为）
         store_text = ""
         (run_dir / "store.jsonl").write_text(store_text, encoding="utf-8")
         summary = fold(str(run_dir), out_dir=str(tmp_path / "outputs"),
@@ -2196,7 +2219,7 @@ class TestFinalizeFold:
                                            {"url": "https://k.com/doc", "name": "K1"}])
         summary = fold(str(run_dir), evidence_log=str(evidence),
                        out_dir=str(tmp_path / "outputs"), now=FIXED_NOW,
-                       enforce_quotas=False)  # 单条搜索：本测试钉归档行为，护栏由专门测试覆盖
+                       enforce_quotas=False)  # 单条搜索：本测试断言归档行为，护栏由专门测试覆盖
         outdir = Path(summary["outdir"])
         archived = (outdir / "intermediate" / "store_input.jsonl").read_text(encoding="utf-8")
         assert "source_type_raw" in archived
@@ -2204,8 +2227,8 @@ class TestFinalizeFold:
         source_csv = next(outdir.glob("*数据源清单.csv"))
         assert "source_type_raw" not in source_csv.read_text(encoding="utf-8-sig")
 
-    def test_sentinel_not_triggered_by_verification_only_run(self, tmp_path):
-        """2026-09-01 钉进测试：哨兵只对增量/扩量轮的提取计数——
+    def test_check_not_triggered_by_verification_only_run(self, tmp_path):
+        """2026-09-01 回归断言：校验只对增量/扩量轮的提取计数——
         纯清单验证运行（store 零来源、验证搜索 extracted>0 且清单有验证通过项）
         是合法结果，不得中止。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
@@ -2217,7 +2240,7 @@ class TestFinalizeFold:
         assert summary["kept"] == 1  # 清单项并入
         assert not run_dir.exists()  # 正常重命名收尾
 
-    def test_sentinel_empty_sources_with_extractions_raises(self, tmp_path):
+    def test_check_empty_sources_with_extractions_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         self._manifest(run_dir, knowledge=[])
         self._write_store(run_dir, [self._search_row(extracted=3)])
@@ -2268,12 +2291,12 @@ def write_evidence_map(tmp_path: Path, query_urls: dict[str, list[str]],
     return p
 
 
-# 每节点增量搜索配额（钉桩：与 postprocess.MIN_INCREMENTAL_SEARCHES 对齐，改常量须同步）
+# 每节点增量搜索配额（回归断言：与 postprocess.MIN_INCREMENTAL_SEARCHES 对齐，改常量须同步）
 # 2026-09-10：16 → 20（基底 16 + 扩充固定 4）
 QUOTA_N = 20
 
 
-class _SentinelFoldBase:
+class _FoldCheckBase:
     """三个收尾护栏（2026-09-09）共用夹具：fold 路径（enforce_quotas 缺省开启）。"""
 
     NODES = ["AI训练GPU", "图形渲染GPU"]
@@ -2316,8 +2339,8 @@ class _SentinelFoldBase:
                     out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
 
 
-class TestQuotaSentry(_SentinelFoldBase):
-    """哨兵 1：每节点增量搜索 ≥QUOTA_N（20 = 基底 16 + 扩充固定 4）——配额缩水/谎报过不了收尾。"""
+class TestQuotaCheck(_FoldCheckBase):
+    """校验 1：每节点增量搜索 ≥QUOTA_N（20 = 基底 16 + 扩充固定 4）——配额缩水/谎报过不了收尾。"""
 
     def test_node_shortfall_raises_with_names(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
@@ -2349,7 +2372,7 @@ class TestQuotaSentry(_SentinelFoldBase):
         assert run_dir.exists()
 
     def test_verification_only_run_not_quota_checked(self, tmp_path):
-        """纯清单验证运行（零增量行）：与防截断哨兵豁免口径一致，不拦。"""
+        """纯清单验证运行（零增量行）：与防截断校验豁免口径一致，不拦。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         knowledge = [{"name": "K1", "node": "AI训练GPU", "verified": True,
                       "category_path": "算力服务器-GPU服务器-AI训练GPU",
@@ -2374,7 +2397,7 @@ class TestQuotaSentry(_SentinelFoldBase):
         assert summary["kept"] == 2
 
 
-class TestSingleDocZeroReport(_SentinelFoldBase):
+class TestSingleDocZeroReport(_FoldCheckBase):
     """待复核提示：零提取但结果含单篇详情页——**只进收尾输出、不拦截**（2026-09-14）。
 
     171459 轮实证：9 次专利搜索零提取，结果里 59 条是单篇专利页（Google Patents /
@@ -2419,8 +2442,8 @@ class TestSingleDocZeroReport(_SentinelFoldBase):
         assert summary["zero_audit"]["single_doc_zero"] == []
 
 
-class TestZeroReasonSentry(_SentinelFoldBase):
-    """哨兵 2：增量/扩量零提取必须带 zero_reason（拒收留痕可审计）。"""
+class TestZeroReasonCheck(_FoldCheckBase):
+    """校验 2：增量/扩量零提取必须带 zero_reason（拒收留痕可审计）。"""
 
     def test_zero_extraction_without_reason_raises(self, tmp_path):
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
@@ -2470,8 +2493,8 @@ class TestZeroReasonSentry(_SentinelFoldBase):
         assert q19_rows[0][6] == "无主题边界"  # 末次覆盖后的理由进了 CSV
 
 
-class TestZeroReasonContradiction(_SentinelFoldBase):
-    """哨兵 3：zero_reason 声称垃圾域时域名须确是垃圾域，否则拦截（2026-09-11：分类计数与疑似漏收
+class TestZeroReasonContradiction(_FoldCheckBase):
+    """校验 3：zero_reason 声称垃圾域时域名须确是垃圾域，否则拦截（2026-09-11：分类计数与疑似漏收
     审计清单随之删除——清单是"人工复核"输出，已下线）。"""
 
     def test_reason_claims_collected_but_domains_not_in_list_reported_not_blocked(self, tmp_path):
@@ -2529,7 +2552,7 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
         assert "零提取审计" in summary_text(summary)
 
     def test_zero_reason_contradiction_not_flagged_when_clean(self, tmp_path):
-        """理由与域名证据一致（无矛盾）时 violations 为空——哨兵 2/3 不误报，只报通道也不报。"""
+        """理由与域名证据一致（无矛盾）时 violations 为空——校验 2/3 不误报，只报通道也不报。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
@@ -2541,7 +2564,7 @@ class TestZeroReasonContradiction(_SentinelFoldBase):
         assert summary["zero_audit"]["claimed_collected"] == []
 
 
-class TestGarbageFilter(_SentinelFoldBase):
+class TestGarbageFilter(_FoldCheckBase):
     """2026-09-10 收录政策收紧：收尾过滤垃圾域/低价值聚合平台（与入库即拒双层——
     历史数据与 CLI 路径不经入库闸门，收尾兜底）。"""
 
@@ -2577,7 +2600,7 @@ class TestGarbageFilter(_SentinelFoldBase):
         assert summary["kept"] == 0
         assert summary["garbage_filtered"] == 1
 
-class TestRunAttestation(_SentinelFoldBase):
+class TestRunAttestation(_FoldCheckBase):
     """2026-09-15（docs/06 第 2 期）：收尾在运行目录根写出「{目录名}_运行验收单.json」——
     由脚本从 store 与流水线 summary 直接算出，不经过模型；只记录事实、不做拦截。"""
 
@@ -2608,6 +2631,44 @@ class TestRunAttestation(_SentinelFoldBase):
         assert data["generated_at"]
         assert set(data) == set(RUN_ATTESTATION_KEYS)
 
+    def test_reject_events_aggregated_then_archived(self, tmp_path):
+        """失败事件流（2026-09-23）：聚合进验收单，随后归档进 intermediate/。
+
+        顺序不能反——聚合在 run_pipeline 里（归档之前），反了 summary 与验收单会少一次计数。
+        文件不存在时按零拒收处理（不建空文件）；有事件时交付目录根不留它。
+        """
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        self._manifest(run_dir)
+        self._write_store(run_dir, [self._source_row(), {
+            "type": "knowledge", "ts": "t", "node": "AI训练GPU", "name": "K1",
+            "verified": True,
+            "category_path": "算力服务器-GPU服务器-AI训练GPU",
+            "source_type": "文档", "source_type_raw": "官方文档",
+            "granularity": "合集级", "url": "https://k.com/doc",
+            "description": "kd", "reason": "kr"}])
+        (run_dir / "rejects.jsonl").write_text(
+            json.dumps({"ts": "t1", "code": "GARBAGE_DOMAIN", "actor": "model",
+                        "node": "AI训练GPU", "name": "甲", "url": "https://taobao.com/x"},
+                       ensure_ascii=False) + "\n"
+            + json.dumps({"ts": "t1", "code": "GARBAGE_DOMAIN", "actor": "model",
+                          "node": "", "name": "乙", "url": "https://tmall.com/y"},
+                         ensure_ascii=False) + "\n"
+            + json.dumps({"ts": "t2", "code": "NO_CANDIDATES", "actor": "env",
+                          "detail": {}}, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        evidence = write_evidence(tmp_path, [{"url": "https://k.com/doc", "name": "K1"},
+                                             {"url": "https://a.com/doc", "name": "A"}])
+        summary = fold(str(run_dir), evidence_log=str(evidence),
+                       out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
+        assert summary["reject_events"] == {
+            "total": 3, "by_code": {"GARBAGE_DOMAIN": 2, "NO_CANDIDATES": 1},
+            "by_actor": {"model": 2, "env": 1}}
+        outdir = Path(summary["outdir"])
+        att = json.loads(next(outdir.glob("*_运行验收单.json")).read_text(encoding="utf-8"))
+        assert att["sources"]["reject_events"]["total"] == 3
+        assert not (outdir / "rejects.jsonl").exists()          # 根目录不留过程文件
+        assert (outdir / "intermediate" / "rejects.jsonl").exists()
+
     def test_kept_matches_deliverable_rows(self, tmp_path):
         """验收单上的数字必须与交付物对得上——这是"不用读报告就能判断"的前提。"""
         summary = self._fold_clean(tmp_path)
@@ -2630,11 +2691,11 @@ class TestRunAttestation(_SentinelFoldBase):
         assert list(outdir.glob("*_数据源清单.csv"))
 
 
-class TestReverseGap(_SentinelFoldBase):
+class TestReverseGap(_FoldCheckBase):
     """docs/07 §六：收尾反向差额（留痕 → 日志）——把漏记账的搜索摆上桌。
 
     只报告不拦截：差额里的查询词归属不到节点/阶段，补录无从下手；"有害漏记"
-    （真搜了但日志不足 20 条）已由哨兵 1 拦截。会话级共享留痕按日志切片、
+    （真搜了但日志不足 20 条）已由第一项校验拦截。会话级共享留痕按日志切片、
     切完差额恒为零，须标「不适用」而不是报 0。"""
 
     def _clean_rows(self):
@@ -2693,4 +2754,3 @@ class TestReverseGap(_SentinelFoldBase):
         assert gap["applicable"] is False
         assert gap["unlogged"] is None
         assert gap["evidence_queries"] is None
-{"tool_name": "WebSearch"}

@@ -21,10 +21,11 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "autosource"
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
-from store import record_knowledge, record_sources   # noqa: E402
+from store import BLOCKS, REJECTS, record_knowledge, record_sources   # noqa: E402
 
 REF_DISCIPLINE = (SKILL_DIR / "references" / "通用纪律.md").read_text(encoding="utf-8")
 STORE_SRC = (SKILL_DIR / "scripts" / "store.py").read_text(encoding="utf-8")
+POSTPROCESS_SRC = (SKILL_DIR / "scripts" / "postprocess.py").read_text(encoding="utf-8")
 
 NODES = ["节点甲"]
 DECLARED = "某机构"
@@ -94,11 +95,33 @@ def test_enforced_fields_really_rejected(tmp_path):
 
 
 def test_every_code_reject_reason_is_documented():
-    """store.py 里每条拒绝文案都能在契约表里找到对应——实现加了口子就报错。"""
-    literals = set(re.findall(r'"reason":\s*f?"([^"]+)"', STORE_SRC))
-    assert literals, "未从 store.py 解析出任何拒绝文案，正则或实现结构已变"
+    """REJECTS 表里每条拒绝文案都能在契约表里找到对应——实现加了口子就报错。
+
+    2026-09-23（失败分类表项化）：抽取源从"扫 store.py 源码里的 `"reason": "…"`
+    字面量"改为"读 REJECTS 表"。表项化后源码里不再有那些字面量，原抽取式必然空集。
+    改完这条**比原来更硬**：表的单一事实源属性被钉住，未登记的 code 会在
+    `REJECTS[code]` 处直接 KeyError，不必等测试。
+    """
+    literals = {v[0] for v in REJECTS.values()}
+    assert literals, "REJECTS 表为空"
     section = _contract_section()
     for literal in sorted(literals):
         matched = [doc for code, doc in CODE_REASONS.items() if literal.startswith(code)]
-        assert matched, f"store.py 有未登记进契约表的拒绝文案：{literal!r}"
+        assert matched, f"REJECTS 表里有未登记进契约表的拒绝文案：{literal!r}"
         assert matched[0] in section, f"契约表未描述拒绝理由：{matched[0]}"
+
+
+def test_failure_tables_cover_every_exit():
+    """双向覆盖（2026-09-23）：表里每个 code 至少被一个出口引用；出口引用的 code 都在表里。
+
+    出口只报 code——`_reject("X", …)`（逐条拒收）与 `_blocked(run_dir, "X", …)`
+    （整轮阻断）——文案一律从表里取。所以"实现新增分支、表没跟上"在运行时即
+    KeyError；本用例把同一件事提前到测试期，并反向拦住表里的死条目。
+    """
+    src = STORE_SRC + POSTPROCESS_SRC
+    used = (set(re.findall(r'_reject\(\s*"([A-Z_]+)"', src))
+            | set(re.findall(r'_blocked\([^,]+,\s*"([A-Z_]+)"', src)))
+    declared = set(REJECTS) | set(BLOCKS)
+    assert used == declared, (
+        f"表里有而未用：{sorted(declared - used)}；"
+        f"出口用了但表里没有：{sorted(used - declared)}")

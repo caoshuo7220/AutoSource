@@ -68,7 +68,7 @@ class TestCanonicalizeSourceType:
         assert canonicalize_source_type(once) == once
 
     def test_canonicalize_closed_idempotent_on_known_words(self):
-        """性质钉住：非空输入闭合于 SOURCE_TYPES 且幂等——词表/别名扩展不破坏不变量。"""
+        """性质回归断言：非空输入闭合于 SOURCE_TYPES 且幂等——词表/别名扩展不破坏不变量。"""
         samples = list(SOURCE_TYPES) + list(SOURCE_TYPE_ALIASES)
         for w in samples:
             once = canonicalize_source_type(w)
@@ -208,7 +208,7 @@ class TestRecordKnowledge:
         """2026-09-22 统一为逐字口径：入库校验与收尾对账共用同一名称集合。
 
         此前入库侧对声明集 strip、收尾侧按原文比对——同一差异会"入库放过、
-        收尾判未了结"；统一逐字后差异在入库当场点名（与 URL 逐字校验同纪律）。
+        收尾判未核对"；统一逐字后差异在入库当场点名（与 URL 逐字校验同纪律）。
         """
         store = tmp_path / "store.jsonl"
         (tmp_path / "manifest.json").write_text(json.dumps(
@@ -403,7 +403,7 @@ class TestRecordSearch:
         assert records[0]["query"] == "GPU 排名 数据库"
 
     def test_search_zero_reason_roundtrip(self, tmp_path):
-        """2026-09-09 收尾护栏配套：零提取理由 zero_reason 透传不丢失（哨兵 2/3 数据面）。"""
+        """2026-09-09 收尾护栏配套：零提取理由 zero_reason 透传不丢失（校验 2/3 数据面）。"""
         store = tmp_path / "store.jsonl"
         assert record_search(store, [{"phase": "增量发现", "node": "AI训练GPU",
                                       "query": "q", "results": 10, "extracted": 0,
@@ -412,7 +412,7 @@ class TestRecordSearch:
         assert records[0]["zero_reason"] == "垃圾域"
 
     def test_search_zero_reason_defaults_empty(self, tmp_path):
-        """未填 zero_reason 的旧批次行为不变（空串落库，哨兵在收尾按空值拦截）。"""
+        """未填 zero_reason 的旧批次行为不变（空串落库，校验在收尾按空值拦截）。"""
         store = tmp_path / "store.jsonl"
         assert record_search(store, [{"phase": "增量发现", "node": "AI训练GPU",
                                       "query": "q", "results": 10, "extracted": 0}]) == 1
@@ -467,8 +467,8 @@ class TestCoverage:
     def test_pending_lists_declared_names_without_knowledge_record(self, tmp_path):
         """pending = manifest 声明名 − 已有 knowledge 记录的名（2026-09-21 补）。
 
-        阶段 5/6 要判"两栏清单项全部了结"，此前只能自己去 store.jsonl 里 grep
-        （180104 轮实测 9 次）。verified 真假都算了结——定案后一律落 record_knowledge。
+        阶段 5/6 要判"两栏清单项全部核对完成"，此前只能自己去 store.jsonl 里 grep
+        （180104 轮实测 9 次）。verified 真假都算核对完成——定案后一律落 record_knowledge。
         """
         store = self._seed(tmp_path, [source_entry()], [])
         (tmp_path / "manifest.json").write_text(json.dumps(
@@ -480,7 +480,7 @@ class TestCoverage:
         assert cov["AI训练GPU"]["pending"] == ["厂商甲", "机构乙"]
         assert cov["图形渲染GPU"]["pending"] == ["机构丙"]
 
-        # 定案落库（verified=false 也算了结）——对应项从 pending 消失
+        # 定案落库（verified=false 也算核对完成）——对应项从 pending 消失
         record_knowledge(store, [{"name": "厂商甲", "node": "AI训练GPU",
                                   "verified": False, "note": "未找到官网"}],
                          tmp_path / "no_such_evidence.jsonl")
@@ -574,7 +574,7 @@ class TestGarbageDomainGate:
         assert result["accepted"] == 1
 
     def test_aws_docs_not_matched_by_amazon_entry(self, tmp_path):
-        """钉桩：docs.aws.amazon.com 是合法厂商文档门户，不得被电商词条误伤。
+        """回归断言：docs.aws.amazon.com 是合法厂商文档门户，不得被电商词条误伤。
 
         子串匹配下 "amazon.com" 会命中它（2026-09-10 提交前审查实测：SOM厂商轮
         交付物中即有该域名）——名单词条须为 www.amazon. 形态，只匹配电商主站。
@@ -594,6 +594,56 @@ class TestGarbageDomainGate:
             "name": "K1", "node": "AI训练GPU", "verified": False,
             "note": "未找到官方入口"}], tmp_path / "no-evidence.jsonl")
         assert result["accepted"] == 1
+
+
+class TestFailureEvents:
+    """失败事件流（2026-09-23）：拒收除了返回给模型，还落一行到 run_dir/rejects.jsonl。
+
+    模型可见的返回体保持不变（键集合仍是 index/name/url/reason）；code 与 actor 只进
+    事件流。事件数是**事件数**、不是被拒条目数——同一批重传会重复记录（重复本身是信号）。
+    """
+
+    def test_rejection_writes_event_and_keeps_payload_shape(self, tmp_path):
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://shuma.taobao.com/item/1",
+                                             "https://a.com/doc"])
+        result = record_sources(store, [
+            source_entry(url="https://shuma.taobao.com/item/1", name="G"),
+            source_entry(),
+        ], evidence, NODES)
+        assert result["accepted"] == 1
+        assert set(result["rejected"][0]) == {"index", "name", "url", "reason"}
+        events = [json.loads(line) for line in
+                  (tmp_path / "rejects.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert [e["code"] for e in events] == ["GARBAGE_DOMAIN"]
+        assert events[0]["actor"] == "model"
+        assert events[0]["name"] == "G"
+        assert "taobao" in events[0]["url"]
+
+    def test_knowledge_rejection_event_carries_url(self, tmp_path):
+        """record_knowledge 的拒收事件也要带上 url（2026-09-23 修）。
+
+        缺陷现场：160530 轮的 42 条事件里 19 条 url 为空，其中 18 条恰是最需要看 URL 的
+        `URL_NOT_IN_EVIDENCE`——闭包把 url 写死成空串，看不出是哪个 URL 被拒。
+        """
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://k.com/doc"])
+        result = record_knowledge(store, [
+            {"name": "K1", "node": NODES[0], "verified": True,
+             "url": "https://other.com/x", "note": "n"}], evidence)
+        assert result["accepted"] == 0
+        events = [json.loads(line) for line in
+                  (tmp_path / "rejects.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert events[0]["code"] == "URL_NOT_IN_EVIDENCE"
+        assert events[0]["url"] == "https://other.com/x"
+
+    def test_no_rejection_no_event_file(self, tmp_path):
+        """零拒收不建文件（append_records 空批不建）——免得每个运行目录都多一个空文件。"""
+        store = tmp_path / "store.jsonl"
+        evidence = write_evidence(tmp_path, ["https://a.com/doc"])
+        result = record_sources(store, [source_entry()], evidence, NODES)
+        assert result["accepted"] == 1
+        assert not (tmp_path / "rejects.jsonl").exists()
 
 
 class TestRecordShapeContract:

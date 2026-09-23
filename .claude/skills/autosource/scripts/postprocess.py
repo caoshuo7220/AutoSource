@@ -80,9 +80,10 @@ from lineage import build_lineage, first_query_by_source, write_lineage_csv
 from report import finalize_report
 # 条目粒度契约与节点推导归存储层（store），编排层从这里取——依赖方向单向向下
 # （mcp_server → store/postprocess → evidence/lineage/report，无环）。
-from store import (declared_names_of, domain_of, leaf_node, is_garbage_domain,
-                   load_store, normalize_entry_type, normalize_granularity,
-                   read_manifest)
+from store import (BLOCKS, append_records, declared_names_of, domain_of,
+                   is_garbage_domain, leaf_node, load_store,
+                   normalize_entry_type, normalize_granularity, read_manifest,
+                   render_failure)
 
 # 重导出（test_postprocess 的导入面）：query_in_evidence 本模块未用，仅作兼容出口。
 __all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicate",
@@ -92,7 +93,7 @@ __all__ = ["AutoSourceError", "check_grounded", "check_granularity", "deduplicat
 
 
 class AutoSourceError(ValueError):
-    """业务规则失败（区别于输入损坏的 ValueError）：搜索过却零候选、防截断哨兵等。
+    """业务规则失败（区别于输入损坏的 ValueError）：搜索过却零候选、防截断校验等。
 
     继承 ValueError 保持既有调用方（CLI 捕获、测试断言）兼容；需要区分业务失败
     与输入错误时可按本类型精确捕获。
@@ -102,7 +103,7 @@ SOURCE_CSV_HEADER = ["数据源名称", "分类路径", "数据源类型", "粒�
 STATS_CSV_HEADER = ["分类节点", "候选数", "体裁分布"]
 JOURNAL_CSV_HEADER = ["阶段", "节点", "查询词", "返回链接数", "提取候选数", "证据缺失", "零提取理由"]
 
-# 哨兵 1（2026-09-09 收尾护栏）：每节点增量发现搜索下限——配额缩水/谎报过不了收尾
+# 校验 1（2026-09-09 收尾护栏）：每节点增量发现搜索下限——配额缩水/谎报过不了收尾
 # 2026-09-10：16 → 20（基底 16 + 扩充固定 4）——16 时模型读着校验线把预算定到 16、
 # 扩充批整体跳过（思考块实证），固定 4 次扩充必须有同等强度的校验才落得下去
 MIN_INCREMENTAL_SEARCHES = 20
@@ -300,11 +301,11 @@ def compute_stats(kept: list[dict], nodes: list[str]) -> dict:
 
 
 def _phase_group(phase: str) -> str:
-    """journal phase 归组（前缀容忍）。
+    """journal phase 归类（前缀容忍）。
 
     2026-09-01 实测：phase 是模型自由文本——"验证搜索"曾被缩写为"验证"、
     "增量发现"为"增量"，字面全等匹配导致选题分布 0/0 与 verified 一致性
-    警告误报。按前缀归组为 验证/增量/扩量，无法归组返回空串。
+    警告误报。按前缀归类为 验证/增量/扩量，无法归类返回空串。
     """
     p = str(phase or "")
     for group in ("验证", "增量", "扩量"):
@@ -334,7 +335,7 @@ def classify_query_scope(query: str, domain: str, nodes: list[str]) -> str:
 
 def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list],
                            kept_domains: set[str]) -> dict:
-    """零提取审计（哨兵 2/3 的数据面）：核对留痕理由与结果域名证据。
+    """零提取审计（校验 2/3 的数据面）：核对留痕理由与结果域名证据。
 
     zero_rows = [(phase, node, query, zero_reason), ...]（增量/扩量轮提取为 0 的行）。
     返回 {total, violations, claimed_collected, single_doc_zero}：
@@ -377,11 +378,51 @@ def _zero_extraction_audit(zero_rows: list[tuple], urls_by_query: dict[str, list
             "single_doc_zero": single_doc_zero}
 
 
-def _check_node_quota(journal: list, nodes: list[str]) -> None:
-    """哨兵 1：每节点增量发现搜索 ≥ MIN_INCREMENTAL_SEARCHES。
+def _blocked(run_dir, code: str, **fmt) -> None:
+    """整轮阻断：**先记账再抛**——fold 失败也留得下"这轮被拦几次、哪几类"。
+
+    事件写 run_dir/rejects.jsonl（与逐条拒收同一文件、同一形状；detail 存插值参数）。
+    抛的仍是 AutoSourceError、文案逐字不变——只是多留一条证据。
+    """
+    append_records(Path(run_dir) / "rejects.jsonl",
+                   [{"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                     "code": code, "actor": BLOCKS[code][2], "detail": fmt}])
+    raise AutoSourceError(render_failure(code, fmt))
+
+
+def _read_reject_events(run_dir) -> dict:
+    """读本轮的失败事件流（run_dir/rejects.jsonl，脚本写、模型不读、收尾后归档进 intermediate/）。
+
+    返回 {total, by_code, by_actor}；文件不存在按零拒收处理（不创建空文件）。
+    **total 是事件数、不是被拒条目数**：同一批重传会重复记录，重复本身是信号
+    （同一批被拒 N 次说明该批构造有问题）。
+    """
+    path = Path(run_dir) / "rejects.jsonl"
+    by_code: dict[str, int] = {}
+    by_actor: dict[str, int] = {}
+    total = 0
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            total += 1
+            code = str(row.get("code") or "")
+            by_code[code] = by_code.get(code, 0) + 1
+            actor = str(row.get("actor") or "")
+            by_actor[actor] = by_actor.get(actor, 0) + 1
+    return {"total": total, "by_code": by_code, "by_actor": by_actor}
+
+
+def _check_node_quota(journal: list, nodes: list[str], run_dir) -> None:
+    """校验 1：每节点增量发现搜索 ≥ MIN_INCREMENTAL_SEARCHES。
 
     仅对已启动增量发现的运行校验（存在增量行才检查）——纯清单验证运行
-    （零增量行）与防截断哨兵的豁免口径一致；扩量轮不计入基底配额。
+    （零增量行）与防截断校验的豁免口径一致；扩量轮不计入基底配额。
     """
     counts = {n: 0 for n in nodes}
     for j in journal:
@@ -396,25 +437,19 @@ def _check_node_quota(journal: list, nodes: list[str]) -> None:
         return
     short = [(n, counts[n]) for n in nodes if counts[n] < MIN_INCREMENTAL_SEARCHES]
     if short:
-        raise AutoSourceError(
-            f"节点增量搜索未达标（每节点应 ≥{MIN_INCREMENTAL_SEARCHES} 次）："
-            + "；".join(f"{n} {c} 次（缺 {MIN_INCREMENTAL_SEARCHES - c}）" for n, c in short)
-            + "——补搜并补录 record_search（phase 填「增量发现」）"
-              "后重跑 finalize（运行目录未被重命名）")
+        _blocked(run_dir, "QUOTA_SHORT", n=MIN_INCREMENTAL_SEARCHES,
+                 detail="；".join(f"{n} {c} 次（缺 {MIN_INCREMENTAL_SEARCHES - c}）"
+                                  for n, c in short))
 
 
-def _check_zero_reason_violations(audit: dict) -> None:
-    """哨兵 2/3 拦截：零提取必须留痕（zero_reason）；理由声称垃圾域时域名须确是垃圾域。"""
+def _check_zero_reason_violations(audit: dict, run_dir) -> None:
+    """校验 2/3 拦截：零提取必须留痕（zero_reason）；理由声称垃圾域时域名须确是垃圾域。"""
     violations = audit["violations"]
     if not violations:
         return
-    raise AutoSourceError(
-        f"零提取留痕缺失或与证据矛盾（{len(violations)} 条）：拒收必须逐条说明理由且"
-        "可核对——该收的补 record_sources，确不收的补录 zero_reason（重传同"
-        "phase+node+query 行，末次覆盖）后重跑 finalize。**phase 必须与被拒行逐字"
-        "相同**——换成别的阶段等于新写一条，原件仍在、下次照样被拒：\n"
-        + "\n".join(f"  - [{node}] {query}（{problem}）｜重传用 phase={phase!r}"
-                    for phase, node, query, _reason, problem in violations))
+    _blocked(run_dir, "ZERO_REASON_MISSING", n=len(violations),
+             detail="\n".join(f"  - [{node}] {query}（{problem}）｜重传用 phase={phase!r}"
+                              for phase, node, query, _reason, problem in violations))
 
 
 def _reverse_gap(evidence: str, journal_queries: set) -> dict:
@@ -425,7 +460,7 @@ def _reverse_gap(evidence: str, journal_queries: set) -> dict:
     子代理后日志由执行搜索的代理写，这一边更需要摆上桌。
 
     只报告不拦截：差额里的查询词归属不到节点/阶段，主流程补录无从下手；而
-    "有害漏记"（真搜了但日志不足 20 条）已由哨兵 1 拦截。样例截前 10 个。
+    "有害漏记"（真搜了但日志不足 20 条）已由第一项校验拦截。样例截前 10 个。
     """
     evidence_queries = set()
     for line in evidence.splitlines():
@@ -450,7 +485,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
                  enforce_quotas: bool = False) -> dict:
     """执行完整后处理流水线，返回汇总统计（供 stdout 展示与 stats CSV）。
 
-    enforce_quotas（2026-09-09 收尾护栏）：fold/finalize 路径开启三哨兵——
+    enforce_quotas（2026-09-09 收尾护栏）：fold/finalize 路径开启三项校验——
     ① 每节点增量搜索 ≥20；② 增量/扩量零提取必须带 zero_reason（拒收留痕）；
     ③ 理由与结果域名证据一致（声称已收须域名在清单、声称垃圾域须命中黑名单）。
     旧 CLI 兼容路径（历史轮次复盘重跑）缺省关闭，不拦。
@@ -542,7 +577,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     journal_skipped = 0
     journal_queries: set[str] = set()
     journal_map: dict[str, tuple] = {}
-    zero_search_rows: list[tuple] = []  # 增量/扩量轮提取为 0 的行（零提取审计/哨兵 2/3）
+    zero_search_rows: list[tuple] = []  # 增量/扩量轮提取为 0 的行（零提取审计/校验 2/3）
     # 选题分类统计（2026-09-01 实体选题放开后的验证度量）：只统计增量发现/扩量轮行，
     # 验证搜索行按定义就是实体查询、不参与分类
     in_framework = {"count": 0, "extracted": 0}
@@ -600,7 +635,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
 
     # 零提取审计与收尾护栏（2026-09-09）：按查询词从留痕取结果 URL 域名，
     # 与最终清单/垃圾域黑名单交叉分类；enforce_quotas 时拦截客观矛盾
-    # （哨兵 1 配额、哨兵 2 拒收留痕、哨兵 3 理由与域名证据一致）
+    # （校验 1 配额、校验 2 拒收留痕、校验 3 理由与域名证据一致）
     urls_by_query: dict[str, list] = {}
     for line in sliced.splitlines():
         try:
@@ -613,8 +648,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     kept_domains = {domain_of(str(s.get("url") or "")) for s in kept}
     zero_audit = _zero_extraction_audit(zero_search_rows, urls_by_query, kept_domains)
     if enforce_quotas:
-        _check_node_quota(journal, nodes)
-        _check_zero_reason_violations(zero_audit)
+        _check_node_quota(journal, nodes, Path(raw_path).parent)
+        _check_zero_reason_violations(zero_audit, Path(raw_path).parent)
 
     unverified = [
         (str(item.get("name") or "未命名"), str(item.get("note") or "未说明"))
@@ -626,9 +661,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     # 中止并保留 raw.json 供人工检查（两路方案失败路径，见 docs/02 附录决策集）。
     # 按过滤前计数判断——全部候选被政策过滤是合法结果，不得误报工具异常。
     if candidates_pre_filter == 0 and journal_rows:
-        raise AutoSourceError(
-            "搜索过（journal 非空）但候选为 0——疑似搜索工具异常，"
-            "按方案中止处理；raw.json 已保留供人工检查")
+        _blocked(Path(raw_path).parent, "NO_CANDIDATES")
 
     now = now or datetime.now()
     # prepare 预留的运行目录：复用 run_ 名内的时间戳（= 运行开始时刻），
@@ -658,6 +691,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "incomplete": incomplete,
         "unverified": unverified,
         "rejected": [(str(s.get("name") or "未命名"), str(s.get("url") or "")) for s in rejected],
+        # 失败事件流（含逐条拒收与整轮阻断）：total 是事件数、不是被拒条目数——同一批重传会重复记录
+        "reject_events": _read_reject_events(Path(raw_path).parent),
         "granularity_missing": granularity_missing,
         "unmapped_types": unmapped_types,
         "journal_count": len(journal_rows),
@@ -780,6 +815,10 @@ def _build_run_attestation(summary: dict, journal: list, records: list, nodes: l
             "ungrounded_urls": _count(summary.get("ungrounded")),
             "garbage_filtered": _count(summary.get("garbage_filtered")),
             "rejected": summary.get("rejected", []),
+            # 失败事件计数（机器可读，供跨轮聚合）。与上面 rejected 不是一回事：
+            # 那是"最终被拒条目"的二元组列表，这是"失败事件"的计数（含重传）
+            "reject_events": summary.get("reject_events") or {"total": 0, "by_code": {},
+                                                              "by_actor": {}},
         },
         "knowledge": {
             "declared": len(declared_names),
@@ -794,7 +833,7 @@ def _build_run_attestation(summary: dict, journal: list, records: list, nodes: l
         "journal": {"rows": _count(summary.get("journal_count")),
                     "skipped": _count(summary.get("journal_skipped"))},
         # 反向差额（docs/07 §六）：只报告不拦截——差额归属不到节点/阶段，
-        # 补录无从下手；"有害漏记"已由配额哨兵拦截。
+        # 补录无从下手；"有害漏记"已由配额校验拦截。
         "reverse_gap": summary.get("reverse_gap", {}),
     }
 
@@ -810,11 +849,11 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
 
     搜索日志按（phase, node, query）末次胜出组装（2026-09-09 收尾护栏配套）——
     补录 zero_reason 时重传同键行即覆盖，append-only 语义不变。
-    防截断哨兵：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
+    防截断校验：store 来源为 0 且搜索提取合计 > 0 → 拒绝折叠、显式报错（模型
     违约未调用 record_sources 时显式报错，不再静默丢数据）。
-    清单了结哨兵：声明清单项在 store 中无核对记录 → 拒绝折叠并点名（漏调
+    清单核对校验：声明清单项在 store 中无核对记录 → 拒绝折叠并点名（漏调
     record_knowledge 同样报错；2026-09-08 前归档的 manifest 最终核对态走旧路径兜底）。
-    收尾护栏三哨兵（enforce_quotas，2026-09-09）：配额（每节点增量搜索 ≥20）、
+    收尾护栏三项校验（enforce_quotas，2026-09-09）：配额（每节点增量搜索 ≥20）、
     拒收留痕（零提取必须带 zero_reason）、理由与域名证据一致——在 run_pipeline
     内、目录重命名前拦截。
     失败发生在目录重命名之前——运行目录保持 run_ 原名，修正后可安全重跑（幂等）。
@@ -851,7 +890,7 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     journal = list(journal_latest.values())
     extracted_total = 0
     for j in journal:
-        # 防截断哨兵只对增量/扩量轮计数（2026-09-02 收窄触发域）：
+        # 防截断校验只对增量/扩量轮计数（2026-09-02 收窄触发域）：
         # 验证搜索的提取走 manifest 不进 store.sources，纯清单零增量是合法运行
         if _phase_group(str(j.get("phase") or "")) not in ("增量", "扩量"):
             continue
@@ -882,10 +921,10 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
         isinstance(k, dict) and ("verified" in k or k.get("url")) for k in declared)
     if knowledge_records:
         if unrecorded:
-            raise AutoSourceError(
-                f"清单项未了结：{len(unrecorded)} 项在 store 中无核对记录"
-                f"（漏调 record_knowledge）——补录后重跑 finalize："
-                + "、".join(unrecorded))
+            _blocked(run_dir_path, "CHECKLIST_UNRECORDED",
+                     detail=f"{len(unrecorded)} 项在 store 中无核对记录"
+                            f"（漏调 record_knowledge）——补录后重跑 finalize："
+                            + "、".join(unrecorded))
         # source_type 回填原始词（入库时已归一）——收尾统一归一处在 run_pipeline，
         # 表外词审计按原始词计数（与 record_sources 的入库反馈口径互补）
         knowledge_list = [
@@ -896,17 +935,15 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     elif manifest_carries_state:
         knowledge_list = declared
     elif declared_names:
-        raise AutoSourceError(
-            f"清单项未了结：清单 {len(declared_names)} 项均无核对记录"
-            f"（漏调 record_knowledge）——补录后重跑 finalize："
-            + "、".join(sorted(declared_names)))
+        _blocked(run_dir_path, "CHECKLIST_UNRECORDED",
+                 detail=f"清单 {len(declared_names)} 项均无核对记录"
+                        f"（漏调 record_knowledge）——补录后重跑 finalize："
+                        + "、".join(sorted(declared_names)))
     knowledge_any_verified = any(
         isinstance(k, dict) and k.get("verified") and k.get("name") and k.get("url")
         for k in knowledge_list)
     if not sources and extracted_total > 0 and not knowledge_any_verified:
-        raise AutoSourceError(
-            f"来源未入库：增量/扩量搜索提取合计 {extracted_total} 条，但 store 中来源为 0——"
-            "疑似未调用 record_sources；修正后重跑 finalize（运行目录未被重命名）")
+        _blocked(run_dir_path, "SOURCES_EMPTY", n=extracted_total)
 
     data = {
         "domain": manifest.get("domain", ""),
@@ -931,6 +968,11 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     if store_path.exists():  # 旧路径兜底分支本就没有 store.jsonl，无物可归档
         shutil.move(str(store_path), intermediate / "store_input.jsonl")
     shutil.move(str(manifest_path), intermediate / "manifest_input.json")
+    # 失败事件流随排障材料归档（聚合已在 run_pipeline 里做完——顺序不能反）；
+    # 零拒收的运行没有这个文件（append_records 空批不建文件）
+    rejects_path = outdir / "rejects.jsonl"
+    if rejects_path.exists():
+        shutil.move(str(rejects_path), intermediate / "rejects.jsonl")
     try:
         _write_run_attestation(outdir, _build_run_attestation(
             summary, journal, records, [str(n) for n in manifest["nodes"]],
@@ -1005,6 +1047,12 @@ def summary_text(summary: dict) -> str:
         lines.append(f"待复核: {len(cc)} 行零提取理由含「已收/重复」但结果域名不在清单"
                      "——脚本按域名粗查、区分不了指代与断言，只报不拦；核对理由说的是"
                      "这批结果本身，还是在指代别处已收录的条目")
+    ev = summary.get("reject_events") or {}
+    if ev.get("total"):
+        top = "、".join(f"{c} {n} 次" for c, n in
+                       sorted(ev["by_code"].items(), key=lambda x: -x[1]))
+        lines.append(f"失败事件: {ev['total']} 次（环境类 {ev['by_actor'].get('env', 0)} 次）"
+                     f"——{top}（明细见 intermediate/rejects.jsonl）")
     if summary["outdir"]:
         if summary.get("lineage_rows"):
             lines.append(f"数据血缘: 溯源.csv（{summary['lineage_rows']} 行，见 intermediate/）")

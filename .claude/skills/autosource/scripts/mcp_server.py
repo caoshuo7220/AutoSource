@@ -26,7 +26,7 @@ mcp = FastMCP("autosource-store")
 
 # scripts 目录在 .claude/skills/autosource/scripts 下，项目根 = 上溯 4 级
 # （parents[3] 是 .claude——2026-08-31 首轮实测 off-by-one：相对路径解析到
-# .claude/outputs/ 下导致 store 与证据留痕全找不到，钉进测试）
+# .claude/outputs/ 下导致 store 与证据留痕全找不到，已补回归断言）
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 _self_check_problems: list | None = None
@@ -162,7 +162,7 @@ def record_knowledge(run_dir: str, entries: list) -> str:
     - verified=true：带 category_path/source_type/granularity/url/description/
       reason，URL 逐字照抄搜索结果（入库即验证据链，不在则当场拒绝）
     - verified=false：带 note（"疑似无效机构"/"未找到官方入口"/"未找到官网"/"仅找到单篇载体"），不带 URL
-    同名重录 = 状态更新（收尾折叠取末次）。清单项全部了结是阶段 5 的终止条件——
+    同名重录 = 状态更新（收尾折叠取末次）。清单项全部核对完成是阶段 5 的终止条件——
     收尾时声明清单中无核对记录的项会拒绝折叠并点名。
 
     返回 JSON：{"accepted": 入库数, "rejected": [{index, name, reason}],
@@ -185,7 +185,7 @@ def coverage(run_dir: str) -> str:
     返回 [{node, recorded, extracted, missing, types, pending}]（missing = max(0, 提取-已收)；
     types 为该节点体裁分布，由脚本从 store 算——"体裁/来源维度单一"按它判定，
     已收数为 0 的节点给空分布；**pending 为该节点尚无任何核对记录的声明清单项名**，
-    "两栏清单项全部了结"按它判——不必自己去读 store.jsonl。
+    "两栏清单项全部核对完成"按它判——不必自己去读 store.jsonl。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)
@@ -201,10 +201,10 @@ def finalize(run_dir: str) -> str:
     何时调用：阶段 7 收尾、全部搜索与记录完成后调用一次。之后写分析报告并
     运行 --rename-report（报告流程不变）。
 
-    防截断哨兵：store 来源为 0 且搜索提取合计 > 0 时拒绝折叠并报错（模型漏调
-    record_sources 时显式报错，不会静默产出空清单）；清单了结哨兵：声明清单中
+    防截断校验：store 来源为 0 且搜索提取合计 > 0 时拒绝折叠并报错（模型漏调
+    record_sources 时显式报错，不会静默产出空清单）；清单核对校验：声明清单中
     无核对记录的项拒绝折叠并点名（漏调 record_knowledge 时同样报错）。
-    收尾护栏三哨兵（2026-09-09）：① 配额——每节点增量搜索 ≥20 次，不足拒绝
+    收尾护栏三项校验（2026-09-09）：① 配额——每节点增量搜索 ≥20 次，不足拒绝
     并点名；② 拒收留痕——增量/扩量零提取搜索必须带 zero_reason 理由；
     ③ 理由与证据一致——声称已收须域名在清单、声称垃圾域须命中垃圾域黑名单。
     失败发生在目录重命名前，修正后可安全重跑。成功时 store/manifest 归档进 intermediate/。

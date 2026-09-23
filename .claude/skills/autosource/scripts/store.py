@@ -12,7 +12,7 @@ store 承载三类记录：增量发现条目（type=source）、搜索日志（
   含 # 豁免与 ? 严格）；裸 URL 精确相等才幂等跳过并计数（不归一化——见
   docs/04 裁决 8.1）；单条被拒不阻断批次，其余照常入库
 - record_search：搜索日志批量追加（查询词的证据比对在收尾折叠时做，现状机制）；
-  zero_reason 可选——增量/扩量零提取的拒收理由（收尾护栏哨兵 2/3 校验）
+  zero_reason 可选——增量/扩量零提取的拒收理由（收尾护栏校验 2/3 校验）
 - record_knowledge：清单核对结果批量入库（verified=true 必带 url 且过证据链；
   verified=false 带 note 不查证据；同名重录 = 状态更新，折叠取末次）
 - coverage：每节点"已收 vs 提取"只读计数 + 每节点体裁分布（types）——脚本只供数据，薄弱判定仍由模型做
@@ -26,6 +26,7 @@ store.jsonl 由脚本持有，模型不可见；每行一条（脚本盖 ts，�
 """
 import difflib
 import json
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -315,7 +316,7 @@ def declared_names_of(manifest: dict) -> set[str]:
     """声明名称集合：逐字口径（name 必须逐字照抄 manifest，与 URL 逐字校验同一纪律）。
 
     入库校验与收尾对账共用——此前两处各自 strip/不 strip，同一名称差异会
-    "入库放过、收尾才判未了结"（2026-09-22 统一为逐字）。
+    "入库放过、收尾才判未核对"（2026-09-22 统一为逐字）。
     """
     return {str(x.get("name")) for x in declared_items(manifest) if x.get("name")}
 
@@ -332,6 +333,71 @@ STORE_FIELDS = {
                   "source_type", "source_type_raw", "granularity", "url",
                   "description", "reason", "note", "ts"),
 }
+
+
+# 失败分类表（2026-09-23）：拒收/阻断文案的单一事实源——文案模板一处定义，
+# 出口只报 code（未登记即 KeyError）。**文案与既有散文逐字一致，模型可见面零变化**：
+# code 与 actor 只进 run_dir/rejects.jsonl，不进工具返回值。
+#   三元组 = (文案模板, 处置动作, 受话人)；受话人 model = 模型可自救，env = 环境异常。
+# 两张表按可见性分：REJECTS 是 record_* 的逐条拒收（模型可见，通用纪律「工具契约」段覆盖）；
+# BLOCKS 是 fold 的整轮阻断（异常文案，不属工具契约）。
+REJECTS = {
+    "MISSING_FIELD": ("缺 name/url", "补字段后重传", "model"),
+    "GARBAGE_DOMAIN": ("垃圾域/低价值聚合平台，不收", "改换来源，勿重试同一域名", "model"),
+    "NODE_NOT_DECLARED": ("category_path 未匹配任何声明节点——应填**节点名本身**"
+                          "（如「工业以太网交换机」），不带条目名、不用 / 分隔"
+                          "（172015 轮实测：填成「节点/条目名」致 108 条全部归不到节点）",
+                          "改用 manifest 里的节点名重传", "model"),
+    "EVIDENCE_LOG_MISSING": ("证据留痕不存在: {path}（PostToolUse hook 未生效？）",
+                             "检查留痕是否被删；不可自行重建", "model"),
+    "URL_NOT_IN_EVIDENCE": ("URL 不在证据留痕中{hint}",
+                            "逐字照抄搜索结果原文重传", "model"),
+    "MISSING_NAME_NODE": ("缺 name/node", "补字段后重传", "model"),
+    "NAME_NOT_DECLARED": ("名称不在 manifest 声明清单中{near}"
+                          "——name 必须逐字照抄 manifest",
+                          "核对清单项名称后重传", "model"),
+    "VERIFIED_WITHOUT_URL": ("verified=true 缺 url", "补 URL 或改 verified=false", "model"),
+}
+
+BLOCKS = {
+    "QUOTA_SHORT": ("节点增量搜索未达标（每节点应 ≥{n} 次）：{detail}"
+                    "——补搜并补录 record_search（phase 填「增量发现」）"
+                    "后重跑 finalize（运行目录未被重命名）",
+                    "补搜并补录 record_search 后重跑 finalize", "model"),
+    "ZERO_REASON_MISSING": ("零提取留痕缺失或与证据矛盾（{n} 条）：拒收必须逐条说明理由且"
+                            "可核对——该收的补 record_sources，确不收的补录 zero_reason（重传同"
+                            "phase+node+query 行，末次覆盖）后重跑 finalize。**phase 必须与被拒行逐字"
+                            "相同**——换成别的阶段等于新写一条，原件仍在、下次照样被拒：\n{detail}",
+                            "补录 zero_reason 后重跑 finalize", "model"),
+    "NO_CANDIDATES": ("搜索过（journal 非空）但候选为 0——疑似搜索工具异常，"
+                      "按方案中止处理；raw.json 已保留供人工检查",
+                      "中止并人工检查", "env"),
+    "CHECKLIST_UNRECORDED": ("清单项未核对：{detail}",
+                             "补 record_knowledge 后重跑 finalize", "model"),
+    "SOURCES_EMPTY": ("来源未入库：增量/扩量搜索提取合计 {n} 条，但 store 中来源为 0——"
+                      "疑似未调用 record_sources；修正后重跑 finalize（运行目录未被重命名）",
+                      "先 record_sources 再重跑 finalize", "model"),
+}
+
+_FAILURES = {**REJECTS, **BLOCKS}   # 并集：渲染与查 actor 用
+
+
+def render_failure(code: str, fmt: dict) -> str:
+    """按表渲染失败文案（拒收与阻断共用）。缺参渲染成空串而**不抛**（失败路径的
+    职责是不阻断）；未知 code 抛 KeyError——那是编程错误，当场暴露。"""
+    return _FAILURES[code][0].format_map(defaultdict(str, fmt))
+
+
+def reject_entry(code: str, *, index: int, name: str, url: Optional[str] = None,
+                 **fmt) -> dict:
+    """逐条拒收的返回体（模型可见）。键集合与文案与 2026-09-23 前逐字一致：
+    record_sources 带 url 键、record_knowledge 不带（url=None 即不含该键）。
+    code 与插值参数一律不进返回值。"""
+    entry: dict = {"index": index, "name": name}
+    if url is not None:
+        entry["url"] = url
+    entry["reason"] = render_failure(code, fmt)
+    return entry
 
 
 def append_records(store_path: Path, records: list[dict]) -> int:
@@ -403,37 +469,38 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
     accepted: list[dict] = []
     skipped = 0
     rejected: list[dict] = []
+    reject_events: list[dict] = []
     unmapped: set[str] = set()
     evidence_ok = evidence_path.exists()
     evidence = evidence_path.read_text(encoding="utf-8", errors="replace") if evidence_ok else ""
     existing_urls = _existing_urls(store_path)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # 每批一个时间戳（脚本盖，模型无时钟）
 
+    def _reject(code, i, e, name, url, **fmt):      # 拒收一处出口：返回值 + 失败事件
+        node = leaf_node(str(e.get("category_path") or ""), nodes) if isinstance(e, dict) else ""
+        rejected.append(reject_entry(code, index=i, name=name, url=url, **fmt))
+        reject_events.append({"ts": ts, "code": code, "actor": _FAILURES[code][2],
+                              "node": node or "", "name": name, "url": url})
+
     for i, e in enumerate(entries):
         name = str(e.get("name") or "") if isinstance(e, dict) else ""
         url = str(e.get("url") or "") if isinstance(e, dict) else ""
         if not isinstance(e, dict) or not name or not url:
-            rejected.append({"index": i, "name": name, "url": url, "reason": "缺 name/url"})
+            _reject("MISSING_FIELD", i, e, name, url)
             continue
         if is_garbage_domain(domain_of(url)):
-            rejected.append({"index": i, "name": name, "url": url,
-                             "reason": "垃圾域/低价值聚合平台，不收"})
+            _reject("GARBAGE_DOMAIN", i, e, name, url)
             continue
         if nodes and leaf_node(str(e.get("category_path") or ""), nodes) is None:
-            rejected.append({"index": i, "name": name, "url": url,
-                             "reason": "category_path 未匹配任何声明节点——应填**节点名本身**"
-                                       "（如「工业以太网交换机」），不带条目名、不用 / 分隔"
-                                       "（172015 轮实测：填成「节点/条目名」致 108 条全部归不到节点）"})
+            _reject("NODE_NOT_DECLARED", i, e, name, url)
             continue
         if not evidence_ok:
-            rejected.append({"index": i, "name": name, "url": url,
-                             "reason": f"证据留痕不存在: {evidence_path}"
-                                       "（PostToolUse hook 未生效？）"})
+            _reject("EVIDENCE_LOG_MISSING", i, e, name, url, path=evidence_path)
             continue
         kept, rej = check_grounded([e], evidence)
         if rej:
-            rejected.append({"index": i, "name": name, "url": url,
-                             "reason": "URL 不在证据留痕中" + _grounded_hint(url, evidence)})
+            _reject("URL_NOT_IN_EVIDENCE", i, e, name, url,
+                 hint=_grounded_hint(url, evidence))
             continue
         if url in existing_urls:
             skipped += 1
@@ -456,6 +523,8 @@ def record_sources(store_path: Path, entries: list, evidence_path: Path,
         })
         existing_urls.add(url)
     append_records(store_path, accepted)
+    if reject_events:
+        append_records(store_path.parent / "rejects.jsonl", reject_events)
     if accepted:
         # 追加改变了文件 mtime——用新 mtime 更新缓存，保持幂等集合与磁盘一致
         _url_cache[str(store_path)] = (store_path.stat().st_mtime_ns, existing_urls)
@@ -467,7 +536,7 @@ def record_search(store_path: Path, entries: list) -> int:
     """搜索日志批量追加；非 dict 条目跳过。返回追加数。
 
     zero_reason 可选（2026-09-09 收尾护栏配套）：增量/扩量搜索提取为 0 时的
-    拒收理由（已收/垃圾域/无主题边界等）——收尾折叠时哨兵校验存在性与域名
+    拒收理由（已收/垃圾域/无主题边界等）——收尾折叠时校验存在性与域名
     证据一致性，缺失/矛盾拒绝收尾；补录 = 重传同 phase+node+query 行（末次覆盖）。
     """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -505,6 +574,7 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
     """
     accepted: list[dict] = []
     rejected: list[dict] = []
+    reject_events: list[dict] = []
     unmapped: set[str] = set()
     evidence_ok = evidence_path.exists()
     evidence = evidence_path.read_text(encoding="utf-8", errors="replace") if evidence_ok else ""
@@ -515,42 +585,42 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
     _m = read_manifest(store_path.parent)
     declared: Optional[set] = declared_names_of(_m) if _m is not None else None
 
+    def _reject(code, i, name, node="", url="", **fmt):   # 拒收一处出口：返回值 + 失败事件
+        rejected.append(reject_entry(code, index=i, name=name, **fmt))
+        reject_events.append({"ts": ts, "code": code, "actor": _FAILURES[code][2],
+                              "node": node, "name": name, "url": url})
+
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
-            rejected.append({"index": i, "name": "", "reason": "缺 name/node"})
+            _reject("MISSING_NAME_NODE", i, "")
             continue
         name = str(e.get("name") or "")
         node = str(e.get("node") or "")
+        url_seen = str(e.get("url") or "")   # 事件用：条目自带的 url（verified 与否都可能带）
         if not name or not node:
-            rejected.append({"index": i, "name": name, "reason": "缺 name/node"})
+            _reject("MISSING_NAME_NODE", i, name, node, url_seen)
             continue
         if declared is not None and name not in declared:
             near = difflib.get_close_matches(name, declared, n=1)
-            rejected.append({
-                "index": i, "name": name,
-                "reason": "名称不在 manifest 声明清单中"
-                          + (f"，最相近的是「{near[0]}」" if near else "")
-                          + "——name 必须逐字照抄 manifest"})
+            _reject("NAME_NOT_DECLARED", i, name, node, url_seen,
+                 near=f"，最相近的是「{near[0]}」" if near else "")
             continue
         verified = bool(e.get("verified"))
         url = str(e.get("url") or "") if verified else ""
         if verified and not url:
-            rejected.append({"index": i, "name": name, "reason": "verified=true 缺 url"})
+            _reject("VERIFIED_WITHOUT_URL", i, name, node)
             continue
         if verified and is_garbage_domain(domain_of(url)):
-            rejected.append({"index": i, "name": name,
-                             "reason": "垃圾域/低价值聚合平台，不收"})
+            _reject("GARBAGE_DOMAIN", i, name, node, url)
             continue
         if verified and not evidence_ok:
-            rejected.append({"index": i, "name": name,
-                             "reason": f"证据留痕不存在: {evidence_path}"
-                                       "（PostToolUse hook 未生效？）"})
+            _reject("EVIDENCE_LOG_MISSING", i, name, node, url, path=evidence_path)
             continue
         if verified:
             kept, rej = check_grounded([e], evidence)
             if rej:
-                rejected.append({"index": i, "name": name,
-                                 "reason": "URL 不在证据留痕中" + _grounded_hint(url, evidence)})
+                _reject("URL_NOT_IN_EVIDENCE", i, name, node, url,
+                     hint=_grounded_hint(url, evidence))
                 continue
         source_type, raw_type, unmapped_word = normalize_entry_type(e.get("source_type"))
         if unmapped_word:
@@ -571,6 +641,8 @@ def record_knowledge(store_path: Path, entries: list, evidence_path: Path) -> di
             "ts": ts,
         })
     append_records(store_path, accepted)
+    if reject_events:
+        append_records(store_path.parent / "rejects.jsonl", reject_events)
     return {"accepted": len(accepted), "rejected": rejected,
             "unmapped": sorted(unmapped)}
 
@@ -588,10 +660,10 @@ def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
     分布——"没有"与"单一"要能分开。角度级状态不可恢复（角度多样性脚本校验
     2026-08-31 裁决不做，该缺口以散文层治理维持，见 docs/02 讨论日志）。
 
-    pending 为未了结的声明清单项名（2026-09-21 补）：阶段 5 与阶段 6 要判"两栏
-    清单项全部了结"，此前只能自己去 store.jsonl 里 grep（180104 轮实测 9 次）。
+    pending 为未核对的声明清单项名（2026-09-21 补）：阶段 5 与阶段 6 要判"两栏
+    清单项全部核对完成"，此前只能自己去 store.jsonl 里 grep（180104 轮实测 9 次）。
     判定 = manifest 声明的名字 − store 里已有 knowledge 记录的名字——verified
-    真假都算了结（定案后一律落 record_knowledge）。manifest 不存在时给空表。
+    真假都算核对完成（定案后一律落 record_knowledge）。manifest 不存在时给空表。
     """
     records, _ = load_store(store_path) if store_path.exists() else ([], 0)
     declared: dict[str, list[str]] = {}

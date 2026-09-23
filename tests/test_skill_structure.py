@@ -1,4 +1,4 @@
-"""skill 结构约定的契约钉进测试：单 skill 合并、脚本归位 scripts/、路径引用一致。"""
+"""skill 结构约定的契约回归断言：单 skill 合并、脚本归位 scripts/、路径引用一致。"""
 import json
 import re
 from pathlib import Path
@@ -80,7 +80,7 @@ def test_skill_has_no_phantom_c_parameter():
 def test_skill_frontmatter_tools_declare_agent():
     """frontmatter allowed-tools 声明流程实际使用的工具（docs/07 §七）。
     阶段 1/3/4/5 的搜索、提取、落库下放子代理后 Agent 成为强依赖，一并声明
-    （2026-09-18；此前"不含未被流程使用的 Agent"的钉桩随下放改造作废）。
+    （2026-09-18；此前"不含未被流程使用的 Agent"的回归断言随下放改造作废）。
     五个 MCP 工具（.mcp.json 注册的 autosource-store）与正文强依赖对齐。"""
     frontmatter = DOC.split("---")[1]
     assert "allowed-tools" in frontmatter
@@ -136,7 +136,7 @@ def test_prepare_run_dir_contract():
     预留步骤命名"初始化"（2026-08-25 起）——旧名"阶段 0 前"易误读为阶段序列的一部分。
     raw.json 契约已取消（docs/04 存储改造：sources/journal 走 store，元数据走 manifest）。
     2026-09-08 架构修订：manifest 只写一次（阶段 0-2 声明版），阶段 6 不再重写——
-    清单核对结果随验证过程走 record_knowledge（钉桩断言语义同步，防阶段 6 重写回潮）。"""
+    清单核对结果随验证过程走 record_knowledge（回归断言语义同步，防阶段 6 重写回潮）。"""
     assert "postprocess.py --prepare" in REF_0_2
     assert "Write **manifest.json**（阶段 0-2 声明版）到初始化" in REF_0_2
     assert "整轮只写这一次" in REF_0_2
@@ -147,36 +147,36 @@ def test_prepare_run_dir_contract():
 
 
 def test_storage_contract_mcp_tools():
-    """存储架构契约（docs/04 定案）：五工具 + manifest 单次 Write + 禁 Edit + 记录时机 + 哨兵。
+    """存储架构契约（docs/04 定案）：五工具 + manifest 单次 Write + 禁 Edit + 记录时机 + 校验。
     数据落盘只走 MCP 工具——模型不 Write 数据文件、不自创脚本组装。
     2026-09-08 架构修订：清单核对结果走 record_knowledge 分批落库（废除阶段 6
-    一次性转写 manifest），清单了结哨兵与防截断哨兵并列。"""
+    一次性转写 manifest），清单核对校验与防截断校验并列。"""
     for tool in ["record_sources", "record_search", "record_knowledge",
                  "coverage", "finalize"]:
         assert tool in DOC
     assert "manifest.json" in DOC
     assert "**必须整体 Write，禁止 Edit**" in REF_0_2
     assert "基底 16 次搜索完成后" in REF_4
-    assert "**防截断哨兵**" in REF_6_7
+    assert "**防截断校验**" in REF_6_7
     assert "数据落盘只走 MCP 工具" in REF_DISCIPLINE
     assert "存储机制自检" in SKILL_ROUTER  # 装配层故障时五工具显式报错的行为说明（mcp_server.self_check）
     assert "model = " not in DOC  # 防误用：禁止模型用 Write 写数据文件组装
 
 
 def test_finalize_guards_quota_zero_reason_and_evidence():
-    """2026-09-09 收尾护栏三哨兵钉桩（155658 轮复盘落地）：① 每节点增量搜索
+    """2026-09-09 收尾护栏三项校验的回归断言（155658 轮复盘落地）：① 每节点增量搜索
     ≥16（配额谎报过不了收尾）；② 增量/扩量零提取必填 zero_reason（拒收留痕）；
     ③ 理由与结果域名证据一致。以及配套的两处纪律：符合判据一律收录
     （打掉"怕清单变杂"的自创拒收借口）、上下文不停靠（打掉停靠与缩水借口）。
-    防回潮：这些文本是脚本哨兵的 SKILL 侧契约（postprocess.run_pipeline
+    防回潮：这些文本是脚本校验的 SKILL 侧契约（postprocess.run_pipeline
     enforce_quotas），删文案会重新打开模型谎报/静默拒收的缺口。
 
     2026-09-16（docs/06 第 5 期文本收口）：两条断言随文案改写——
-    ① "增量搜索不足 20 次拒绝并点名"：哨兵的触发条件细节与恢复指令已由
-       postprocess 报错文案承担（逐条核过五条哨兵的报错，均带节点点名与恢复
-       步骤），SKILL 侧改钉"不合规的收尾会被拒绝并点名"这一后果声明；
-    ② "声称已收但域名不在清单"：哨兵 3 的具体判据同理由报错承担，SKILL 侧
-       改钉哨兵名"理由与结果域名证据"。
+    ① "增量搜索不足 20 次拒绝并点名"：校验的触发条件细节与恢复指令已由
+       postprocess 报错文案承担（逐条核过五条校验的报错，均带节点点名与恢复
+       步骤），SKILL 侧改为断言"不合规的收尾会被拒绝并点名"这一后果声明；
+    ② "声称已收但域名不在清单"：第三项校验的具体判据同理由报错承担，SKILL 侧
+       改为断言校验项名"理由与结果域名证据"。
     两处的义务本句未删：配额在"固定 20 次"（rules.json 锚点 node-search-quota），
     zero_reason 在阶段 4 记录时机与本节。"""
     assert "**收尾护栏**" in REF_6_7
@@ -216,7 +216,7 @@ def test_single_carrier_not_auto_passed():
 def test_unverified_note_values_on_the_spot():
     """2026-09-10 文本矛盾修复④：阶段 3 未通过项的 note 没有合法取值（两个定案
     值在阶段 5 才出现）——模型据此决定"不落库、攒到定案再记"，触顶后 16 项全丢
-    （收尾被清单了结哨兵拦下，靠人工补录救回）。定案：三个取值当场落库，禁止攒。"""
+    （收尾被清单核对校验拦下，靠人工补录救回）。定案：三个取值当场落库，禁止攒。"""
     assert "note 按当次搜索结果如实取一个" in REF_3
     assert "不得攒到定案时再记" in REF_3
     for value in ["未找到官方入口", "仅找到单篇载体", "疑似无效机构"]:
@@ -268,7 +268,7 @@ def test_vendor_official_site_mandatory_and_entry_form():
 def test_cross_reference_names_unified():
     """2026-09-10 引用漂移治理：同一段落三种引法（"平台准入" / 通用纪律"提取规则"的
     平台准入段），与文件既有惯例（直接引加粗段落名）不一致；改标题时无人会同步这些
-    散文引用。统一为 通用纪律"<段落名>"，钉桩防再漂移。
+    散文引用。统一为 通用纪律"<段落名>"，回归断言防再漂移。
     （2026-09-11 搜索词构造下沉后，"搜索词构造"/"易失效词形"两节已不在通用纪律下，
     交叉引用只剩"平台准入"与"收录判据"两处。）"""
     assert DOC.count('通用纪律"平台准入"') >= 3
@@ -277,7 +277,7 @@ def test_cross_reference_names_unified():
 
 
 def test_criterion_institution_carrier_and_exclusions():
-    """2026-09-10 收录政策收紧钉桩（2110 条清单复盘落地）：判据① = 只收"机构发布
+    """2026-09-10 收录政策收紧回归断言（2110 条清单复盘落地）：判据① = 只收"机构发布
     的信息载体"两条规则——新闻/资讯/媒体文章/个人内容/导购/百科词条一律不收，
     垃圾域与低价值聚合平台由脚本名单入库即拒；提取率标尺按实况重校准（2-4 条/10）。
     防回潮：2110 条里 794 条媒体+530 条噪声的成因就是旧判据（"有主题边界就收"），
@@ -289,7 +289,7 @@ def test_criterion_institution_carrier_and_exclusions():
     assert "GARBAGE_DOMAINS" in REF_DISCIPLINE
     assert "机构信息载体通常占 2-4 条" in REF_DISCIPLINE
     assert "行业媒体文章、技术新闻" not in DOC  # 旧目标句的新闻类收录对象，不得回潮
-    assert "收录数量不是质量指标" not in DOC  # 旧"宁多勿缺"口径（无限全收），已按机构载体限定
+    assert "收录数量不是质量指标" not in DOC  # 旧"数量优先"口径（无限全收），已按机构载体限定
     assert "博客 / 资讯平台" not in DOC  # 角度池的新闻/博客角度已移除（其产出全不收录）
 
 
@@ -301,16 +301,16 @@ def test_scripts_include_store_and_mcp_server():
 
 
 def test_knowledge_recorded_via_record_knowledge_not_manifest():
-    """2026-09-08 架构修订钉桩（214051 事故根治）：清单核对结果随验证过程经
+    """2026-09-08 架构修订回归断言（214051 事故根治）：清单核对结果随验证过程经
     record_knowledge 分批落库，废除"会话暂存 + 阶段 6 一次性转写 manifest"——
     手工转写 65 条 JSON 曾漏写 60 个 verified 字段（finalize 如实报 0/65 后
-    模型违规手动收尾）。断言：manifest 只写一次、阶段 6 为了结自检、
-    暂存会话表述不残留、清单了结哨兵在场（防回潮到转写方案）。"""
-    assert "## 阶段 6 · 清单了结自检" in REF_6_7
+    模型违规手动收尾）。断言：manifest 只写一次、阶段 6 清单核对自检、
+    暂存会话表述不残留、清单核对校验在场（防回潮到转写方案）。"""
+    assert "## 阶段 6 · 清单核对自检" in REF_6_7
     assert "record_knowledge" in DOC
     assert "清单核对结果**不进 manifest 转写**" in SKILL_ROUTER
     assert "整轮只写这一次" in REF_0_2
-    assert "**清单了结哨兵**" in REF_6_7
+    assert "**清单核对校验**" in REF_6_7
     assert "暂存会话" not in DOC  # 转写方案的标志词，不得回潮
     assert "阶段 6 随 manifest 重写落盘" not in DOC
     assert "**阶段 6 · 重写 manifest" not in DOC
@@ -320,7 +320,7 @@ def test_knowledge_entry_name_copied_verbatim_from_manifest():
     """清单核对落库的 name 必须逐字来自 manifest（181607 轮实测）。
 
     该轮 35 项按自拟措辞落库（manifest「Arista EOS 文档中心」→ 落库「Arista EOS
-    产品文档门户」），了结哨兵按名精确对账判为漏录、首次 finalize 被拒；按原名
+    产品文档门户」），核对校验按名精确对账判为漏录、首次 finalize 被拒；按原名
     补录后重跑通过。文档里只有"同名重录 = 状态更新"，从未说明 name 的来源。
     """
     assert "`name` 逐字照抄 manifest 里的名称" in REF_DISCIPLINE
@@ -345,7 +345,7 @@ def test_termination_condition_aligned_with_finalization():
     仍薄弱节点继续、非薄弱节点停止，连续一轮无新增即收敛。
     总条件为"非薄弱或已收敛"——收敛是正规退出路径，避免体裁单一等客观上仍薄弱的节点
     使"所有节点非薄弱"字面条件永不满足（与 08-25"全部验证通过"同类病）。"""
-    assert "两栏清单项（vendors + knowledge）全部了结（验证通过或已定案）" in REF_5
+    assert "两栏清单项（vendors + knowledge）全部核对完成（验证通过或已定案）" in REF_5
     assert "非薄弱或已收敛" in REF_5
     assert "扩量轮按节点独立判断，不再全局共享轮数" in REF_5
     assert "某节点在一轮扩量中无任何新增有效来源时，该节点视为收敛并停止" in REF_5
@@ -420,7 +420,7 @@ def test_search_response_two_parts_both_valid_evidence():
     自己摸索：120118 轮只从结构化结果取 → 官网入口占比 4%；162501 轮摸到摘要 →
     81%（官网类 45% 的入口只存在于摘要中）。2026-09-14 补"两部分都要过目 /
     摘要里的 URL 一样要提取"——101223 轮厂商阶段 43 家里 37 家的记录 URL 只出现在
-    链接列表、0 家只出现在摘要，摘要里写明的根域名一条未被取用。钉桩防回退。"""
+    链接列表、0 家只出现在摘要，摘要里写明的根域名一条未被取用。回归断言防回退。"""
     assert "每次搜索返回**两部分**" in REF_DISCIPLINE
     assert "**两部分都是搜索返回的结果，同样重要，都要过目**" in REF_DISCIPLINE
     assert "摘要正文里的 URL 与链接列表里的一样要提取" in REF_DISCIPLINE
@@ -468,7 +468,7 @@ def test_extraction_yield_benchmark_and_self_check():
 
 
 def test_node_search_profile():
-    """节点搜索画像（2026-08-26 起）：基础契约钉进测试——不改 nodes 契约、禁编造机构、
+    """节点搜索画像（2026-08-26 起）：基础契约回归断言——不改 nodes 契约、禁编造机构、
     核心搜索词含行业术语与细分场景词（2026-08-27 补：薄弱节点维度窄的治理）。"""
     assert "### 节点搜索画像" in REF_0_2
     assert "不改变 `nodes` 字段契约" in REF_0_2
@@ -496,7 +496,7 @@ def test_entity_query_second_type_contract():
 
 
 def test_coverage_missing_rough_signal_contract():
-    """2026-09-01 评审修复钉桩：coverage 的 missing 是粗略缺口信号（提取含去重前/
+    """2026-09-01 评审修复回归断言：coverage 的 missing 是粗略缺口信号（提取含去重前/
     跨节点顺路发现，与幂等后已收数口径不同）——小额不触发补搜，只有接近一整批
     提取量才怀疑漏调 record_sources。"""
     assert "missing 是粗略缺口信号" in REF_5
@@ -514,7 +514,7 @@ def test_self_check_searches_before_calling_coverage():
 
 
 def test_journal_phase_vocabulary_pinned():
-    """2026-09-01 实测 bug 钉桩：phase 是模型自由文本，曾被缩写为"增量/验证"
+    """2026-09-01 实测 bug 回归断言：phase 是模型自由文本，曾被缩写为"增量/验证"
     导致选题分布 0/0 与 verified 警告误报。2026-09-18 起字面量单一来源收敛到
     通用纪律「子代理派工」的分组表（阶段 1 搜索入账，取值增至四个）。"""
     assert "按上表写死" in REF_DISCIPLINE
@@ -522,7 +522,7 @@ def test_journal_phase_vocabulary_pinned():
 
 
 def test_manifest_example_is_valid_json():
-    """2026-09-01 钉进测试：manifest 示例必须可解析——曾用全角引号（非法 JSON），
+    """2026-09-01 回归断言：manifest 示例必须可解析——曾用全角引号（非法 JSON），
     模型照抄会写出不可解析的 manifest，finalize 报"manifest.json 损坏"。"""
     import json as jsonlib
     import re as re_mod
@@ -550,9 +550,9 @@ def test_settings_raises_web_search_session_budget():
 
 
 def test_settings_deny_outputs_read():
-    """防历史自锚定：deny Read(outputs/**) + Glob(outputs*)（转录实证的两条通道）。
-    2026-09-08 用户决策移除：开发/复盘会话需读 outputs（运行防自锚定暂由 SKILL
-    提示词承担；动态 hook 拦截方案挂账，见 docs/02 09-08 日志）。钉桩断言现状并留痕。"""
+    """防历史产物基线偏移：deny Read(outputs/**) + Glob(outputs*)（转录实证的两条通道）。
+    2026-09-08 用户决策移除：开发/复盘会话需读 outputs（运行防基线偏移暂由 SKILL
+    提示词承担；动态 hook 拦截方案挂账，见 docs/02 09-08 日志）。回归断言现状并留痕。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     deny = settings["permissions"].get("deny", [])
     assert "Read(outputs/**)" not in deny
@@ -669,9 +669,9 @@ def test_finish_writes_domain_analysis_report():
 
 
 def test_contradiction_and_wording_cleanup():
-    """2026-08-25 全局审查修订钉进测试：矛盾表述对齐（Bash 范围/定案时机/剔除语义），
+    """2026-08-25 全局审查修订回归断言：矛盾表述对齐（Bash 范围/定案时机/剔除语义），
     非正式措辞移除（乱搜/掺长尾垃圾/不死循环/纪律保留/不花一次搜索），
-    重复规则改指针（数据集主导只留总纲、通用平台指向总则），裸禁令补理由（自锚定）。"""
+    重复规则改指针（数据集主导只留总纲、通用平台指向总则），裸禁令补理由（基线偏移）。"""
     assert "初始化 `--prepare` 与阶段 7 报告命名 `--rename-report`" in SKILL_ROUTER
     assert "（阶段 7 收尾执行）" not in DOC
     assert "留待扩量轮换角度重试后按阶段 5 定案" in REF_3
@@ -699,10 +699,10 @@ def test_contradiction_and_wording_cleanup():
 
 
 def test_conciseness_review_cleanup():
-    """2026-09-01 规范符合性审查钉桩：① 分工原则截断句砍论证尾——"离截断边界约 10 倍"
+    """2026-09-01 规范符合性审查回归断言：① 分工原则截断句砍论证尾——"离截断边界约 10 倍"
     是设计算术、非执行指令，机制结论（写入截断在机制上不可能发生）原保留（防回到写大文件
     老路，与阶段 4 可执行批量规则分工）——2026-09-08 用户删除该结论句（判断冗余：
-    数据落盘只走 MCP 工具等强约束已足够），钉桩断言同步改为不在；② 弹窗机制解释单一归属——
+    数据落盘只走 MCP 工具等强约束已足够），回归断言同步改为不在；② 弹窗机制解释单一归属——
     55 行落盘规则保留细节版（含 build_xxx.py 实例），57 行证据核对只留"这是脚本的职责"；
     ③ 2026-09-16 用户删除该细节版括注（现 49 行），与 09-16 删除的 98 行"读取被权限拦截"
     从句同一口径——见 docs/06 第 1 期"靠询问的拦截不算机制"：白名单对越界命令的效果是
@@ -720,7 +720,7 @@ def test_conciseness_review_cleanup():
 def test_skill_no_multilang_audit_promise():
     """2026-09-01 多语言审计下线（两轮实测全假阳性、修不如删）后，SKILL 语言版本偏好节
     仍残留"脚本会对最终清单做确定性审计（同域名剥语言码路径段…）"的悬空承诺——脚本已无
-    此实现，模型会期待一个永不出现的 stdout 提示（2026-09-02 审查发现）。钉死承诺句不再出现。"""
+    此实现，模型会期待一个永不出现的 stdout 提示（2026-09-02 审查发现）。承诺句不再出现已成回归断言。"""
     assert "同域名剥语言码路径段后相同的组计数" not in DOC
 
 
@@ -779,7 +779,7 @@ def test_settings_reference_existing_scripts():
 
 
 def test_script_dependency_direction():
-    """2026-09-02 依赖方向修正钉桩：存储层不反向依赖编排层（store 曾 from postprocess
+    """2026-09-02 依赖方向修正回归断言：存储层不反向依赖编排层（store 曾 from postprocess
     import GRANULARITY_LEVELS/check_grounded/leaf_node——import store 会把整个流水线拖进来，
     且 postprocess 内曾以延迟导入 store 绕循环）。契约归属：GRANULARITY_LEVELS（条目粒度）
     与 leaf_node（路径→节点推导）是存储层契约；依赖单向向下：mcp_server→store/postprocess
@@ -825,7 +825,7 @@ def test_stage_reference_files_exist_and_linked():
         ("阶段3-验证搜索.md", "## 阶段 3 · 验证搜索"),
         ("阶段4-增量发现.md", "## 阶段 4 · 增量发现"),
         ("阶段5-覆盖评估与扩量.md", "## 阶段 5 · 覆盖评估与扩量"),
-        ("阶段6-7-自检与收尾.md", "## 阶段 6 · 清单了结自检"),
+        ("阶段6-7-自检与收尾.md", "## 阶段 6 · 清单核对自检"),
     ]
     for fname, heading in refs:
         assert (REF_DIR / fname).is_file(), f"缺阶段文件 {fname}"

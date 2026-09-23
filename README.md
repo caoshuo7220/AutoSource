@@ -37,10 +37,11 @@ AutoSource 的思路是**把这两条路的优点拼起来**：让 LLM 只做它
 
 - [Claude Code](https://claude.com/claude-code)（本项目以 Skill 形式运行）
 - Python 3.10+
+- 实测通过：Python 3.12.10 + mcp 1.29.0（3.10+ 是 `mcp` 包要求的下限，未逐一实测）
 - Python 包：[`mcp`](https://pypi.org/project/mcp/)（MCP Python SDK）
 
 ```bash
-pip install mcp
+pip install -r requirements.txt
 ```
 
 ---
@@ -52,7 +53,7 @@ AutoSource 以项目内 Skill 的方式分发，把仓库放到你的工作目�
 ```bash
 git clone https://github.com/caoshuo7220/AutoSource.git
 cd AutoSource
-pip install mcp
+pip install -r requirements.txt
 ```
 
 然后在 Claude Code 中打开该目录。**首次使用需要信任本项目**——确认一次 `.claude/settings.json` 的权限配置与 hook 分发（见下方"权限与 hook"）。
@@ -93,7 +94,7 @@ outputs/交换机_2026-09-10-200054/
   → 2 验证搜索      逐个验证清单项，找到官方入口即通过，找不到当场记"未验证"
   → 3 增量发现      每节点固定 20 次搜索（固定 4 + 自由 8 + 实体 4 + 扩充 4）
   → 4 覆盖评估与扩量 按来源维度判薄弱节点，对薄弱节点定向补搜，未验证项在此定案
-  → 5 清单了结自检   对账"清单声明 N 项"与"实际核对 N 项"
+  → 5 清单核对自检   对账"清单声明 N 项"与"实际核对 N 项"
   → 6 收尾          折叠为交付物，写分析报告
 ```
 
@@ -168,7 +169,7 @@ tests/                       单元测试
 ## 测试
 
 ```bash
-python -m pytest tests/ -q   # 249 个测试，预期全过
+python -m pytest tests/ -q   # 预期全过
 ```
 
 ---
