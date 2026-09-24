@@ -114,6 +114,9 @@ def record_sources(run_dir: str, entries: list) -> str:
     条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
+    source_type 从这 13 个标准词里选一个（不填机构名/领域名/网址）：
+    文档/官网/标准/报告/文献/专利/数据集/数据库/代码仓库/知识库/社区/媒体/其他
+    ——规格书→文档、技术文档→文档、标准规范→标准、技术报告→报告。
     垃圾域/低价值聚合平台（store.GARBAGE_DOMAINS 平台级名单）入库即拒——新闻门户、
     电商、内容平台、报告倒卖站等大平台不收，命中返回"垃圾域/低价值聚合平台，不收"。
 

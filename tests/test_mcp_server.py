@@ -56,6 +56,21 @@ def test_project_root_and_relative_resolution():
         == ms.PROJECT_ROOT / "outputs" / "run_abs"
 
 
+def test_source_type_vocabulary_in_tool_description_matches_store():
+    """record_sources 的工具描述必须逐字列出 store.SOURCE_TYPES（2026-09-24）。
+
+    这是修正「模型自造体裁词」起作用的**唯一位置**：描述在子代理加载工具时即读到、
+    早于它第一次写库（事前告知）。实测 2026-09-24 16:20 轮：表外词 167 → 0、
+    「其他」率 24.3% → 0.9%，同期提取率 3.89/搜（历史区间内，未出现保守提取）。
+
+    描述里那份是**静态字面**（会与真源漂开），故用本断言钉住——加第 14 类词时
+    漏改描述即红。放在 record_* 返回体里的事后告知（type_options）同日已撤：
+    它的作用半径在第一批之后，补不到洞（见 docs/02 当日条目）。
+    """
+    import store
+    assert "/".join(store.SOURCE_TYPES) in ms.record_sources.__doc__
+
+
 class TestSelfCheck:
     """启动自检：装配层故障提前到首次工具调用（2026-08-31 权限设计讨论结论）。
     证据按运行级归属（run_*/evidence.jsonl）随 run_dir 检查。"""

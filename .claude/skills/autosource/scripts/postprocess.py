@@ -819,6 +819,9 @@ def _build_run_attestation(summary: dict, journal: list, records: list, nodes: l
             # 那是"最终被拒条目"的二元组列表，这是"失败事件"的计数（含重传）
             "reject_events": summary.get("reject_events") or {"total": 0, "by_code": {},
                                                               "by_actor": {}},
+            # 表外体裁词计数（2026-09-24，键=原始词、值=条数）：此前只经 summary_text
+            # 打印一行、跑完即丢；落盘供跨轮聚合与词表治理的效果验收
+            "unmapped_types": summary.get("unmapped_types") or {},
         },
         "knowledge": {
             "declared": len(declared_names),
@@ -872,8 +875,12 @@ def fold(run_dir: str, *, out_dir: str = "outputs", evidence_log: Optional[str] 
     records, bad_lines = load_store(store_path) if store_path.exists() else ([], 0)
 
     # store 行含内部字段（type/node/ts/source_type_raw）——组装等价 raw 时剥离；
-    # store 原件（含 source_type_raw 审计留痕）由 intermediate/store_input.jsonl 保留
+    # source_type_raw 不剥离而是**回填成 source_type**（2026-09-24，与下方 knowledge
+    # 路径同构）：入库时已归一，表外词审计按原始词计数——不回填则 store 路径的
+    # source 表外词在收尾处不可见（CLI 路径 raw.json 带的就是模型原词，两入口口径
+    # 须一致）。store 原件（含 source_type_raw 审计留痕）由 intermediate/store_input.jsonl 保留
     sources = [{k: v for k, v in r.items() if k not in ("type", "node", "ts", "source_type_raw")}
+               | {"source_type": r.get("source_type_raw") or r.get("source_type", "")}
                for r in records if r.get("type") == "source"]
     searches = [r for r in records if r.get("type") == "search"]
     # 搜索日志按（phase, node, query）末次胜出组装（2026-09-09 收尾护栏配套）：

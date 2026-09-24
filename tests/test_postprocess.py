@@ -2629,7 +2629,26 @@ class TestRunAttestation(_FoldCheckBase):
         assert data["knowledge"]["missing"] == []
         assert len(data["script_fingerprint"]) == 12
         assert data["generated_at"]
+        assert data["sources"]["unmapped_types"] == {}   # 无表外词也给键（2026-09-24）
         assert set(data) == set(RUN_ATTESTATION_KEYS)
+
+    def test_unmapped_types_persisted(self, tmp_path):
+        """表外体裁词计数落盘（2026-09-24）：此前只经 summary_text 打印一行、跑完即丢，
+        不落盘就无法验收词表治理的效果。口径与 summary 同源（键=原始词、值=条数）。
+        """
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row() | {"source_type": "其他", "source_type_raw": "某新词"}] + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
+        query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
+        query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
+        summary = self._fold(tmp_path, run_dir, rows, query_urls,
+                             evidence_sources=rows[:1])
+        assert summary["unmapped_types"] == {"某新词": 1}
+        outdir = Path(summary["outdir"])
+        data = json.loads((outdir / f"{outdir.name}_运行验收单.json")
+                          .read_text(encoding="utf-8"))
+        assert data["sources"]["unmapped_types"] == summary["unmapped_types"]
 
     def test_reject_events_aggregated_then_archived(self, tmp_path):
         """失败事件流（2026-09-23）：聚合进验收单，随后归档进 intermediate/。
