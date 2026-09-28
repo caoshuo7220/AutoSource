@@ -93,7 +93,7 @@ def finalize_report(outdir: str) -> str:
         raise FileNotFoundError(f"未找到 分析报告.md: {report}（报告需先由模型写入该文件）")
     block = _report_stats_block(d)
     if block is None:
-        print("注意: 未找到 stats.csv 或表头列名不符，已往报告数据总览写入占位提示（统计未注入）")
+        print("注意: 未找到 stats.csv 或表头列名不符，已向报告「数据总览」段写入占位提示（统计未注入）")
         # 占位块与正常块同形状（自带 `## 数据总览` 标题）：_insert_stats_section 的
         # 替换分支按"整块含标题"设计，占位块缺标题会把报告原有标题一并替换掉
         # （2026-09-21 修）。

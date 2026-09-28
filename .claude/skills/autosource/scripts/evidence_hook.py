@@ -30,7 +30,7 @@ from evidence import default_evidence_log, project_root  # 留痕路径与项目
 def run_scoped_log_path() -> Path | None:
     """按会话标记定位本会话运行目录内的留痕：outputs/run_*/.session_id == 会话 ID。
 
-    多个匹配时取最新目录（同会话多轮的边角，取最近一次 --prepare）；
+    多个匹配时取最新目录（同会话多轮的少见情形，取最近一次 --prepare）；
     无匹配返回 None（调用方回退 default_evidence_log）。**路径锚定项目根、
     不相对 cwd**（2026-09-18 实证：cwd 漂移会让留痕写到漂移目录下）。
     """

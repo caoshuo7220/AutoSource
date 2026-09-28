@@ -167,7 +167,7 @@ def test_finalize_guards_quota_zero_reason_and_evidence():
     """2026-09-09 收尾护栏三项校验的回归断言（155658 轮复盘落地）：① 每节点增量搜索
     ≥16（配额谎报过不了收尾）；② 增量/扩量零提取必填 zero_reason（拒收留痕）；
     ③ 理由与结果域名证据一致。以及配套的两处纪律：符合判据一律收录
-    （打掉"怕清单变杂"的自创拒收借口）、上下文不停靠（打掉停靠与缩水借口）。
+    （消除"怕清单变杂"的自创拒收借口）、上下文不停靠（消除停靠与缩水借口）。
     防回潮：这些文本是脚本校验的 SKILL 侧契约（postprocess.run_pipeline
     enforce_quotas），删文案会重新打开模型谎报/静默拒收的缺口。
 
@@ -202,8 +202,8 @@ def test_manifest_knowledge_no_granularity_field():
 def test_single_carrier_not_auto_passed():
     """2026-09-10 文本矛盾修复②③：合集级项只搜到单篇载体时——旧文"以该单篇
     验证通过"使其不再进扩量轮（扩量轮范围只含未验证项），却又要求"扩量轮换
-    角度专找入口"（范围条款自禁）；且激励倒挂（搜到单篇的不再找入口、什么都
-    没搜到的反被追着换角度找两次）。定案：不算通过 → 按未通过落库 → 扩量轮
+    角度专找入口"（范围条款自禁）；且激励倒挂（搜到单篇的不再找入口、未搜到
+    任何结果的项反而被要求换角度再搜两次）。定案：不算通过 → 按未通过落库 → 扩量轮
     找入口 → 定案时才以单篇通过。"""
     assert "**不算通过**" in REF_3
     assert 'note="仅找到单篇载体"' in DOC
@@ -216,7 +216,7 @@ def test_single_carrier_not_auto_passed():
 def test_unverified_note_values_on_the_spot():
     """2026-09-10 文本矛盾修复④：阶段 3 未通过项的 note 没有合法取值（两个定案
     值在阶段 5 才出现）——模型据此决定"不落库、攒到定案再记"，触顶后 16 项全丢
-    （收尾被清单核对校验拦下，靠人工补录救回）。定案：三个取值当场落库，禁止攒。"""
+    （收尾被清单核对校验拦下，靠人工补录恢复）。定案：三个取值当场落库，禁止攒。"""
     assert "note 按当次搜索结果如实取一个" in REF_3
     assert "不得攒到定案时再记" in REF_3
     for value in ["未找到官方入口", "仅找到单篇载体", "疑似无效机构"]:
@@ -340,11 +340,23 @@ def test_skill_genre_free_label_no_taxonomy_leak():
     assert "词表" not in DOC
 
 
+def test_run_time_wording_discipline():
+    """运行期用词条款（2026-09-28）：收尾汇报只用流程内的规范词。
+
+    实证：收尾汇总里出现「兜底心跳」（宿主定时任务，项目内从无此名）与复盘脚本的
+    表名（「漏斗指标 / 零提取构成 / 交付物成色」——出自 CLAUDE.md 与
+    tools/analyze_run.py，属开发侧术语）。措辞漂移无法靠事后复查兜住，写进模型
+    每轮必读的纪律并钉住。
+    """
+    assert "### 用词" in REF_DISCIPLINE
+    assert "不得引用开发侧工具的内部名称" in REF_DISCIPLINE
+
+
 def test_termination_condition_aligned_with_finalization():
     """终止条件与定案机制对齐（2026-08-27 修订）：扩量轮从"全局 2 轮"改为"按节点独立判断"，
     仍薄弱节点继续、非薄弱节点停止，连续一轮无新增即收敛。
     总条件为"非薄弱或已收敛"——收敛是正规退出路径，避免体裁单一等客观上仍薄弱的节点
-    使"所有节点非薄弱"字面条件永不满足（与 08-25"全部验证通过"同类病）。"""
+    使"所有节点非薄弱"字面条件永不满足（与 08-25"全部验证通过"属同一类缺陷）。"""
     assert "两栏清单项（vendors + knowledge）全部核对完成（验证通过或已定案）" in REF_5
     assert "非薄弱或已收敛" in REF_5
     assert "扩量轮按节点独立判断，不再全局共享轮数" in REF_5
@@ -367,7 +379,7 @@ def test_vendor_phase_own_query_form_no_side_extraction():
     120118 轮实测：180 条"官网"条目里只有 2-3 条指向厂商根域名，173 条是子页面——
     知识清单把厂商列成"某某文档体系"，模型据此搜出文档深链、再标成"官网"；
     「厂商官网项固定搜 {厂商名} 官网」那条规则因清单里本就没有官网项而从未触发。
-    定案：厂商单独成阶段、查询词收窄为唯一形态、只服务官网一个目的（不做顺路提取）。
+    定案：厂商单独成阶段、查询词收窄为唯一形态、只服务官网一个目的（不做附带提取）。
     防回潮：删这组文案会退回"官网标签被文档深链占据"。"""
     assert "## 阶段 1 · 厂商清单与官网搜索" in REF_0_2
     assert DOC.rindex("## 阶段 1 ·") < DOC.rindex("## 阶段 2 · 知识清单")
@@ -455,7 +467,7 @@ def test_extraction_yield_benchmark_and_self_check():
     URL 有证据链、查询词有留痕比对、搜索数有配额，唯独"收几条"纯靠模型自觉：
     同版同模型三轮 172/274/813（08-27 SKILL）、pro 基底 ~1.1/搜 vs 08-28 全收
     6.39/搜 实证提取默认值漂移是产量主变量。"全量提取"义务型文本约束不住执行，
-    改补量化标尺 + group commit 前提取率自查；同时写死两条防线：词题例外（整批
+    改补量化标尺 + group commit 前提取率自查；同时写死两条防线：查询词不匹配例外（整批
     书商/元器件站/SEO 页如实 0，不得为提高数量收录）、重审不重新搜索（防复核
     变成加搜拖长运行）。2026-09-09 重构：改名"提取率自查（非准入条件）"并降格
     ——只触发复核、不覆盖收录判据、低相关结果集不适用。"""
@@ -480,7 +492,7 @@ def test_journal_verified_field_contract():
     """2026-09-01：验证搜索日志拆分 verified/extracted 两字段（一个字段装一个事实，
     治理两轮记账口径不一致——交换机轮曾把验证通过计入 extracted）。"""
     assert "verified" in DOC
-    assert "extracted 只记顺路新源数" in REF_3
+    assert "extracted 只记该次搜索附带发现的新源数" in REF_3
 
 
 def test_entity_query_second_type_contract():
@@ -497,7 +509,7 @@ def test_entity_query_second_type_contract():
 
 def test_coverage_missing_rough_signal_contract():
     """2026-09-01 评审修复回归断言：coverage 的 missing 是粗略缺口信号（提取含去重前/
-    跨节点顺路发现，与幂等后已收数口径不同）——小额不触发补搜，只有接近一整批
+    跨节点附带发现，与幂等后已收数口径不同）——小额不触发补搜，只有接近一整批
     提取量才怀疑漏调 record_sources。"""
     assert "missing 是粗略缺口信号" in REF_5
     assert "missing > 0（提取过但落库不足）时只补该节点" not in DOC
@@ -536,7 +548,7 @@ def test_manifest_example_is_valid_json():
 
 
 def test_no_cost_driven_trimming():
-    """防模型自砍搜索次数：无"代价"成本措辞，两处决策点写明不以搜索成本缩减/合并。"""
+    """防止模型主动缩减搜索次数：无"代价"成本措辞，两处决策点写明不以搜索成本缩减/合并。"""
     assert "列多列杂的代价" not in DOC
     assert "无需以搜索成本为由缩减清单" in REF_0_2
     assert "不以搜索次数或运行时长为由合并节点" in REF_0_2
@@ -544,7 +556,7 @@ def test_no_cost_driven_trimming():
 
 def test_settings_raises_web_search_session_budget():
     """项目级 settings.json 调高每会话 WebSearch 配额——Claude Code 默认 200 次/会话，
-    2026-08-25 两轮运行撞线实证（扩量轮被配额砍掉）。项目级分发：所有使用者受益。"""
+    2026-08-25 两轮运行触及配额上限实证（扩量轮因配额中止）。项目级分发：所有使用者受益。"""
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert settings.get("env", {}).get("CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION") == "1000"
 
@@ -627,8 +639,7 @@ def test_settings_allow_delegation_tools():
 
     default 模式下 13 分钟内弹窗 60 次：主会话 11 次派工、子代理 22 次工具加载。
     `Agent` 此前只在 SKILL frontmatter 声明里，而那是回合级预放行——docs/02
-    09-01 记着「回合级放行在用户中途插话即失效」，而确认弹窗本身就是插话：
-    弹窗把自己锁死。同 test_settings_allow_mcp_store_tools 的理由，运行期零弹窗
+    09-01 记着「回合级放行在用户中途插话即失效」，而确认弹窗本身就是插话，该次放行随之失效。同 test_settings_allow_mcp_store_tools 的理由，运行期零弹窗
     需会话级兜底。
 
     Grep / Glob / WebFetch 刻意不入白名单：它们不是流程所需，留着弹窗即越界信号
@@ -699,7 +710,7 @@ def test_contradiction_and_wording_cleanup():
 
 
 def test_conciseness_review_cleanup():
-    """2026-09-01 规范符合性审查回归断言：① 分工原则截断句砍论证尾——"离截断边界约 10 倍"
+    """2026-09-01 规范符合性审查回归断言：① 分工原则删去该句的论证性尾句——"离截断边界约 10 倍"
     是设计算术、非执行指令，机制结论（写入截断在机制上不可能发生）原保留（防回到写大文件
     老路，与阶段 4 可执行批量规则分工）——2026-09-08 用户删除该结论句（判断冗余：
     数据落盘只走 MCP 工具等强约束已足够），回归断言同步改为不在；② 弹窗机制解释单一归属——
@@ -718,7 +729,7 @@ def test_conciseness_review_cleanup():
 
 
 def test_skill_no_multilang_audit_promise():
-    """2026-09-01 多语言审计下线（两轮实测全假阳性、修不如删）后，SKILL 语言版本偏好节
+    """2026-09-01 多语言审计下线（两轮实测全为假阳性，删除优于修复）后，SKILL 语言版本偏好节
     仍残留"脚本会对最终清单做确定性审计（同域名剥语言码路径段…）"的悬空承诺——脚本已无
     此实现，模型会期待一个永不出现的 stdout 提示（2026-09-02 审查发现）。承诺句不再出现已成回归断言。"""
     assert "同域名剥语言码路径段后相同的组计数" not in DOC

@@ -362,7 +362,7 @@ REJECTS = {
 BLOCKS = {
     "QUOTA_SHORT": ("节点**有留痕的**增量搜索未达标（每节点应 ≥{n} 次）：{detail}"
                     "——无留痕的日志行 {unevidenced} 条不计入，补录日志无效："
-                    "须真补搜（phase 填「增量发现」）后重跑 finalize（运行目录未被重命名）",
+                    "须实际补搜（phase 填「增量发现」）后重跑 finalize（运行目录未被重命名）",
                     "补搜后重跑 finalize", "model"),
     "ZERO_REASON_MISSING": ("零提取留痕缺失或与证据矛盾（{n} 条）：拒收必须逐条说明理由且"
                             "可核对——该收的补 record_sources，确不收的补录 zero_reason（重传同"
@@ -651,7 +651,7 @@ def coverage(store_path: Path, nodes: list[str]) -> list[dict]:
     """每节点 已收 vs 提取 的只读计数（missing = max(0, 提取-已收)）+ 体裁分布。
 
     missing 是粗略缺口信号（2026-09-02 评审）：提取数含去重前重复与跨节点
-    顺路发现，已收数是幂等去重后的入库数，两口径天然有差——小额 missing 不
+    附带发现，已收数是幂等去重后的入库数，两口径天然有差——小额 missing 不
     视为遗漏，接近一整批提取量才值得怀疑漏调 record_sources。
 
     types 为每节点体裁分布（2026-09-18 补，docs/07 §五.3）：薄弱判定的"体裁/

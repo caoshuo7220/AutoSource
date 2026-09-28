@@ -7,7 +7,7 @@
 
 产出六张表（有 transcript 才有后三张）：
   1. 漏斗指标——各阶段搜索/提取/零提取，每节点分布，manifest 声明与体裁
-  2. 零提取构成——词题(结果垃圾)/疑似漏收/已收重复/混合/理由已说明 五分类 + 样本 URL 与零提取理由
+  2. 零提取构成——查询词不匹配(结果垃圾)/疑似漏收/已收重复/混合/理由已说明 五分类 + 样本 URL 与零提取理由
   3. 交付物成色——验收单摘要、体裁/粒度/域名/URL 形态/官网/归因缺口/配额/同领域跨轮
   4. 模型身份——manifest 与 transcript 的 model 字段实录
   5. 上下文消耗——thinking/工具返回/工具参数占比、每搜成本、异常工具序列
@@ -18,7 +18,7 @@
 真相，须与产出数据三角验证。
 
 2026-09-21 修复与扩展：`验证通过` 一列在 09-16 前后从搜索日志移除（验证结果改
-走 store 的 knowledge 记录），原漏斗表据此崩溃、此后每轮跑不起来；manifest 也
+走 store 的 knowledge 记录），原漏斗表据此崩溃、此后每轮均无法运行；manifest 也
 只承载声明态、不再带 verified。核对结果改从运行验收单读，并新增「交付物成色」
 一节——近几轮实际复盘的关切（体裁映射、粒度、域名集中度、官网有效性、归因
 完整度、配额）此前只散落在一次性脚本里。
@@ -132,7 +132,7 @@ def section_metrics(run_dir: Path, w):
 
 
 def section_zero_split(run_dir: Path, w):
-    """2. 零提取构成：词题/疑似漏收/已收/混合/理由已说明。"""
+    """2. 零提取构成：查询词不匹配/疑似漏收/已收/混合/理由已说明。"""
     w("=" * 24, "零提取构成")
     base = run_dir / "intermediate"
     traces = sorted(glob.glob(str(base / "*溯源.csv")))
@@ -168,7 +168,7 @@ def section_zero_split(run_dir: Path, w):
         if dup == len(doms):
             cat = "已收(拒收合理)"
         elif g == len(doms):
-            cat = "词题(结果垃圾)"
+            cat = "查询词不匹配(结果垃圾)"
         elif g > 0:
             cat = "混合"
         elif any(k in reason_of.get((ph, node, q), "") for k in REASON_EXPLAINED):
@@ -182,7 +182,7 @@ def section_zero_split(run_dir: Path, w):
     if not n:
         w("  无零提取增量搜索")
         return
-    for cat in ["疑似漏收", "理由已说明(拒收合理)", "词题(结果垃圾)", "已收(拒收合理)", "混合"]:
+    for cat in ["疑似漏收", "理由已说明(拒收合理)", "查询词不匹配(结果垃圾)", "已收(拒收合理)", "混合"]:
         if cats[cat]:
             w(f"  {cat}: {cats[cat]} ({cats[cat] * 100 // n}%)")
     w("  注：'疑似漏收'为启发式（域名不在清单、非垃圾域，且零提取理由未点名不可收原因），"
@@ -197,7 +197,7 @@ def section_zero_split(run_dir: Path, w):
 
 
 def _parts(url: str) -> tuple[str, str, str]:
-    """(host, path, query)——无协议写法照认（结果的结构化链接带协议、摘要散文常不带）。"""
+    """(host, path, query)——无协议写法同样识别（结果的结构化链接带协议、摘要散文常不带）。"""
     p = urlparse(url if "://" in url else "http://" + url)
     return p.netloc.lower(), p.path, p.query
 
@@ -282,7 +282,7 @@ def section_delivery(run_dir: Path, w):
     doms = Counter(_parts(r[fi["访问地址"]])[0] for r in body)
     big = sum(c for h, c in doms.items() if c >= 5)
     w(f"  唯一域名 {len(doms)}（只出现 1 次 {sum(1 for c in doms.values() if c == 1)}）"
-      f" | ≥5 条站点 {big} 条（{big * 100 // max(1, n)}%）")
+      f" | ≥5 条的站点合计 {big} 条（{big * 100 // max(1, n)}%）")
     w("  top 域名 " + " ".join(f"{h}:{c}" for h, c in doms.most_common(8)))
     pdf = sum(1 for r in body if _parts(r[fi["访问地址"]])[1].lower().endswith(".pdf"))
     deep = sum(1 for r in body if _parts(r[fi["访问地址"]])[1].strip("/").count("/") >= 3)

@@ -65,7 +65,7 @@ def test_source_type_vocabulary_in_tool_description_matches_store():
 
     描述里那份是**静态字面**（会与真源漂开），故用本断言钉住——加第 14 类词时
     漏改描述即红。放在 record_* 返回体里的事后告知（type_options）同日已撤：
-    它的作用半径在第一批之后，补不到洞（见 docs/02 当日条目）。
+    其作用范围始于第一批写库之后，覆盖不到该缺口（见 docs/02 当日条目）。
     """
     import store
     assert "/".join(store.SOURCE_TYPES) in ms.record_sources.__doc__
@@ -101,7 +101,7 @@ class TestSelfCheck:
         assert any(p["code"] == "project_root" for p in problems)
 
     def test_unhealthy_assembly_fails_first_tool_call(self, tmp_path, monkeypatch):
-        """装配层故障时首次工具调用即报错（而不是烧掉几十次搜索后在落库时爆）。"""
+        """装配层故障时首次工具调用即报错（而不是消耗数十次搜索后到落库阶段才失败）。"""
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-selftest-unhealthy")
         run_dir = tmp_path / "run_x"
         run_dir.mkdir()

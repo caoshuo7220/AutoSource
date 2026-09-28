@@ -50,7 +50,7 @@ def self_check(run_dir: str | Path | None = None) -> list[dict]:
 
     code 是契约（调用方按 code 过滤，不按文案）：project_root / session_id /
     evidence_missing。2026-08-31 首轮实测教训：PROJECT_ROOT off-by-one 使 store 与
-    证据留痕全部错位，18 条落库被拒才暴露，且运行模型被 deny 挡住无法看盘、只能
+    证据留痕全部错位，18 条落库被拒才暴露，且运行模型被 deny 规则挡住、无法查看运行输出、只能
     推测"hook 未生效"。自检把装配层故障提前到首次工具调用，点名报错：
     ① 项目根锚定错误；② hook 进程依赖的会话 ID 环境变量缺失（hook 靠它按
     .session_id 标记定位运行目录）；③（传入 run_dir 时）证据文件缺失——
@@ -110,7 +110,7 @@ def record_sources(run_dir: str, entries: list) -> str:
 
     何时调用：每完成一批搜索并提取新条目后调用一次——阶段 4 每节点基底 16 次
     搜索完成后一批、扩充 4 次完成后再落一次；阶段 5 每节点收敛后一批；阶段 3 的
-    清单核对结果走 record_knowledge，但两次验证搜索命中的顺路新源走本工具。
+    清单核对结果走 record_knowledge，但两次验证搜索命中的附带新源走本工具。
     条目字段：name/category_path/source_type/
     granularity/url/description/reason，URL 必须逐字照抄搜索结果（脚本逐条
     比对证据留痕，不在则当场拒绝并返回原因，可立即修正重传）。
@@ -123,8 +123,7 @@ def record_sources(run_dir: str, entries: list) -> str:
     返回 JSON：{"accepted": 入库数, "skipped": 裸 URL 精确重复跳过数,
     "rejected": [{index, name, url, reason}], "unmapped": [表外原始体裁词]}——
     单条被拒不阻断批次；unmapped 列出 source_type 落「其他」的原始词——该词已随条目
-    入库（原词留痕在 source_type_raw，信息零丢失），不必重录；后续批次换用更朴素的
-    形态词即可。
+    入库（原词留痕在 source_type_raw，信息零丢失），不必重录；后续批次改用这 13 个标准词中更贴合该条内容的一个即可。
     """
     _ensure_healthy(run_dir)
     d = _resolve(run_dir)
@@ -182,7 +181,7 @@ def coverage(run_dir: str) -> str:
     """查每节点"已收 vs 提取"的缺口与体裁分布（只读，不改数据）。
 
     何时调用：阶段 5 扩量判断与收尾前自查。missing 是粗略缺口信号（提取数含
-    去重前与跨节点顺路发现、已收数是幂等去重后的入库数，两口径天然有差），
+    去重前与跨节点附带发现、已收数是幂等去重后的入库数，两口径天然有差），
     小额 missing 不触发补搜；接近该节点一整批提取量才怀疑漏调 record_sources。
 
     返回 [{node, recorded, extracted, missing, types, pending}]（missing = max(0, 提取-已收)；

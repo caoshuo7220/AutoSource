@@ -369,7 +369,7 @@ class TestEvidenceScope:
 
         回显字段故意保留：真实留痕里 tool_response.query 与 tool_input.query 逐字
         相同（实测 5,411/5,411 行），所以本条同时钉住"只收窄到 tool_response"的
-        半吊子修法——那一层带着回显，挡不住这个 URL。
+        未收窄彻底的修法（该层带查询词回显，挡不住这个 URL）。
         """
         url = "https://example.org/invented"
         payload = {"tool_name": "WebSearch",
@@ -462,7 +462,7 @@ class TestMultilangAudit:
     def test_multilang_audit_removed(self, tmp_path):
         """2026-09-01 回归断言：多语言审计已下线——两轮实测全为假阳性
         （分组键忽略 query 参数，同端点不同资源被误判为多语言重复），
-        真多语言重复零发生；无消费者 + 假信号会误导触发，修不如删。
+        真多语言重复零发生；无消费方，假阳性信号会误导触发，删除优于修复。
         stdout 不再报告该指标，summary 不再携带相关键。"""
         data = base_data()
         data["sources"] = [
@@ -2455,7 +2455,7 @@ class TestQuotaCheck(_FoldCheckBase):
         assert run_dir.exists()
 
     def test_partially_unevidenced_shortfall_blocks(self, tmp_path):
-        """19 行有留痕 + 1 行编造 = 不达标——编造的行不能顶配额（边界）。"""
+        """19 行有留痕 + 1 行编造 = 不达标——编造的行不计入配额（边界）。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N - 1, zero_reason="已收") + \
@@ -2551,7 +2551,7 @@ class TestZeroReasonCheck(_FoldCheckBase):
         assert run_dir.exists()
 
     def test_verification_search_zero_extraction_exempt(self, tmp_path):
-        """验证搜索的 extracted 只记顺路新源——零提取是合法结果，不需要理由。"""
+        """验证搜索的 extracted 只记附带新源——零提取是合法结果，不需要理由。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
@@ -2646,7 +2646,7 @@ class TestZeroReasonContradiction(_FoldCheckBase):
         assert "零提取审计" in summary_text(summary)
 
     def test_zero_reason_contradiction_not_flagged_when_clean(self, tmp_path):
-        """理由与域名证据一致（无矛盾）时 violations 为空——校验 2/3 不误报，只报通道也不报。"""
+        """理由与域名证据一致（无矛盾）时 violations 为空——校验 2/3 不误报，仅报告通道时也不拦截。"""
         run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
@@ -2823,7 +2823,7 @@ class TestRunAttestation(_FoldCheckBase):
 
 
 class TestReverseGap(_FoldCheckBase):
-    """docs/07 §六：收尾反向差额（留痕 → 日志）——把漏记账的搜索摆上桌。
+    """docs/07 §六：收尾反向差额（留痕 → 日志）——把漏记账的搜索纳入收尾输出。
 
     只报告不拦截：差额里的查询词归属不到节点/阶段，补录无从下手；"有害漏记"
     （真搜了但日志不足 20 条）已由第一项校验拦截。会话级共享留痕按日志切片、
