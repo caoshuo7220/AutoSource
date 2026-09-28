@@ -7,8 +7,8 @@ import csv
 import json
 from pathlib import Path
 
-from evidence import (find_bounded, line_query, result_urls, strip_bold,
-                      strip_citation_anchors)
+from evidence import (find_bounded, line_query, line_response, result_urls,
+                      strip_bold, strip_citation_anchors)
 
 LINEAGE_CSV_HEADER = ["阶段", "分类节点", "查询词", "返回结果数", "结果URL", "是否收录",
                       "收录条目名称", "收录理由", "备注"]
@@ -42,7 +42,9 @@ def first_query_by_source(kept: list[dict], sliced_evidence: str) -> dict[str, s
                 result[stripped] = query
         pending = wanted - result.keys()
         if pending:
-            clean = strip_bold(line)      # 每行归一一次（逐候选重复剥是收尾的主要开销）
+            # 证据只看工具返回的内容（2026-09-28，与校验同口径）：整行原文含查询词，
+            # 拿它兜底会把"模型自己写进查询词的 URL"归因成本次搜索发现的
+            clean = strip_bold(line_response(payload))
             for stripped in pending:
                 if (find_bounded(originals[stripped], clean)
                         or find_bounded(stripped, clean)):
@@ -83,16 +85,19 @@ def build_lineage(kept: list[dict], sliced_evidence: str,
             if name:
                 covered.add(stripped)
     # 回退：收录了但不在任何结构化结果数组中的 URL（仅出现在摘要文本）
-    lines = [(line, strip_bold(line)) for line in sliced_evidence.splitlines()]
+    # 匹配范围同校验口径（2026-09-28）：只取工具返回的内容，不拿查询词兜底
+    lines = []
+    for line in sliced_evidence.splitlines():
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        lines.append((payload, strip_bold(line_response(payload))))
     for stripped, (name, reason) in collected.items():
         if stripped in covered:
             continue
-        for line, clean in lines:
+        for payload, clean in lines:
             if not find_bounded(stripped, clean):
-                continue
-            try:
-                payload = json.loads(line)
-            except ValueError:
                 continue
             query = line_query(payload)
             phase, node, results_count = journal_map.get(query, ("", "", ""))

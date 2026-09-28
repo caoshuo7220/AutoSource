@@ -53,6 +53,20 @@ def write_evidence(tmp_path: Path, sources: list[dict]) -> Path:
     return p
 
 
+def trace(response) -> str:
+    """把一次搜索的返回包成完整留痕行（证据只认 tool_response.results，2026-09-28）。
+
+    response 传 results 的**元素**或元素列表：结构化链接 `{"url": …}`（真实留痕里
+    还带 `content`）或摘要正文（字符串），两者在真实留痕中是同一个列表的两种形态。
+    查询词按真实回显一并写入 `tool_response.query`——校验不得把它当证据。
+    """
+    if not isinstance(response, list):
+        response = [response]
+    return json.dumps({"tool_name": "WebSearch", "tool_input": {"query": "q"},
+                       "tool_response": {"query": "q", "results": response}},
+                      ensure_ascii=False)
+
+
 def write_evidence_queries(tmp_path: Path, queries: list[str],
                            sources: list[dict] | None = None) -> Path:
     """构造证据留痕：按实际查询词生成模拟 WebSearch 原始结果（供 journal 校验用）。
@@ -216,13 +230,13 @@ class TestSanitizeDomain:
 class TestCheckGrounded:
     def test_url_in_evidence_kept(self):
         sources = [{"url": "https://a.com/doc"}]
-        kept, rejected = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
+        kept, rejected = check_grounded(sources, trace({"url": "https://a.com/doc"}))
         assert len(kept) == 1
         assert len(rejected) == 0
 
     def test_url_not_in_evidence_rejected(self):
         sources = [{"url": "https://a.com/doc"}, {"url": "https://fake.com/x"}]
-        kept, rejected = check_grounded(sources, '{"results":[{"url":"https://a.com/doc"}]}')
+        kept, rejected = check_grounded(sources, trace({"url": "https://a.com/doc"}))
         assert len(kept) == 1
         assert len(rejected) == 1
 
@@ -230,7 +244,7 @@ class TestCheckGrounded:
         # 证据里完全不存在的 URL（编造域名）必然被拒
         sources = [{"url": "https://fabricated.example/x"}]
         kept, rejected = check_grounded(
-            sources, '{"results":[{"url":"https://x.com/support/faq/2817"}]}')
+            sources, trace({"url": "https://x.com/support/faq/2817"}))
         assert kept == []
         assert len(rejected) == 1
 
@@ -239,20 +253,20 @@ class TestCheckGroundedBoundaries:
     """边界匹配:候选 URL 必须是留痕中的完整 URL,截短为父路径/裸域名不放行。"""
 
     def test_exact_url_in_json_evidence_kept(self):
-        evidence = '{"results":[{"url":"https://a.com/doc"}]}'
+        evidence = trace({"url": "https://a.com/doc"})
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
         assert len(kept) == 1
         assert rejected == []
 
     def test_path_prefix_truncation_rejected(self):
         # 留痕是深链,候选截短为父路径 → 拒绝(旧子串匹配会放行)
-        evidence = '{"results":[{"url":"https://a.com/doc/123"}]}'
+        evidence = trace({"url": "https://a.com/doc/123"})
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
         assert kept == []
         assert len(rejected) == 1
 
     def test_bare_domain_truncation_rejected(self):
-        evidence = '{"results":[{"url":"https://a.com/news/123"}]}'
+        evidence = trace({"url": "https://a.com/news/123"})
         kept, rejected = check_grounded([{"url": "https://a.com"}], evidence)
         assert kept == []
         assert len(rejected) == 1
@@ -264,27 +278,27 @@ class TestCheckGroundedBoundaries:
         内，加粗记号让边界匹配失败；该轮摘要只写了 `**www.idc.com**`，链接块里
         只有带跟踪参数的子页——两条路都堵死，官网入口收不进来。
         """
-        evidence = "根据搜索结果，IDC 的官方网站是 **www.idc.com**。"
+        evidence = trace("根据搜索结果，IDC 的官方网站是 **www.idc.com**。")
         kept, rejected = check_grounded([{"url": "www.idc.com"}], evidence)
         assert len(kept) == 1
         assert rejected == []
 
     def test_markdown_bold_does_not_weaken_truncation_guard(self):
         """剥加粗记号不放松截短保护——父路径仍拒。"""
-        evidence = "入口 **https://a.com/doc/123** 见上"
+        evidence = trace("入口 **https://a.com/doc/123** 见上")
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
         assert kept == []
         assert len(rejected) == 1
 
     def test_extension_prefix_truncation_rejected(self):
         # 截短到扩展名前(doc vs doc.html)同样拒绝
-        evidence = '{"results":[{"url":"https://a.com/manual.pdf"}]}'
+        evidence = trace({"url": "https://a.com/manual.pdf"})
         kept, rejected = check_grounded([{"url": "https://a.com/manual"}], evidence)
         assert kept == []
         assert len(rejected) == 1
 
     def test_full_url_in_free_text_kept(self):
-        evidence = "see https://a.com/doc for details"
+        evidence = trace("see https://a.com/doc for details")
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}], evidence)
         assert len(kept) == 1
         assert rejected == []
@@ -301,10 +315,10 @@ class TestCheckGroundedBoundaries:
         通过，故不做——候选写短了本就该拒。
         """
         kept, _ = check_grounded([{"url": "https://www.example.com/"}],
-                                 "官网是 www.example.com。")
+                                 trace("官网是 www.example.com。"))
         assert len(kept) == 1
         kept, _ = check_grounded([{"url": "https://www.example.com/"}],
-                                 "见面页：www.example.com")
+                                 trace("见面页：www.example.com"))
         assert len(kept) == 1
 
     def test_form_variants_do_not_weaken_truncation_guard(self):
@@ -313,32 +327,76 @@ class TestCheckGroundedBoundaries:
         归一化只动 scheme 与尾斜杠，路径、主机、query 一个字符不动。
         """
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}],
-                                        '{"url":"https://a.com/doc/1"}')
+                                        trace({"url": "https://a.com/doc/1"}))
         assert kept == [] and len(rejected) == 1
         kept, rejected = check_grounded([{"url": "https://a.com/doc"}],
-                                        '{"url":"https://a.com/doc?dgcid=1"}')
+                                        trace({"url": "https://a.com/doc?dgcid=1"}))
         assert kept == [] and len(rejected) == 1
 
     def test_numeric_fragment_truncation_kept(self):
         # 截短到纯数字引用锚点之前不再拒绝（2026-08-27 交换机 274 轮 10 条实证）
-        evidence = '{"results":[{"url":"https://a.com/doc.pdf#2#1"}]}'
+        evidence = trace({"url": "https://a.com/doc.pdf#2#1"})
         kept, rejected = check_grounded([{"url": "https://a.com/doc.pdf"}], evidence)
         assert len(kept) == 1
         assert rejected == []
 
     def test_word_fragment_truncation_kept(self):
         # 截短到文字片段之前（#top）不再拒绝——片段不改变资源主体
-        evidence = '{"results":[{"url":"https://a.com/page#top"}]}'
+        evidence = trace({"url": "https://a.com/page#top"})
         kept, rejected = check_grounded([{"url": "https://a.com/page"}], evidence)
         assert len(kept) == 1
         assert rejected == []
 
     def test_query_truncation_rejected(self):
         # 去 query 参数仍拒绝（?page=2 会改变内容）
-        evidence = '{"results":[{"url":"https://a.com/list?page=2"}]}'
+        evidence = trace({"url": "https://a.com/list?page=2"})
         kept, rejected = check_grounded([{"url": "https://a.com/list"}], evidence)
         assert kept == []
         assert len(rejected) == 1
+
+
+class TestEvidenceScope:
+    """证据范围 = 工具返回的内容（2026-09-28）：查询词不算证据。
+
+    此前校验在**整行留痕**里找 URL——"我把这个网址拿去搜了"被当成"搜索结果返回了
+    这个网址"（复现：results 为空、URL 只在 query 里，仍判通过），血缘的文本兜底
+    还会把它归因给这次搜索。收窄到 tool_response.results 后两部分返回内容仍在
+    （结构化链接与摘要正文同在该列表里），而查询词进不来。
+    """
+
+    def test_url_only_in_query_rejected(self):
+        """查询词含 URL、返回为空 → 必须被拒。反向的"我问过≠搜到过"。
+
+        回显字段故意保留：真实留痕里 tool_response.query 与 tool_input.query 逐字
+        相同（实测 5,411/5,411 行），所以本条同时钉住"只收窄到 tool_response"的
+        半吊子修法——那一层带着回显，挡不住这个 URL。
+        """
+        url = "https://example.org/invented"
+        payload = {"tool_name": "WebSearch",
+                   "tool_input": {"query": url},
+                   "tool_response": {"query": url, "results": []}}
+        kept, rejected = check_grounded([{"url": url}],
+                                        json.dumps(payload, ensure_ascii=False))
+        assert kept == []
+        assert len(rejected) == 1
+
+    def test_url_in_summary_text_kept(self):
+        """摘要正文（results 的字符串元素）是合法证据 → 通过。"""
+        kept, rejected = check_grounded(
+            [{"url": "https://a.com/doc"}],
+            trace("根据搜索结果，官方文档是 https://a.com/doc 。"))
+        assert len(kept) == 1
+        assert rejected == []
+
+    def test_url_in_result_title_kept(self):
+        """结果标题（results[].content[].title）是合法证据 → 通过。"""
+        kept, rejected = check_grounded(
+            [{"url": "https://a.com/doc"}],
+            trace({"tool_use_id": "t",
+                   "content": [{"title": "见 https://a.com/doc 说明",
+                                "url": "https://a.com/other"}]}))
+        assert len(kept) == 1
+        assert rejected == []
 
 
 class TestStripCitationAnchors:
@@ -1292,7 +1350,7 @@ class TestLineage:
             f.write(json.dumps(
                 {"tool_name": "WebSearch", "tool_input": {"query": "q1"},
                  "tool_response": {"query": "q1",
-                                   "summary": "see https://x.com/deep for more"}},
+                                   "results": ["see https://x.com/deep for more"]}},
                 ensure_ascii=False) + "\n")
         summary = run_pipeline(str(raw), out_dir=str(tmp_path / "out"), now=FIXED_NOW,
                       evidence_log=str(p))
@@ -2330,6 +2388,18 @@ class _FoldCheckBase:
         return [self._search_row(node=node, query=f"{base}{i}", **kw)
                 for i in range(n)]
 
+    def _qmap(self, rows, **extra) -> dict:
+        """证据里的 查询词 → 结果 URL 映射：先覆盖 store 记过账的每一次搜索，
+        再叠加本测试自己配的映射（extra 优先。
+
+        2026-09-28 起配额只数**有留痕的**行——真实运行里"记了账的搜索"必然在留痕里
+        （hook 在工具返回后落盘），夹具照此对齐：想让某次搜索没有留痕，就别让它进 rows。
+        """
+        m = {str(r.get("query")): [] for r in rows
+             if isinstance(r, dict) and r.get("type") == "search" and r.get("query")}
+        m.update(extra)
+        return m
+
     def _fold(self, tmp_path, run_dir, store_rows, query_urls, evidence_sources=()):
         """组装一次 fold 调用：manifest + store + 证据（查询词各配结果 URL）。"""
         self._manifest(run_dir)
@@ -2348,7 +2418,7 @@ class TestQuotaCheck(_FoldCheckBase):
             self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
             self._searches("图形渲染GPU", 8, base="g", zero_reason="垃圾域")
         with pytest.raises(ValueError, match="增量搜索未达标") as ei:
-            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+            self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert "图形渲染GPU 8 次（缺 12）" in str(ei.value)
         assert "phase 填「增量发现」" in str(ei.value)  # 2026-09-17：补搜填哪个 phase 由报错承担（115926 实证整轮返工）
         assert run_dir.exists() and run_dir.name.startswith("run_")
@@ -2358,7 +2428,7 @@ class TestQuotaCheck(_FoldCheckBase):
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
-        summary = self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        summary = self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert not run_dir.exists()  # 正常重命名收尾
         assert summary["zero_audit"]["total"] == QUOTA_N * 2
 
@@ -2368,8 +2438,32 @@ class TestQuotaCheck(_FoldCheckBase):
             self._searches("AI训练GPU", QUOTA_N - 2, zero_reason="垃圾域") + \
             self._searches("AI训练GPU", 4, base="x", phase="扩量轮", zero_reason="垃圾域")
         with pytest.raises(ValueError, match="AI训练GPU 18 次（缺 2）"):
-            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+            self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert run_dir.exists()
+
+    def test_unevidenced_rows_do_not_count(self, tmp_path):
+        """配额只数**有留痕的**行（2026-09-28）：20 行日志一次都没执行 → 拒绝收尾。
+
+        此前按日志行计数，模型写 20 行未执行的日志即可通过（复现：编造行 → 收尾放行、
+        验收单如实记 20），配额于是只是"记账约束"而非已证实的搜索次数。
+        """
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + self._searches("AI训练GPU", QUOTA_N, extracted=1)
+        with pytest.raises(ValueError, match="AI训练GPU 0 次（缺 20）") as ei:
+            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        assert "无留痕的日志行 20 条" in str(ei.value)
+        assert run_dir.exists()
+
+    def test_partially_unevidenced_shortfall_blocks(self, tmp_path):
+        """19 行有留痕 + 1 行编造 = 不达标——编造的行不能顶配额（边界）。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N - 1, zero_reason="已收") + \
+            [self._search_row(query="编造的查询词", zero_reason="已收")]
+        qmap = {f"q{i}": [] for i in range(QUOTA_N - 1)}   # 故意不含编造的那条
+        with pytest.raises(ValueError, match="AI训练GPU 19 次（缺 1）") as ei:
+            self._fold(tmp_path, run_dir, rows, qmap, evidence_sources=rows[:1])
+        assert "无留痕的日志行 1 条" in str(ei.value)
 
     def test_verification_only_run_not_quota_checked(self, tmp_path):
         """纯清单验证运行（零增量行）：与防截断校验豁免口径一致，不拦。"""
@@ -2452,7 +2546,7 @@ class TestZeroReasonCheck(_FoldCheckBase):
             [self._search_row(query="q19", extracted=0)] + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         with pytest.raises(ValueError, match="零提取留痕缺失或与证据矛盾") as ei:
-            self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+            self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert "q19" in str(ei.value)
         assert run_dir.exists()
 
@@ -2463,7 +2557,7 @@ class TestZeroReasonCheck(_FoldCheckBase):
             self._searches("AI训练GPU", QUOTA_N, zero_reason="垃圾域") + \
             [self._search_row(phase="验证搜索", query="K1 官网", extracted=0)] + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
-        self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert not run_dir.exists()
 
     def test_positive_extraction_needs_no_reason(self, tmp_path):
@@ -2471,7 +2565,7 @@ class TestZeroReasonCheck(_FoldCheckBase):
         rows = [self._source_row()] + \
             self._searches("AI训练GPU", QUOTA_N, extracted=1) + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", extracted=1)
-        self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert not run_dir.exists()
 
     def test_duplicate_row_latest_wins(self, tmp_path):
@@ -2482,7 +2576,7 @@ class TestZeroReasonCheck(_FoldCheckBase):
             [self._search_row(query="q19", extracted=0),          # 缺理由
              self._search_row(query="q19", extracted=0, zero_reason="无主题边界")] + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
-        summary = self._fold(tmp_path, run_dir, rows, {}, evidence_sources=rows[:1])
+        summary = self._fold(tmp_path, run_dir, rows, self._qmap(rows), evidence_sources=rows[:1])
         assert not run_dir.exists()
         assert summary["journal_count"] == QUOTA_N * 2  # 20+20，重复行合并为一条
         journal_csv = next((Path(summary["outdir"]) / "intermediate").glob("*搜索日志.csv"))
@@ -2511,7 +2605,7 @@ class TestZeroReasonContradiction(_FoldCheckBase):
             self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": [f"https://example.org/r{i}"] for i in range(QUOTA_N)}
-        summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        summary = self._fold(tmp_path, run_dir, rows, self._qmap(rows, **query_urls), evidence_sources=rows[:1])
         assert not run_dir.exists()  # 不拦截：正常收尾
         assert len(summary["zero_audit"]["claimed_collected"]) == QUOTA_N
         assert "已收/重复" in summary_text(summary)
@@ -2523,7 +2617,7 @@ class TestZeroReasonContradiction(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": [f"https://www.cisco.com/doc{i}"] for i in range(QUOTA_N)}
         with pytest.raises(ValueError, match="理由声称垃圾域"):
-            self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+            self._fold(tmp_path, run_dir, rows, self._qmap(rows, **query_urls), evidence_sources=rows[:1])
         assert run_dir.exists()
 
     def test_violation_message_carries_original_phase(self, tmp_path):
@@ -2536,7 +2630,7 @@ class TestZeroReasonContradiction(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": [f"https://www.cisco.com/doc{i}"] for i in range(QUOTA_N)}
         with pytest.raises(ValueError, match="理由声称垃圾域") as ei:
-            self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+            self._fold(tmp_path, run_dir, rows, self._qmap(rows, **query_urls), evidence_sources=rows[:1])
         assert "重传用 phase='增量发现'" in str(ei.value)
 
     def test_consistent_reasons_pass_and_audit_reported(self, tmp_path):
@@ -2546,7 +2640,7 @@ class TestZeroReasonContradiction(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
         query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
-        summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        summary = self._fold(tmp_path, run_dir, rows, self._qmap(rows, **query_urls), evidence_sources=rows[:1])
         assert not run_dir.exists()
         from postprocess import summary_text
         assert "零提取审计" in summary_text(summary)
@@ -2559,7 +2653,7 @@ class TestZeroReasonContradiction(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
         query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
-        summary = self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        summary = self._fold(tmp_path, run_dir, rows, self._qmap(rows, **query_urls), evidence_sources=rows[:1])
         assert summary["zero_audit"]["violations"] == []
         assert summary["zero_audit"]["claimed_collected"] == []
 
@@ -2576,7 +2670,7 @@ class TestGarbageFilter(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", extracted=1)
         self._manifest(run_dir)
         self._write_store(run_dir, rows)
-        evidence = write_evidence_map(tmp_path, {},
+        evidence = write_evidence_map(tmp_path, self._qmap(rows),
                                       [{"url": "https://a.com/doc", "name": "A"}])
         summary = fold(str(run_dir), evidence_log=str(evidence),
                        out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
@@ -2594,7 +2688,7 @@ class TestGarbageFilter(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", extracted=1)
         self._manifest(run_dir)
         self._write_store(run_dir, rows)
-        evidence = write_evidence_map(tmp_path, {})
+        evidence = write_evidence_map(tmp_path, self._qmap(rows))
         summary = fold(str(run_dir), evidence_log=str(evidence),
                        out_dir=str(tmp_path / "outputs"), now=FIXED_NOW)
         assert summary["kept"] == 0
@@ -2611,7 +2705,8 @@ class TestRunAttestation(_FoldCheckBase):
             self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域")
         query_urls = {f"q{i}": ["https://a.com/doc"] for i in range(QUOTA_N)}
         query_urls.update({f"g{i}": ["https://books.google.com/x"] for i in range(QUOTA_N)})
-        return self._fold(tmp_path, run_dir, rows, query_urls, evidence_sources=rows[:1])
+        return self._fold(tmp_path, run_dir, rows,
+                          self._qmap(rows, **query_urls), evidence_sources=rows[:1])
 
     def test_attestation_written_with_facts(self, tmp_path):
         summary = self._fold_clean(tmp_path)
@@ -2649,6 +2744,23 @@ class TestRunAttestation(_FoldCheckBase):
         data = json.loads((outdir / f"{outdir.name}_运行验收单.json")
                           .read_text(encoding="utf-8"))
         assert data["sources"]["unmapped_types"] == summary["unmapped_types"]
+
+    def test_attestation_counts_unevidenced_rows(self, tmp_path):
+        """验收单并排两个数（2026-09-28）：per_node = 记账支出，unevidenced = 其中无据的。"""
+        run_dir = Path(prepare_run_dir(tmp_path / "outputs", now=FIXED_NOW))
+        rows = [self._source_row()] + \
+            self._searches("AI训练GPU", QUOTA_N, zero_reason="已收") + \
+            self._searches("图形渲染GPU", QUOTA_N, base="g", zero_reason="垃圾域") + \
+            [self._search_row(query="编造的查询词", zero_reason="已收")]
+        qmap = {f"q{i}": [] for i in range(QUOTA_N)}
+        qmap.update({f"g{i}": [] for i in range(QUOTA_N)})
+        summary = self._fold(tmp_path, run_dir, rows, qmap, evidence_sources=rows[:1])
+        outdir = Path(summary["outdir"])
+        data = json.loads((outdir / f"{outdir.name}_运行验收单.json")
+                          .read_text(encoding="utf-8"))
+        assert data["quota"]["per_node"] == {"AI训练GPU": QUOTA_N + 1,
+                                             "图形渲染GPU": QUOTA_N}
+        assert data["quota"]["unevidenced"] == 1   # 21 条记账里有 1 条无留痕
 
     def test_reject_events_aggregated_then_archived(self, tmp_path):
         """失败事件流（2026-09-23）：聚合进验收单，随后归档进 intermediate/。

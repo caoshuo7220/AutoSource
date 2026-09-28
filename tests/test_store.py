@@ -273,6 +273,23 @@ class TestRecordSources:
         assert result["rejected"][0]["index"] == 0
         assert not store.exists()
 
+    def test_query_only_url_rejected(self, tmp_path):
+        """入库即验同口径（2026-09-28）：URL 只出现在查询词里，不算搜到过。
+
+        此前校验在整行留痕里找 URL——模型把猜的 URL 写进查询词即可通过
+        （"我问过"被当成"搜到过"）；这条钉住入库这一侧不回归。
+        """
+        store = tmp_path / "store.jsonl"
+        url = "https://example.org/invented"
+        evidence = tmp_path / "search_log.jsonl"
+        evidence.write_text(json.dumps(
+            {"tool_name": "WebSearch", "tool_input": {"query": url},
+             "tool_response": {"query": url, "results": []}},
+            ensure_ascii=False) + "\n", encoding="utf-8")
+        result = record_sources(store, [source_entry(url=url)], evidence, NODES)
+        assert result["accepted"] == 0
+        assert "证据" in result["rejected"][0]["reason"]
+
     def test_missing_name_rejected(self, tmp_path):
         store = tmp_path / "store.jsonl"
         evidence = write_evidence(tmp_path, ["https://a.com/doc"])

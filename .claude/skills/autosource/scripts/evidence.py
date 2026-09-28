@@ -150,11 +150,15 @@ def nearest_forms(candidate: str, evidence: str, limit: int = 3) -> list[str]:
     供拒收消息定位差异（2026-09-17，运行 115926 实证：模型被"URL 不在证据留痕中"
     连拒后只能去读本模块源码才搞明白差在哪）：留痕里有同主机写法 → 抄错了，照抄
     即可；一条都没有 → 该 URL 未被搜到，不能凭记忆写。
+
+    与校验同口径（2026-09-28）：同样只看 tool_response.results —— 否则提示会把
+    查询词里的写法当成"留痕里有这种写法"，模型照着改仍然过不了。
     """
     host = re.sub(r"^https?://", "", candidate).split("/")[0].split(":")[0].lower()
     out: list[str] = []
     seen: set[str] = set()
-    for u in re.findall(r"https?://[^\s\"'<>\\]+", evidence.replace("**", "")):
+    for u in re.findall(r"https?://[^\s\"'<>\\]+",
+                        response_text(evidence).replace("**", "")):
         u = u.rstrip(".,);")
         if u in seen:
             continue
@@ -183,8 +187,11 @@ def check_grounded(sources: list[dict], evidence: str) -> tuple[list[dict], list
     次归一化影响**。
 
     判定经 find_bounded 与归因（lineage）共用——两处必须同一套规则。
+
+    证据边界（2026-09-28）：只认工具返回的内容——先把留痕逐行收窄成
+    tool_response.results（见 response_text），查询词不算证据。
     """
-    stripped_evidence = strip_bold(evidence)   # 整份留痕归一一次，逐候选重复剥是纯开销
+    stripped_evidence = strip_bold(response_text(evidence))   # 整份留痕收窄 + 归一，各一次
     kept: list[dict] = []
     rejected: list[dict] = []
     for s in sources:
@@ -259,6 +266,51 @@ def result_urls(payload: dict) -> list[str]:
                 if isinstance(entry, dict) and entry.get("url"):
                     urls.append(str(entry["url"]))
     return urls
+
+
+def line_response(payload: dict) -> str:
+    """单条留痕里「工具实际返回的内容」（已解析的载荷）——与 line_query 同款取法。
+
+    取 `tool_response.results` 而非整个 `tool_response`：后者带一个 `query` 字段，
+    是**查询词的回显**（2026-09-28 实测 5,411/5,411 行与 tool_input.query 逐字相同），
+    收到 tool_response 这一层挡不住"把 URL 写进查询词"。而两部分返回内容都在
+    results 子树里——结构化链接 `{tool_use_id, content:[{title,url}]}` 与
+    摘要正文（纯字符串元素）混存于同一个列表。拿不到返回内容的行给空串。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    response = payload.get("tool_response")
+    if not isinstance(response, dict):
+        return ""
+    results = response.get("results")
+    if not isinstance(results, (list, str)):
+        return ""
+    return json.dumps(results, ensure_ascii=False)
+
+
+def response_text(evidence: str) -> str:
+    """把整份留痕收窄成可作证据的文本：逐行取 tool_response.results。
+
+    证据边界（2026-09-28 修）：此前校验在**整行留痕**里找 URL，而查询词与候选同处
+    一份文本——模型把猜的 URL 写进查询词就能通过校验（实测复现：results 为空、
+    URL 仅在 query 里，仍判通过），血缘的文本兜底还会把它归因给这次搜索。
+    收窄后「我问过什么」不再算证据，只认「工具返回了什么」。
+
+    **凡把留痕当证据文本做匹配的地方都必须经过本函数**（check_grounded、
+    nearest_forms、lineage 的两处文本兜底）。反向的两处**不得**经过：slice_evidence
+    与 query_in_evidence 读的正是查询词本身，那是切片的键与待核对的查询词，不是证据。
+    损坏行、非对象行、无返回内容的行一律不贡献证据（fail-closed）。
+    """
+    out: list[str] = []
+    for line in evidence.splitlines():
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        text = line_response(payload)
+        if text:
+            out.append(text)
+    return "\n".join(out)
 
 
 def slice_evidence(evidence: str, queries: Optional[set[str]] = None) -> tuple[str, int, int]:

@@ -360,10 +360,10 @@ REJECTS = {
 }
 
 BLOCKS = {
-    "QUOTA_SHORT": ("节点增量搜索未达标（每节点应 ≥{n} 次）：{detail}"
-                    "——补搜并补录 record_search（phase 填「增量发现」）"
-                    "后重跑 finalize（运行目录未被重命名）",
-                    "补搜并补录 record_search 后重跑 finalize", "model"),
+    "QUOTA_SHORT": ("节点**有留痕的**增量搜索未达标（每节点应 ≥{n} 次）：{detail}"
+                    "——无留痕的日志行 {unevidenced} 条不计入，补录日志无效："
+                    "须真补搜（phase 填「增量发现」）后重跑 finalize（运行目录未被重命名）",
+                    "补搜后重跑 finalize", "model"),
     "ZERO_REASON_MISSING": ("零提取留痕缺失或与证据矛盾（{n} 条）：拒收必须逐条说明理由且"
                             "可核对——该收的补 record_sources，确不收的补录 zero_reason（重传同"
                             "phase+node+query 行，末次覆盖）后重跑 finalize。**phase 必须与被拒行逐字"

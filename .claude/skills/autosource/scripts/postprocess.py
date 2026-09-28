@@ -418,28 +418,44 @@ def _read_reject_events(run_dir) -> dict:
     return {"total": total, "by_code": by_code, "by_actor": by_actor}
 
 
-def _check_node_quota(journal: list, nodes: list[str], run_dir) -> None:
-    """校验 1：每节点增量发现搜索 ≥ MIN_INCREMENTAL_SEARCHES。
+def _check_node_quota(journal: list, nodes: list[str], run_dir,
+                      evidence_strings: set) -> None:
+    """校验 1：每节点**有留痕的**增量发现搜索 ≥ MIN_INCREMENTAL_SEARCHES。
+
+    只数能在留痕里找到查询词的行（2026-09-28）：此前按日志行计数，模型写 20 行
+    未执行的日志即可通过（复现：20 条编造行 → 收尾放行、验收单如实记 20），配额
+    于是只是"记账约束"而非已证实的搜索次数。判据与搜索日志「证据缺失」列同源
+    （同一集合、同一条成员判断）——"我把这次搜索记上了"不等于"这次搜索发生过"。
 
     仅对已启动增量发现的运行校验（存在增量行才检查）——纯清单验证运行
     （零增量行）与防截断校验的豁免口径一致；扩量轮不计入基底配额。
+    **判定必须看"有没有增量行"，不能看"有留痕的行数是否为 0"**：后者会让
+    "20 行全是编造"直接走进豁免分支。
     """
     counts = {n: 0 for n in nodes}
+    incremental = 0
+    unevidenced = 0
     for j in journal:
         if not isinstance(j, dict):
             continue
         if _phase_group(str(j.get("phase") or "")) != "增量":
             continue
         node = leaf_node(str(j.get("node") or ""), nodes)
-        if node:
+        if not node:
+            continue
+        incremental += 1
+        if str(j.get("query") or "") in evidence_strings:
             counts[node] += 1
-    if sum(counts.values()) == 0:
+        else:
+            unevidenced += 1
+    if incremental == 0:
         return
     short = [(n, counts[n]) for n in nodes if counts[n] < MIN_INCREMENTAL_SEARCHES]
     if short:
         _blocked(run_dir, "QUOTA_SHORT", n=MIN_INCREMENTAL_SEARCHES,
                  detail="；".join(f"{n} {c} 次（缺 {MIN_INCREMENTAL_SEARCHES - c}）"
-                                  for n, c in short))
+                                  for n, c in short),
+                 unevidenced=unevidenced)
 
 
 def _check_zero_reason_violations(audit: dict, run_dir) -> None:
@@ -582,6 +598,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     # 验证搜索行按定义就是实体查询、不参与分类
     in_framework = {"count": 0, "extracted": 0}
     out_framework = {"count": 0, "extracted": 0, "by_node": {}}
+    quota_unevidenced = 0      # 增量日志行里在留痕中找不到查询词的条数（配额只数有留痕的）
     for j in journal:
         if not isinstance(j, dict):
             journal_skipped += 1
@@ -592,6 +609,8 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
             journal_queries.add(query)
             journal_map.setdefault(query, (phase, str(j.get("node") or ""), j.get("results", "")))
         missing = "是" if (query and query not in evidence_strings) else "否"
+        if missing == "是" and _phase_group(phase) == "增量":
+            quota_unevidenced += 1
         if _phase_group(phase) in ("增量", "扩量"):
             try:
                 extracted = int(j.get("extracted") or 0)
@@ -648,7 +667,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
     kept_domains = {domain_of(str(s.get("url") or "")) for s in kept}
     zero_audit = _zero_extraction_audit(zero_search_rows, urls_by_query, kept_domains)
     if enforce_quotas:
-        _check_node_quota(journal, nodes, Path(raw_path).parent)
+        _check_node_quota(journal, nodes, Path(raw_path).parent, evidence_strings)
         _check_zero_reason_violations(zero_audit, Path(raw_path).parent)
 
     unverified = [
@@ -695,6 +714,7 @@ def run_pipeline(raw_path: str, out_dir: str = "outputs", keep_raw: bool = False
         "reject_events": _read_reject_events(Path(raw_path).parent),
         "granularity_missing": granularity_missing,
         "unmapped_types": unmapped_types,
+        "quota_unevidenced": quota_unevidenced,
         "journal_count": len(journal_rows),
         "journal_skipped": journal_skipped,
         "reverse_gap": reverse_gap,
@@ -832,7 +852,11 @@ def _build_run_attestation(summary: dict, journal: list, records: list, nodes: l
             "incomplete": _count(summary.get("incomplete")),
         },
         "zero_extraction": {"count": len(zero_rows), "rows": zero_rows},
-        "quota": {"required_per_node": MIN_INCREMENTAL_SEARCHES, "per_node": per_node},
+        "quota": {"required_per_node": MIN_INCREMENTAL_SEARCHES, "per_node": per_node,
+                  # 增量日志行里在检索留痕中找不到查询词的条数（2026-09-28）：配额只
+                  # 数有留痕的行，这个数=记账支出里无据的那部分。两个数并排，配额才
+                  # 能分清"记账了多少"与"其中多少有据"
+                  "unevidenced": _count(summary.get("quota_unevidenced"))},
         "journal": {"rows": _count(summary.get("journal_count")),
                     "skipped": _count(summary.get("journal_skipped"))},
         # 反向差额（docs/07 §六）：只报告不拦截——差额归属不到节点/阶段，
